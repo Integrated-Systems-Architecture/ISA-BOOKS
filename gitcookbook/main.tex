@@ -1,0 +1,50 @@
+% ===========================================================================
+%  Git & GitHub Cookbook -- A Quick Reference Manual
+%
+%  Build:   latexmk -pdf main.tex          (recommended)
+%  or:      pdflatex main && pdflatex main
+%
+%  One of the short, single-topic booklets under books/ (see also
+%  fusesoccookbook/). Shares its preamble with fusesoccookbook via
+%  ../_shared/preamble_lite/ -- see books/BUILD.md. Every chapter lives in
+%  its own folder under chapters/; `import' makes relative paths inside a
+%  chapter resolve against that chapter's folder.
+% ===========================================================================
+\documentclass[11pt,a4paper,twoside,openright]{book}
+
+\input{../_shared/preamble_lite/packages}
+\input{../_shared/preamble_lite/listings}
+\input{../_shared/preamble_lite/macros}
+
+\hypersetup{
+  pdftitle  = {Git \& GitHub Cookbook: A Quick Reference Manual},
+  pdfauthor = {Luigi Giuffrida},
+  pdfsubject= {Version control with Git and GitHub},
+  pdfkeywords = {Git, GitHub, version control},
+  colorlinks = true,
+  linkcolor  = codekey,
+  citecolor  = accent,
+  urlcolor   = accentalt,
+}
+
+\begin{document}
+
+\frontmatter
+\input{frontmatter/titlepage}
+
+\cleardoublepage
+\tableofcontents
+\cleardoublepage
+
+\mainmatter
+
+\subimport{chapters/01-basics/}{chapter.tex}
+\subimport{chapters/02-commands/}{chapter.tex}
+\subimport{chapters/03-github/}{chapter.tex}
+
+% ---------------------------------------------------------------------------
+\appendix
+% ---------------------------------------------------------------------------
+\subimport{backmatter/}{appendix-quickref.tex}
+
+\end{document}

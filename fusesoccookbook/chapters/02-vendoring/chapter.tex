@@ -1,0 +1,150 @@
+\chapter{Vendoring: Pulling In Other People's Cores}
+\label{ch:vendoring}
+
+\chapabstract{Where the code behind a \kw{depend} entry in a \file{.core}
+file actually comes from: a pinned, reproducible snapshot copied in by a
+small Python tool, not a git submodule.}
+
+\section{What ``vendoring'' means here}
+
+A \file{.core} file can declare \kw{depend: pulp-platform.org::obi}, but
+that only works once the files of that dependency actually exist somewhere
+\FuseSoC can find them. \textbf{Vendoring} is how they get there: a script
+fetches a pinned snapshot of an upstream repository and copies it, as plain
+files, into a \file{vendor/} directory inside the lab. No git submodule, no
+\file{.gitmodules}, and after the copy, no connection back to the upstream
+repository's own \file{.git} history at all.
+
+\begin{ruleofthumb}
+Vendoring answers ``where do these files come from and which exact version
+are they''. \FuseSoC's \kw{depend} answers ``which files does this target
+need''. The two are independent: \FuseSoC does not fetch anything, and the
+vendoring script does not know what a target is.
+\end{ruleofthumb}
+
+\begin{notebox}{Why not a submodule?}
+A submodule keeps the upstream's whole history and its own \file{.git},
+which a student clone does not need and a build tool should not have to
+walk. A vendored copy is just files: reproducible from the pinned
+\kw{rev}, easy to diff, and impossible to accidentally \code{git push}
+into.
+\end{notebox}
+
+\section{Anatomy of a .vendor.hjson}
+
+Every dependency the lab vendors has its own descriptor, ending in
+\file{.vendor.hjson}. Two real ones, at opposite ends of the size scale.
+
+\begin{corecode}[caption={lab1/vendor/pulp\_platform/common\_cells.vendor.hjson},label={lst:vendoring:common}]
+// Vendoring descriptor: pulp-platform common_cells.
+// Fetched by `make vendor` (python3 util/vendor.py <this file>).
+{
+  name: "common_cells",
+  target_dir: "common_cells",
+
+  upstream: {
+    url: "https://github.com/pulp-platform/common_cells.git",
+    rev: "v1.38.0",
+  },
+
+  exclude_from_upstream: [
+    "test",
+    "ci",
+    "formal",
+    ".github",
+  ]
+}
+\end{corecode}
+
+\begin{corecode}[caption={lab0/x-heep.vendor.hjson (the whole file)},label={lst:vendoring:xheep}]
+// Vendoring descriptor for X-HEEP.
+// `make vendor` runs: python3 util/vendor.py x-heep.vendor.hjson
+{
+  name: "x-heep",
+  target_dir: "x-heep",
+
+  upstream: {
+    url: "https://github.com/esl-epfl/x-heep.git",
+    rev: "main",
+  },
+}
+\end{corecode}
+
+The fields are the same regardless of size:
+
+\begin{itemize}
+  \item \kw{name}: a label for the descriptor itself, not a \FuseSoC core
+        name.
+  \item \kw{target\_dir}: where the snapshot lands, relative to
+        \file{vendor/} (or wherever the enclosing Makefile passes it).
+  \item \kw{upstream}: \kw{url} plus \kw{rev} -- a tag, branch, or commit
+        SHA. This is the whole reproducibility story: two people running
+        \code{make vendor} against the same descriptor get byte-identical
+        sources.
+  \item \kw{exclude\_from\_upstream} (optional): paths to drop from the
+        copy -- typically the upstream's own tests and CI, which the lab
+        does not need and does not want cluttering \file{vendor/}.
+\end{itemize}
+
+\begin{gotcha}{\code{rev: "main"} is a moving target}
+\Cref{lst:vendoring:xheep} pins to \code{main} on purpose while the lab is
+still being developed: it always vendors the latest X-HEEP. Once a lab is
+handed to students, \code{rev} should be pinned to a commit SHA -- otherwise
+two students running \code{make vendor} on different days can end up with
+different X-HEEP versions and different bugs.
+\end{gotcha}
+
+\section{What make vendor actually does}
+
+\begin{shcode}
+python3 util/vendor.py vendor/pulp_platform/common_cells.vendor.hjson
+\end{shcode}
+
+The script (\file{util/vendor.py}, itself vendored from OpenTitan and not
+something you need to read) does three things: fetches the repository at the
+pinned \kw{rev} into a temporary location, copies everything except
+\kw{exclude\_from\_upstream} into \kw{target\_dir}, and writes a
+\file{<name>.lock.hjson} next to the descriptor recording exactly what was
+fetched (the resolved commit, the date). The lock file is what you would
+diff to answer ``did this dependency change since last time''.
+
+A lab's Makefile runs this once per descriptor, over every
+\file{*.vendor.hjson} it finds:
+
+\begin{makecode}[caption={lab1/Makefile -- the vendor target}]
+VENDOR_HJSON := $(wildcard $(VENDOR)/*.vendor.hjson)
+
+.PHONY: vendor
+vendor:
+	@for f in $(VENDOR_HJSON); do \
+	  echo "$(PYTHON) util/vendor.py $$f"; \
+	  $(PYTHON) util/vendor.py $$f || exit 1; \
+	done
+\end{makecode}
+
+\section{Two vendoring patterns in these labs}
+
+Lab 1 vendors several small IPs individually, each with its own
+\file{.vendor.hjson} under \file{vendor/pulp\_platform/}, because
+\file{cordic\_accel.core} depends on each of them by name separately. Lab 0
+vendors one thing, X-HEEP itself, as a single large snapshot, because the
+whole lab is built on top of it rather than depending on named pieces of
+it. Neither is more correct: vendor at the granularity your \file{.core}
+files actually depend on.
+
+\section{Checklist}
+\label{sec:vendoring:checklist}
+
+\begin{itemize}
+  \item Vendoring copies pinned files in; it is not a submodule and keeps no
+        upstream history.
+  \item \kw{upstream.rev} is the whole reproducibility guarantee -- pin it
+        to a SHA or tag before handing a lab out.
+  \item \file{util/vendor.py <descriptor>.vendor.hjson} does the fetch;
+        \code{make vendor} just runs it over every descriptor it finds.
+  \item The generated \file{.lock.hjson} records what was actually fetched;
+        do not hand-edit it.
+  \item A vendored directory is regenerated by \code{make vendor}, so it is
+        normal for it to be absent from a fresh clone and for
+        \code{.gitignore} to exclude it.
+\end{itemize}

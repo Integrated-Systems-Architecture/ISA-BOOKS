@@ -1,0 +1,133 @@
+% ---------------------------------------------------------------------------
+% listings.tex -- source-code and terminal-session typesetting.
+% Same palette and mechanism as the SystemVerilog cookbook, trimmed to the
+% languages this booklet actually needs: shell sessions, Makefiles, plain
+% output, and the .core/.hjson descriptor files.
+% ---------------------------------------------------------------------------
+
+% --- the palette (identical to the SystemVerilog cookbook) -----------------
+\definecolor{codebg}      {HTML}{FAFAF7}
+\definecolor{codeframe}   {HTML}{D9D6CC}
+\definecolor{codekey}     {HTML}{0B5394}   % keywords / headings
+\definecolor{codekeyb}    {HTML}{7B1FA2}   % secondary keywords
+\definecolor{codecomment} {HTML}{5C7A5C}
+\definecolor{codestring}  {HTML}{A0522D}
+\definecolor{codenumber}  {HTML}{9A9A93}   % line numbers, muted text
+\definecolor{accent}      {HTML}{1B5E20}
+\definecolor{accentalt}   {HTML}{8B2500}
+\definecolor{warnbg}      {HTML}{FDF3F2}
+\definecolor{warnframe}   {HTML}{C0392B}
+\definecolor{tipbg}       {HTML}{F1F8F1}
+\definecolor{tipframe}    {HTML}{2E7D32}
+\definecolor{notebg}      {HTML}{F0F4FA}
+\definecolor{noteframe}   {HTML}{1F4E79}
+
+% ---------------------------------------------------------------------------
+% Base style shared by every language.
+% ---------------------------------------------------------------------------
+\lstdefinestyle{cookbookbase}{%
+  basicstyle      = \ttfamily\footnotesize,
+  keywordstyle    = \color{codekey}\bfseries,
+  keywordstyle    = [2]\color{codekeyb}\bfseries,
+  commentstyle    = \color{codecomment}\itshape,
+  stringstyle     = \color{codestring},
+  numberstyle     = \tiny\color{codenumber},
+  numbers         = none,
+  showstringspaces= false,
+  showspaces      = false,
+  showtabs        = false,
+  tabsize         = 2,
+  breaklines      = true,
+  breakatwhitespace = false,
+  breakindent     = 1em,
+  postbreak       = \mbox{\textcolor{codenumber}{$\hookrightarrow$}\space},
+  columns         = fullflexible,
+  keepspaces      = true,
+  upquote         = true,
+  frame           = leftline,
+  framerule       = 1.1pt,
+  rulecolor       = \color{codeframe},
+  framexleftmargin= 3pt,
+  xleftmargin     = 14pt,
+  aboveskip       = 1.1\medskipamount,
+  belowskip       = 1.1\medskipamount,
+  captionpos      = b,
+  escapeinside    = {(*@}{@*)},
+  moredelim       = **[is][\color{accentalt}\bfseries]{@@}{@@},
+  backgroundcolor = \color{codebg},
+}
+
+% Shell / make command-line sessions. `$' marks a prompt; comments start `#'.
+\lstdefinestyle{shstyle}{%
+  style=cookbookbase,
+  language=bash,
+  morekeywords={fusesoc,make},
+  keywordstyle=\color{codekey}\bfseries,
+}
+
+% Plain terminal output, file contents, logs.
+\lstdefinestyle{plainstyle}{%
+  style=cookbookbase,
+  language={},
+  keywordstyle=\color{black},
+}
+
+% Makefiles: targets, variables, the handful of GNU make directives used here.
+\lstdefinestyle{makestyle}{%
+  style=cookbookbase,
+  language=make,
+  backgroundcolor=\color{codebg},
+}
+
+% .core (FuseSoC, YAML-ish) and .hjson (vendoring descriptors) files. Neither
+% language is built into `listings'; a light generic style with `#' and `//'
+% comments recognised, plus the field names this booklet actually uses
+% highlighted as keywords, is enough to read at booklet length.
+\lstdefinestyle{corestyle}{%
+  style=cookbookbase,
+  language={},
+  keywordstyle=\color{codekey}\bfseries,
+  morekeywords={name,description,filesets,depend,targets,tools,files,
+                file_type,toplevel,default_tool,default,rtl,tb,
+                systemVerilogSource,upstream,url,rev,target_dir,
+                exclude_from_upstream,verilator_options,vlog_options,
+                mode,script_dir,dc_script,report_dir,libs},
+  morecomment=[l]{//},
+  morecomment=[l]{\#},
+}
+
+% SystemVerilog and C, used only where this booklet quotes real RTL/header
+% excerpts (the register\_interface / regtool chapter) -- built-in `listings'
+% languages, tuned with the handful of SV-only keywords they lack. Nothing
+% like the full dialect/UVM highlighting of the SystemVerilog cookbook: this
+% booklet only ever shows short, already-generated or already-working
+% excerpts, never live coding.
+\lstdefinestyle{svstyle}{%
+  style=cookbookbase,
+  language=Verilog,
+  morekeywords={logic,bit,byte,shortint,int,longint,string,typedef,struct,
+                packed,always_comb,always_ff,import,package,endpackage,
+                interface,modport,parameter,localparam,automatic,unique,
+                priority,return,break,continue,foreach},
+  keywordstyle=[2]\color{codekeyb}\bfseries,
+}
+
+\lstdefinestyle{cppstyle}{%
+  style=cookbookbase,
+  language=C++,
+  morekeywords={uint8_t,uint16_t,uint32_t,uint64_t,int8_t,int16_t,int32_t,
+                int64_t,size_t},
+}
+
+\lstnewenvironment{shcode}  [1][]{\lstset{style=shstyle,   #1}}{}
+\lstnewenvironment{txtcode} [1][]{\lstset{style=plainstyle,#1}}{}
+\lstnewenvironment{makecode}[1][]{\lstset{style=makestyle, #1}}{}
+\lstnewenvironment{corecode}[1][]{\lstset{style=corestyle, #1}}{}
+\lstnewenvironment{svcode}  [1][]{\lstset{style=svstyle,   #1}}{}
+\lstnewenvironment{cppcode} [1][]{\lstset{style=cppstyle,  #1}}{}
+
+% Inline markup
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\kw}[1]{\textcolor{codekey}{\texttt{\small\bfseries #1}}}
+\newcommand{\file}[1]{\textcolor{accent}{\texttt{\small #1}}}
+\newcommand{\tool}[1]{\textsf{#1}}

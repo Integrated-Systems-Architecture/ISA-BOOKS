@@ -1,0 +1,207 @@
+\chapter{Makefiles: Where the Commands Live}
+\label{ch:makefiles}
+
+\chapabstract{Why every lab has a Makefile instead of a page of shell
+commands to copy-paste, the two Makefile shapes used across the labs, and
+how to add a target to one.}
+
+\section{Why bother with a Makefile}
+
+\Cref{ch:fusesoc} and \cref{ch:vendoring} both end in a command line you
+would not want to retype, with flags you would not want to remember:
+
+\begin{shcode}
+fusesoc --cores-root . --cores-root vendor run --target sim isa:lab1:cordic_accel \
+  --run_options="+VECDIR=/home/you/lab1/vectors/"
+\end{shcode}
+
+A Makefile turns that into \code{make sim}. That is the entire point: one
+file that remembers every incantation, gives each one a short name, and
+lets \code{make <target> --dry-run} (or just reading the recipe) show you
+the real command underneath whenever you need it. Nothing in a lab
+Makefile is magic; every recipe is a command you could type yourself.
+
+\begin{ruleofthumb}
+If you cannot see what a Makefile target actually runs, read the recipe
+line, not the target name. The labs deliberately \code{@echo} or leave
+visible the exact \FuseSoC / Python / \tool{make} command each target
+wraps.
+\end{ruleofthumb}
+
+\section{The vocabulary you need, and no more}
+
+\begin{itemize}
+  \item A \textbf{target} is a name after which a colon introduces its
+        prerequisites, and the indented lines below are its
+        \textbf{recipe} (the shell commands \code{make} runs). Indentation
+        must be a literal tab, not spaces.
+  \item \code{.PHONY: sim} tells \code{make} that \code{sim} is a name for
+        an action, not a file it should check the timestamp of. Every
+        target in these labs is phony.
+  \item \code{sim: vectors bitexact} means ``before running \code{sim}'s own
+        recipe, make sure \code{vectors} and \code{bitexact} have run''.
+  \item Variables come in two common flavours here: \code{:=} (set once,
+        now) and \code{?=} (set only if not already set -- lets you
+        override on the command line, \code{make sim NANGLES=128}).
+        \code{export} makes a variable visible to sub-processes, including
+        another Makefile pulled in with \code{include}.
+  \item \code{\$(wildcard pattern)} expands to every file matching
+        \code{pattern} that exists right now -- used in
+        \cref{ch:vendoring} to loop over every \file{*.vendor.hjson}.
+\end{itemize}
+
+\section{Pattern 1: a thin wrapper around FuseSoC}
+
+Lab 1's Makefile is the simplest shape: define the flags once, then one
+target per \FuseSoC target, plus a few for things \FuseSoC does not do
+(vendoring, register generation, vector generation).
+
+\begin{makecode}[caption={lab1/Makefile -- the shape, trimmed}]
+FUSESOC_FLAGS := --cores-root . --cores-root vendor
+CORE          := isa:lab1:cordic_accel
+
+.PHONY: sim
+sim: vectors bitexact
+	$(FUSESOC) $(FUSESOC_FLAGS) run --target sim $(CORE) \
+	  --run_options="+VECDIR=$(ROOT)/$(VECDIR)/"
+
+.PHONY: lint
+lint:
+	$(FUSESOC) $(FUSESOC_FLAGS) run --target lint $(CORE)
+\end{makecode}
+
+Every \FuseSoC target from the \file{.core} file (\code{sim}, \code{lint},
+\code{synth}, \dots) gets exactly one Makefile target of the same name, and
+that target's whole job is to fill in \code{--cores-root} and the core name
+so you never type them. \code{sim}'s prerequisites (\code{vectors
+bitexact}) show the other half of the job: a Makefile also sequences the
+non-\FuseSoC steps (generate vectors, check them) that have to happen
+first.
+
+\section{Pattern 2: a forwarding Makefile}
+
+Lab 0 does not wrap \FuseSoC calls directly; X-HEEP already ships its own
+large \file{external.mk} with targets like \code{verilator-build} and
+\code{app}. Reimplementing those would mean maintaining a second copy of
+logic that already works, so Lab 0's Makefile instead defines only the
+handful of targets specific to the lab, then hands everything else to the
+vendored X-HEEP:
+
+\begin{makecode}[caption={lab0/Makefile -- the shape, trimmed}]
+export HEEP_DIR ?= $(ROOT_DIR)/x-heep
+export SOURCE   ?= ../../sw/
+
+.PHONY: help vendor mcu-gen
+
+vendor:
+	python3 util/vendor.py x-heep.vendor.hjson
+
+mcu-gen:
+	cd x-heep && fusesoc run --target mcu-gen ...
+
+# IMPORTANT: this MUST stay at the very bottom -- its catch-all rule
+# swallows every target defined after it.
+include x-heep/external.mk
+\end{makecode}
+
+\code{include x-heep/external.mk} literally pastes that file's targets in
+at this point, as if you had typed them here. Because \file{external.mk}
+defines a catch-all pattern rule, \textbf{anything defined after the
+\code{include} is invisible}: \code{make} matches the catch-all first and
+never reaches it. That is why the comment says to keep \code{include} at
+the bottom, and why it is the one line in this Makefile you should never
+move.
+
+\begin{gotcha}{A forwarded target needs the right variables exported}
+\code{make app PROJECT=rxchain} works only because \code{PROJECT},
+\code{SOURCE} and \code{HEEP\_DIR} are \code{export}ed \emph{before} the
+\code{include}: X-HEEP's own targets read them as environment variables,
+not as this Makefile's local variables. Forgetting \code{export} on a
+variable a forwarded target needs is the most common way this pattern
+breaks.
+\end{gotcha}
+
+\section{Reading a Makefile you have not seen before}
+
+In order: run \code{make help} if one exists (both labs define it) for a
+one-screen summary. Then open the file and read top to bottom once, not
+target by target -- the variable definitions near the top explain every
+recipe below them. Finally, for the one target you actually want to run,
+read its prerequisites line before its recipe: half of what a target does
+in these labs is ``make sure this other thing ran first''.
+
+\section{Adding a target of your own}
+
+\begin{enumerate}
+  \item Pick a short, verb-like name (\code{waves}, not
+        \code{open-the-waveform-viewer}).
+  \item Mark it \code{.PHONY} unless it genuinely produces a file named
+        after the target.
+  \item List real prerequisites, not commands: if the target needs vectors
+        to exist, depend on the \code{vectors} target, do not repeat its
+        recipe.
+  \item Reuse the Makefile's own variables (\code{\$(FUSESOC)},
+        \code{\$(CORE)}, \code{\$(ROOT)}) instead of hardcoding paths or
+        tool names -- that is what makes \code{make questa} and \code{make
+        sim} in Lab 1 nearly identical recipes.
+  \item Add one line to the \code{help} target. An undocumented target is,
+        for the next person, an unwritten one.
+\end{enumerate}
+
+\section{How it all fits together: one \code{make sim} run}
+\label{sec:makefiles:walkthrough}
+
+Chapters~\ref{ch:fusesoc}--\ref{ch:makefiles} each covered one piece in
+isolation; here is \code{make sim} in Lab~1 exercising all three at once,
+top to bottom.
+
+\begin{enumerate}
+  \item \code{make sim} first checks its prerequisites, \code{vectors} and
+        \code{bitexact}: \code{vectors} runs the Python golden model to
+        produce the expected CORDIC outputs, \code{bitexact} checks that
+        model against the cookbook's own reference (\cref{ch:regtool} is
+        unrelated to this pair -- they never touch the register interface).
+  \item Only once both succeed does \code{sim}'s own recipe run: a
+        \code{fusesoc run --target sim} with \code{\$(FUSESOC\_FLAGS)}
+        supplying both \code{--cores-root} directories from
+        \cref{ch:fusesoc} and \code{--run\_options} passing the vector
+        directory to the testbench as a plusarg.
+  \item \FuseSoC resolves \code{isa:lab1:cordic\_accel}'s dependency tree
+        -- \code{obi}, \code{register\_interface}, \code{common\_cells} and
+        the others named in the \file{.core} file's \kw{depend} lists --
+        against whatever it finds under the vendored \file{vendor/} tree
+        from \cref{ch:vendoring}. A dependency that was never vendored, or
+        was vendored into the wrong \code{--cores-root}, fails here with
+        ``core not found'', not later.
+  \item With the dependency graph resolved, \FuseSoC writes the file list
+        into \file{build/isa\_lab1\_cordic\_accel\_0.1.0/sim-verilator/}
+        (\cref{sec:fusesoc:builddir}) and invokes \tool{Verilator} with the
+        \kw{verilator\_options} from the \code{sim} target -- including the
+        \code{-Wno-fatal} from the gotcha in \cref{ch:fusesoc}.
+  \item \tool{Verilator} compiles and runs the testbench, which reads back
+        the vectors \code{vectors} generated and prints a pass/fail summary;
+        that exit status is all \code{make sim} ultimately reports.
+\end{enumerate}
+
+\begin{tipbox}{Where \code{make regs} fits}
+\code{regs} is not a prerequisite of \code{sim}: it is a separate, manual
+step you run only after editing \file{data/cordic\_accel.hjson}, to
+regenerate the register RTL and header \emph{before} the next
+\code{make sim}. \Cref{ch:regtool} covers what it generates and why.
+\end{tipbox}
+
+\section{Checklist}
+\label{sec:makefiles:checklist}
+
+\begin{itemize}
+  \item A Makefile target is a name for a command; read the recipe, not
+        just the name, to know what actually runs.
+  \item \code{.PHONY} targets are actions, not files; almost every target
+        in these labs is one.
+  \item \code{export} a variable before an \code{include} if a forwarded
+        target needs to see it.
+  \item \code{include <file>} must come last if the included file defines a
+        catch-all rule.
+  \item \code{make help} first, then read top to bottom, then read the one
+        target you need -- prerequisites before recipe.
+\end{itemize}

@@ -1,0 +1,297 @@
+% ---------------------------------------------------------------------------
+% listings.tex -- source-code typesetting.
+%
+% The book is built with the `listings' package by default, so that it
+% compiles with a plain `pdflatex'/`latexmk' run and no external programs.
+% If you prefer Pygments-based highlighting, compile with
+%
+%     latexmk -pdf -shell-escape -usepretex='\def\UseMinted{}' main
+%
+% or simply uncomment the \def\UseMinted{} line in main.tex.  In that case
+% `minted' and a working `pygmentize' are required.
+% ---------------------------------------------------------------------------
+
+% --- the palette ------------------------------------------------------------
+\definecolor{codebg}      {HTML}{FAFAF7}
+\definecolor{codeframe}   {HTML}{D9D6CC}
+\definecolor{codekey}     {HTML}{0B5394}   % keywords
+\definecolor{codekeyb}    {HTML}{7B1FA2}   % secondary keywords (types, UVM)
+\definecolor{codecomment} {HTML}{5C7A5C}
+\definecolor{codestring}  {HTML}{A0522D}
+\definecolor{codenumber}  {HTML}{9A9A93}   % line numbers
+\definecolor{accent}      {HTML}{1B5E20}
+\definecolor{accentalt}   {HTML}{8B2500}
+\definecolor{warnbg}      {HTML}{FDF3F2}
+\definecolor{warnframe}   {HTML}{C0392B}
+\definecolor{tipbg}       {HTML}{F1F8F1}
+\definecolor{tipframe}    {HTML}{2E7D32}
+\definecolor{notebg}      {HTML}{F0F4FA}
+\definecolor{noteframe}   {HTML}{1F4E79}
+\definecolor{vhdlbg}      {HTML}{F7F5EF}
+\definecolor{svbg}        {HTML}{F2F6FA}
+
+% ---------------------------------------------------------------------------
+% A SystemVerilog dialect of the built-in `Verilog' language.
+% ---------------------------------------------------------------------------
+\lstdefinelanguage[System]{Verilog}[]{Verilog}{%
+  morekeywords={%
+    % --- SV-2005/2012 declarations and types -----------------------------
+    logic,bit,byte,shortint,int,longint,void,chandle,string,
+    struct,union,packed,tagged,enum,typedef,type,
+    const,var,ref,automatic,static,let,
+    package,endpackage,import,export,program,endprogram,
+    interface,endinterface,modport,clocking,endclocking,
+    class,endclass,extends,implements,virtual,pure,local,protected,
+    rand,randc,constraint,randomize,randcase,randsequence,dist,inside,solve,
+    new,super,this,null,extern,forkjoin,
+    % --- procedural blocks and control ------------------------------------
+    always_comb,always_ff,always_latch,final,
+    unique,unique0,priority,do,foreach,break,continue,return,
+    iff,matches,
+    % --- concurrency and synchronisation ----------------------------------
+    fork,join,join_any,join_none,wait_order,semaphore,mailbox,
+    % --- assertions ---------------------------------------------------------
+    assert,assume,cover,expect,restrict,property,endproperty,
+    sequence,endsequence,bind,disable,
+    throughout,within,intersect,first_match,
+    % --- coverage -----------------------------------------------------------
+    covergroup,endgroup,coverpoint,cross,bins,illegal_bins,ignore_bins,
+    wildcard,binsof,with,
+    % --- misc ---------------------------------------------------------------
+    timeunit,timeprecision,alias,checker,endchecker,nettype,
+    context,global,soft,before,
+    % --- common system tasks (they start with $, listings keeps the $) ------
+    $display,$write,$sformatf,$fatal,$error,$warning,$info,$finish,$stop,
+    $time,$realtime,$random,$urandom,$urandom_range,$bits,$size,$clog2,
+    $past,$rose,$fell,$stable,$onehot,$onehot0,$countones,$isunknown,
+    $cast,$sformat,$readmemh,$readmemb,$fopen,$fclose,$fgets,$fscanf,$feof,
+    $dumpfile,$dumpvars,$value$plusargs,$test$plusargs,$assertoff,
+  },
+  sensitive=true,
+  morecomment=[l]//,
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+}
+
+% ---------------------------------------------------------------------------
+% UVM identifiers get their own colour so that they stand out from the
+% language proper -- an important didactic point: UVM is a *library*.
+% ---------------------------------------------------------------------------
+% ---------------------------------------------------------------------------
+% Base style shared by every language.
+% ---------------------------------------------------------------------------
+\lstdefinestyle{cookbookbase}{%
+  basicstyle      = \ttfamily\footnotesize,
+  keywordstyle    = \color{codekey}\bfseries,
+  keywordstyle    = [2]\color{codekeyb}\bfseries,
+  keywordstyle    = [3]\color{accentalt}\bfseries,
+  commentstyle    = \color{codecomment}\itshape,
+  stringstyle     = \color{codestring},
+  numberstyle     = \tiny\color{codenumber},
+  numbers         = left,
+  numbersep       = 7pt,
+  stepnumber      = 1,
+  showstringspaces= false,
+  showspaces      = false,
+  showtabs        = false,
+  tabsize         = 2,
+  breaklines      = true,
+  breakatwhitespace = false,
+  breakindent     = 1em,
+  postbreak       = \mbox{\textcolor{codenumber}{$\hookrightarrow$}\space},
+  columns         = fullflexible,
+  keepspaces      = true,
+  upquote         = true,
+  frame           = leftline,
+  framerule       = 1.1pt,
+  rulecolor       = \color{codeframe},
+  framexleftmargin= 3pt,
+  xleftmargin     = 14pt,
+  aboveskip       = 1.1\medskipamount,
+  belowskip       = 1.1\medskipamount,
+  captionpos      = b,
+  literate        = {á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1
+                    {ú}{{\'u}}1 {à}{{\`a}}1 {è}{{\`e}}1 {ù}{{\`u}}1
+                    {°}{{\textdegree}}1 {µ}{{$\mu$}}1,
+  % `escapeinside' lets us drop LaTeX into a listing:  (*@ \tikzmark{x} @*)
+  escapeinside    = {(*@}{@*)},
+  moredelim       = **[is][\color{accentalt}\bfseries]{@@}{@@},
+}
+
+\lstdefinestyle{vhdlstyle}{%
+  style=cookbookbase,
+  language=VHDL,
+  backgroundcolor=\color{vhdlbg},
+}
+
+\lstdefinestyle{svstyle}{%
+  style=cookbookbase,
+  language={[System]Verilog},
+  backgroundcolor=\color{svbg},
+  emph={[2]logic,bit,byte,shortint,int,longint,string,real,time,realtime,
+        integer,reg,wire,shortreal,void,chandle,event},
+  emphstyle={[2]\color{codekeyb}\bfseries},
+}
+
+% UVM identifiers get their own colour so that they always stand out from the
+% language proper.  This is a didactic point that matters: UVM is a *library*
+% written in SystemVerilog, not an extension of the language.
+% `alsoletter' makes the backtick part of an identifier, so that the UVM
+% macros (`uvm_info and friends) can be highlighted as a unit.
+\lstdefinestyle{uvmstyle}{%
+  style=svstyle,
+  alsoletter={`},
+  morekeywords=[3]{%
+    uvm_component,uvm_object,uvm_test,uvm_env,uvm_agent,uvm_driver,
+    uvm_monitor,uvm_sequencer,uvm_sequence,uvm_sequence_item,uvm_scoreboard,
+    uvm_subscriber,uvm_reg,uvm_reg_block,uvm_config_db,uvm_resource_db,
+    uvm_factory,uvm_root,uvm_report_server,uvm_phase,uvm_objection,
+    uvm_analysis_port,uvm_analysis_imp,uvm_analysis_export,
+    uvm_tlm_analysis_fifo,uvm_blocking_put_port,uvm_seq_item_pull_port,
+    uvm_event,uvm_barrier,uvm_sequence_base,uvm_pkg,uvm_macros,
+    `uvm_component_utils,`uvm_object_utils,`uvm_component_utils_begin,
+    `uvm_object_utils_begin,`uvm_field_int,`uvm_field_enum,`uvm_object_utils_end,
+    `uvm_component_utils_end,`uvm_component_param_utils,`uvm_object_param_utils,
+    `uvm_info,`uvm_warning,`uvm_error,`uvm_fatal,
+    `uvm_do,`uvm_do_with,`uvm_create,`uvm_send,`uvm_declare_p_sequencer,
+    `uvm_analysis_imp_decl,
+    build_phase,connect_phase,end_of_elaboration_phase,
+    start_of_simulation_phase,run_phase,extract_phase,check_phase,
+    report_phase,final_phase,reset_phase,configure_phase,main_phase,
+    shutdown_phase,pre_body,body,post_body,
+    raise_objection,drop_objection,get_full_name,get_type_name,
+    run_test,set_type_override_by_type,type_id,start_item,finish_item,
+    get_next_item,item_done,try_next_item,
+    UVM_LOW,UVM_MEDIUM,UVM_HIGH,UVM_FULL,UVM_DEBUG,UVM_NONE,
+    UVM_ACTIVE,UVM_PASSIVE,
+  },
+  keywordstyle=[3]\color{accentalt}\bfseries,
+}
+
+\lstdefinestyle{cppstyle}{%
+  style=cookbookbase,
+  language=C++,
+  backgroundcolor=\color{codebg},
+  morekeywords={uint8_t,uint16_t,uint32_t,uint64_t,int8_t,int16_t,int32_t,
+                int64_t,size_t,nullptr,constexpr,override,final,noexcept,
+                vluint64_t,vluint32_t,CData,SData,IData,QData,WData},
+}
+
+\lstdefinestyle{pystyle}{%
+  style=cookbookbase,
+  language=Python,
+  backgroundcolor=\color{codebg},
+  morekeywords={async,await,cocotb,assert},
+}
+
+\lstdefinestyle{shstyle}{%
+  style=cookbookbase,
+  language=bash,
+  backgroundcolor=\color{codebg},
+  numbers=none,
+}
+
+\lstdefinestyle{makestyle}{%
+  style=cookbookbase,
+  language=make,
+  backgroundcolor=\color{codebg},
+  numbers=none,
+}
+
+\lstdefinestyle{tclstyle}{%
+  style=cookbookbase,
+  language=tcl,
+  backgroundcolor=\color{codebg},
+  numbers=none,
+}
+
+\lstdefinestyle{plainstyle}{%
+  style=cookbookbase,
+  language={},
+  backgroundcolor=\color{codebg},
+  numbers=none,
+  keywordstyle=\color{black},
+}
+
+% ---------------------------------------------------------------------------
+% Environments used throughout the book.  ALWAYS use these, never a raw
+% \begin{lstlisting}: it keeps the look uniform and makes a later switch to
+% minted a one-file change.
+% ---------------------------------------------------------------------------
+\lstnewenvironment{vhdlcode}[1][]{\lstset{style=vhdlstyle,#1}}{}
+\lstnewenvironment{svcode}  [1][]{\lstset{style=svstyle,  #1}}{}
+\lstnewenvironment{uvmcode} [1][]{\lstset{style=uvmstyle, #1}}{}
+\lstnewenvironment{cppcode} [1][]{\lstset{style=cppstyle, #1}}{}
+\lstnewenvironment{pycode}  [1][]{\lstset{style=pystyle,  #1}}{}
+\lstnewenvironment{shcode}  [1][]{\lstset{style=shstyle,  #1}}{}
+\lstnewenvironment{makecode}[1][]{\lstset{style=makestyle,#1}}{}
+\lstnewenvironment{tclcode} [1][]{\lstset{style=tclstyle, #1}}{}
+\lstnewenvironment{txtcode} [1][]{\lstset{style=plainstyle,#1}}{}
+
+% Whole external files: \vhdlfile{path}{caption}{label}
+\newcommand{\vhdlfile}[3]{\lstinputlisting[style=vhdlstyle,caption={#2},label={#3}]{#1}}
+\newcommand{\svfile}  [3]{\lstinputlisting[style=svstyle,  caption={#2},label={#3}]{#1}}
+\newcommand{\uvmfile} [3]{\lstinputlisting[style=uvmstyle, caption={#2},label={#3}]{#1}}
+\newcommand{\cppfile} [3]{\lstinputlisting[style=cppstyle, caption={#2},label={#3}]{#1}}
+\newcommand{\pyfile}  [3]{\lstinputlisting[style=pystyle,  caption={#2},label={#3}]{#1}}
+\newcommand{\makefile}[3]{\lstinputlisting[style=makestyle,caption={#2},label={#3}]{#1}}
+
+% A slice of an external file: \vhdlfilepart{path}{first}{last}{caption}{label}
+\newcommand{\vhdlfilepart}[5]{%
+  \lstinputlisting[style=vhdlstyle,firstline=#2,lastline=#3,firstnumber=#2,
+                   caption={#4},label={#5}]{#1}}
+\newcommand{\svfilepart}[5]{%
+  \lstinputlisting[style=svstyle,firstline=#2,lastline=#3,firstnumber=#2,
+                   caption={#4},label={#5}]{#1}}
+\newcommand{\cppfilepart}[5]{%
+  \lstinputlisting[style=cppstyle,firstline=#2,lastline=#3,firstnumber=#2,
+                   caption={#4},label={#5}]{#1}}
+
+% Inline code
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\kw}[1]{\textcolor{codekey}{\texttt{\small\bfseries #1}}}
+\newcommand{\file}[1]{\textcolor{accent}{\texttt{\small #1}}}
+\newcommand{\tool}[1]{\textsf{#1}}
+
+% ---------------------------------------------------------------------------
+% Side-by-side "Rosetta" comparison.  Usage:
+%
+%   \begin{rosetta}
+%   \begin{rleft}
+%   ... VHDL ...
+%   \end{rleft}
+%   \begin{rright}
+%   ... SystemVerilog ...
+%   \end{rright}
+%   \end{rosetta}
+%
+% The two panes are always VHDL (left) and SystemVerilog (right).
+% Keep the lines short: each pane is roughly 38 characters wide.
+% ---------------------------------------------------------------------------
+\newtcblisting{rleft}{%
+  enhanced, listing only, listing style=vhdlstyle,
+  listing options={style=vhdlstyle,numbers=none,xleftmargin=0pt,
+                   framexleftmargin=0pt,frame=none,backgroundcolor={},
+                   basicstyle=\ttfamily\scriptsize},
+  colback=vhdlbg, colframe=codeframe, boxrule=0.6pt, arc=1.5pt,
+  left=3pt,right=2pt,top=2pt,bottom=2pt,
+  title={\scriptsize\bfseries\sffamily VHDL},
+  coltitle=white, colbacktitle=codekey, fonttitle=\scriptsize\bfseries,
+  attach boxed title to top left={xshift=3mm,yshift=-1mm},
+  boxed title style={arc=1pt,boxrule=0pt}}
+\newtcblisting{rright}{%
+  enhanced, listing only, listing style=svstyle,
+  listing options={style=svstyle,numbers=none,xleftmargin=0pt,
+                   framexleftmargin=0pt,frame=none,backgroundcolor={},
+                   basicstyle=\ttfamily\scriptsize},
+  colback=svbg, colframe=codeframe, boxrule=0.6pt, arc=1.5pt,
+  left=3pt,right=2pt,top=2pt,bottom=2pt,
+  title={\scriptsize\bfseries\sffamily SystemVerilog},
+  coltitle=white, colbacktitle=accentalt, fonttitle=\scriptsize\bfseries,
+  attach boxed title to top left={xshift=3mm,yshift=-1mm},
+  boxed title style={arc=1pt,boxrule=0pt}}
+\newenvironment{rosetta}
+  {\par\medskip\begin{tcbraster}[raster columns=2,raster equal height=rows,
+                                raster column skip=3mm,raster left skip=0mm,
+                                raster right skip=0mm,raster force size=false]}
+  {\end{tcbraster}\par\medskip}

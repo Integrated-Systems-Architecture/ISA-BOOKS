@@ -1,0 +1,103 @@
+% ---------------------------------------------------------------------------
+% preface.tex
+% ---------------------------------------------------------------------------
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+\markboth{Preface}{Preface}
+
+You have written VHDL for five years. You know what a signal is, why it is not
+a variable, what a delta cycle does to your simulation, and how to tell
+\code{numeric\_std} exactly how many bits you meant. You have argued with a
+compiler that refused to add a \code{signed} to an \code{integer}, and you have
+usually turned out to be the one who was wrong.
+
+Now somebody has told you the last course of your degree is in SystemVerilog.
+
+The bad news first. SystemVerilog is not a tidier VHDL. It comes from a
+different tradition, it makes different assumptions about what a language is
+for, and several of the habits that made you a careful VHDL designer will make
+you a dangerous SystemVerilog one. The compiler that used to catch your
+mistakes will now accept them silently. A width mismatch that VHDL would refuse
+to analyse becomes a truncation that costs you an afternoon in the waveform
+viewer.
+
+The good news is larger. Almost everything you know transfers. A process is an
+\code{always} block. A generic is a parameter. A package is a package. This
+booklet is the translation exercise, and you will move through it quickly.
+
+\section*{What this booklet is}
+
+A cookbook, in the literal sense. It is organised so that you can look
+something up, find the VHDL you would have written next to the SystemVerilog
+you should write instead, and get on with your work. Almost every section is
+built around a side-by-side comparison:
+
+\begin{rosetta}
+\begin{rleft}
+process (clk) is
+begin
+  if rising_edge(clk) then
+    q <= d;
+  end if;
+end process;
+\end{rleft}
+\begin{rright}
+always_ff @(posedge clk) begin
+  q <= d;
+end
+\end{rright}
+\end{rosetta}
+
+VHDL is always on the left, SystemVerilog always on the right. Where a
+construct has no counterpart in the other language, the booklet says so
+plainly rather than inventing one.
+
+Three kinds of box interrupt the text. A \emph{trap} marks something that
+specifically catches VHDL designers: not an obscure corner of the standard, but
+a mistake you are statistically likely to make in your first month. A
+\emph{recipe} gives a pattern to copy. A plain note supplies background you can
+skip on a first reading.
+
+\section*{What this booklet is not}
+
+It is not a language reference. IEEE 1800-2017 is 1315 pages long and this
+booklet is not a substitute for it. Where a construct has corners this text
+does not explore, it says so and points you at the standard.
+
+It is not a synthesis manual. Everything presented as synthesisable is
+synthesisable with mainstream tools, but the booklet does not discuss timing
+closure, physical design or vendor-specific attributes.
+
+It is not advocacy. VHDL is an excellent language and, in several respects
+catalogued honestly at the end of \cref{ch:philosophy}, a better-designed one.
+The question this booklet answers is not which language is better but how to
+move between them without losing the discipline the first one taught you.
+
+It is also not the whole book. This is the \textbf{Design Cookbook}, one of
+four companions covering \tool{SystemVerilog for VHDL Designers} in full.
+Verification-only material (classes, randomisation, coverage, assertions,
+UVM) lives in \refverificationbook; \tool{Verilator}, \tool{QuestaSim} and
+Python testbenches live in \refsimulationbook; a complete worked design is
+in \refexamplebook.
+
+\section*{How this booklet is organised}
+
+Four chapters. \Cref{ch:philosophy} explains why the two languages feel so
+different, which is mostly a story about their simulation semantics and about
+what each one expects a compiler to do for you; it ends with an honest account
+of what VHDL does better. Read it first, even if you are tempted to skip to
+the syntax. \Cref{ch:rosetta} and \cref{ch:rosetta2} are the translation
+reference, split into the static half (files, ports, parameters, types,
+expressions) and the behavioural half (processes, statements, generate,
+instantiation, packages, time). Together they are the part of the booklet you
+will keep open beside your editor, and the complete mapping table at the end
+of \cref{ch:rosetta2} is the page to photocopy. \Cref{ch:beyond} covers the
+design-side constructs SystemVerilog adds and VHDL has no answer to:
+interfaces, packed structures, parameterised types, \code{bind}.
+
+\section*{Acknowledgement}
+
+The CORDIC rotator used as a running example throughout this booklet, and
+developed in full in \refexamplebook, was chosen because it is small enough
+to read in one sitting and large enough to need a state machine, a
+parameterised datapath, a fixed-point format and a handshake protocol.

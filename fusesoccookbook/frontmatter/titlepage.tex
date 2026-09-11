@@ -1,0 +1,77 @@
+% ---------------------------------------------------------------------------
+% titlepage.tex
+% ---------------------------------------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\begin{center}
+
+\vspace*{1.5cm}
+
+{\sffamily\Large\color{codenumber} A QUICK REFERENCE MANUAL}
+
+\vspace{1.2cm}
+
+{\sffamily\fontsize{27}{33}\selectfont\bfseries\color{codekey}
+ FuseSoC, Vendoring,\\[4pt] Makefiles \& Regtool}
+
+\vspace{0.8cm}
+
+{\color{codeframe}\rule{0.8\textwidth}{1.4pt}}
+
+\vspace{0.8cm}
+
+{\sffamily\large
+ Reading (and Writing) the Lab Build Files and Register Descriptions}
+
+\vspace{2.2cm}
+
+% --- a small decorative figure: how the three pieces fit together ----------
+\begin{tikzpicture}[font=\sffamily\small,
+    box/.style={draw=codekey,fill=codebg,line width=1pt,rounded corners=3pt,
+                minimum width=2.6cm,minimum height=1.1cm,align=center}]
+  \node[box] (mk) {\bfseries Makefile};
+  \node[box,draw=accentalt,below left=1.3cm and -1.6cm of mk] (core)
+       {\bfseries .core\\[-1pt]\small FuseSoC};
+  \node[box,draw=codekeyb,below right=1.3cm and -1.6cm of mk] (vendor)
+       {\bfseries .vendor.hjson\\[-1pt]\small vendored IPs};
+  \node[box,draw=codenumber,below=2.7cm of mk] (reg)
+       {\bfseries .hjson\\[-1pt]\small regtool};
+  \draw[-{Latex[length=3mm]},line width=1.1pt,accentalt] (mk) -- (core);
+  \draw[-{Latex[length=3mm]},line width=1.1pt,codekeyb] (mk) -- (vendor);
+  \draw[-{Latex[length=3mm]},line width=1.1pt,codenumber] (mk) -- (reg);
+\end{tikzpicture}
+
+\vfill
+
+{\sffamily\large Luigi Giuffrida}
+
+\vspace{4pt}
+
+{\sffamily\small Department of Electronics and Telecommunications\\
+ Politecnico di Torino}
+
+\vspace{1.0cm}
+
+{\sffamily\footnotesize\color{codenumber}
+ Draft --- \today}
+
+\end{center}
+\end{titlepage}
+
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+\begin{minipage}{0.78\textwidth}
+\small\itshape
+This booklet is a companion reference, not a build-systems course. It covers
+exactly enough of \FuseSoC, vendoring, \tool{make} and the register\_interface
+regtool to read the \file{.core} files, Makefiles and \file{.hjson} register
+descriptions that ship with the lab folders, and to write new ones of your
+own. For anything beyond this scope, the official \FuseSoC documentation at
+\texttt{fusesoc.readthedocs.io}, GNU \tool{make}'s manual, and the OpenTitan
+regtool documentation are the authoritative sources.
+\end{minipage}
+\end{center}
+\vspace*{\fill}
+\cleardoublepage

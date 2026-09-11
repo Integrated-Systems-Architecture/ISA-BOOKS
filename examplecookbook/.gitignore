@@ -1,0 +1,31 @@
+# LaTeX build products
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.idx
+*.ilg
+*.ind
+*.listing
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+main.pdf
+
+# CORDIC build products
+code/cordic/build/
+code/cordic/**/obj_dir/
+code/cordic/**/work/
+code/cordic/python/sim_build/
+code/cordic/python/results.xml
+code/cordic/python/__pycache__/
+*.vcd
+*.fst
+*.ghw
+
+# archives
+*.tar.gz

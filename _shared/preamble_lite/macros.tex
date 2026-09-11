@@ -1,0 +1,108 @@
+% ---------------------------------------------------------------------------
+% macros.tex -- admonition boxes, page style, semantic shortcuts.
+% Shared by the short, single-topic reference booklets in the series
+% (gitcookbook, fusesoccookbook) -- as opposed to books/_shared/preamble/,
+% which is the heavier template for the SystemVerilog-for-VHDL-Designers
+% booklets. Union of what either booklet needs; an unused macro here is
+% harmless.
+% ---------------------------------------------------------------------------
+
+\usepackage{xspace}
+\newcommand{\Git}{Git\xspace}
+\newcommand{\GitHub}{GitHub\xspace}
+\newcommand{\FuseSoC}{FuseSoC\xspace}
+\newcommand{\ie}{i.e.\@\xspace}
+\newcommand{\eg}{e.g.\@\xspace}
+
+% --- admonition boxes -------------------------------------------------------
+\newtcolorbox{gotcha}[1]{%
+  enhanced, breakable,
+  colback=warnbg, colframe=warnframe, boxrule=0.9pt, arc=3pt,
+  left=10pt,right=10pt,top=11pt,bottom=9pt,
+  before skip=3.5mm, after skip=3.5mm,
+  fonttitle=\bfseries\sffamily\small,
+  coltitle=white, colbacktitle=warnframe,
+  attach boxed title to top left={xshift=6mm,yshift=-3.2mm},
+  boxed title style={arc=2pt,boxrule=0pt,left=6pt,right=6pt,
+                     top=2.5pt,bottom=2.5pt},
+  title={\raisebox{-0.5pt}{$\triangle$}\ Trap: #1}}
+
+\newtcolorbox{tipbox}[1]{%
+  enhanced, breakable,
+  colback=tipbg, colframe=tipframe, boxrule=0.9pt, arc=3pt,
+  left=10pt,right=10pt,top=11pt,bottom=9pt,
+  before skip=3.5mm, after skip=3.5mm,
+  fonttitle=\bfseries\sffamily\small,
+  coltitle=white, colbacktitle=tipframe,
+  attach boxed title to top left={xshift=6mm,yshift=-3.2mm},
+  boxed title style={arc=2pt,boxrule=0pt,left=6pt,right=6pt,
+                     top=2.5pt,bottom=2.5pt},
+  title={Recipe: #1}}
+
+\newtcolorbox{notebox}[1]{%
+  enhanced, breakable,
+  colback=notebg, colframe=noteframe, boxrule=0.9pt, arc=3pt,
+  left=10pt,right=10pt,top=11pt,bottom=9pt,
+  before skip=3.5mm, after skip=3.5mm,
+  fonttitle=\bfseries\sffamily\small,
+  coltitle=white, colbacktitle=noteframe,
+  attach boxed title to top left={xshift=6mm,yshift=-3.2mm},
+  boxed title style={arc=2pt,boxrule=0pt,left=6pt,right=6pt,
+                     top=2.5pt,bottom=2.5pt},
+  title={#1}}
+
+\newtcolorbox{ruleofthumb}{%
+  enhanced, breakable, sharp corners,
+  colback=white, colframe=accent,
+  boxrule=0pt, leftrule=3.5pt,
+  left=11pt,right=8pt,top=7pt,bottom=7pt,
+  before skip=3.5mm, after skip=3.5mm,
+  fontupper=\itshape}
+
+% Chapter-opening summary strip: \chapabstract{...}
+\newcommand{\chapabstract}[1]{%
+  \begin{tcolorbox}[enhanced,sharp corners,colback=codebg,colframe=codeframe,
+                    boxrule=0.7pt,left=11pt,right=11pt,top=9pt,bottom=9pt,
+                    before skip=2mm, after skip=7mm]
+    \small\sffamily #1
+  \end{tcolorbox}}
+
+% --- page style -------------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[LE]{\small\sffamily\nouppercase{\leftmark}}
+\fancyhead[RO]{\small\sffamily\nouppercase{\rightmark}}
+\fancyfoot[LE,RO]{\small\sffamily\thepage}
+\fancypagestyle{plain}{\fancyhf{}\renewcommand{\headrulewidth}{0pt}%
+  \fancyfoot[LE,RO]{\small\sffamily\thepage}}
+\renewcommand{\chaptermark}[1]{\markboth{\chaptername\ \thechapter.\ #1}{}}
+\renewcommand{\sectionmark}[1]{\markright{\thesection\ \ #1}}
+
+% --- chapter / section headings ---------------------------------------------
+\titleformat{\chapter}[display]
+  {\normalfont\sffamily\huge\bfseries\color{codekey}}
+  {\raggedright\sffamily\normalsize\bfseries\color{codenumber}%
+   \MakeUppercase{\chaptertitlename}\ \thechapter}
+  {8pt}
+  {\raggedright #1}
+  [\vspace{-2pt}{\color{codeframe}\rule{\textwidth}{1.2pt}}]
+\titlespacing*{\chapter}{0pt}{-10pt}{28pt}
+
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{codekey}}{\thesection}{0.7em}{#1}
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries}{\thesubsection}{0.6em}{#1}
+\titleformat{\subsubsection}
+  {\normalfont\sffamily\normalsize\bfseries\itshape}{\thesubsubsection}{0.6em}{#1}
+
+% --- caption style ----------------------------------------------------------
+\captionsetup{font=small,labelfont={bf,sf},labelsep=period,
+              justification=raggedright,singlelinecheck=false}
+
+% --- misc -------------------------------------------------------------------
+\setlength{\parskip}{0.35\baselineskip}
+\setlength{\parindent}{0pt}
+\raggedbottom
+\setcounter{tocdepth}{1}
+\setcounter{secnumdepth}{2}

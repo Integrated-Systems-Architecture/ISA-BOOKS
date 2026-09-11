@@ -1,0 +1,75 @@
+% ---------------------------------------------------------------------------
+% titlepage.tex
+% ---------------------------------------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\begin{center}
+
+\vspace*{1.5cm}
+
+{\sffamily\Large\color{codenumber} AN INTRODUCTION TO SYSTEMVERILOG}
+
+\vspace{1.2cm}
+
+{\sffamily\fontsize{34}{40}\selectfont\bfseries\color{codekey}
+ SystemVerilog\\[4pt] for VHDL Designers}
+
+\vspace{0.4cm}
+
+{\sffamily\Large\color{accentalt} The Simulation Cookbook}
+
+\vspace{0.8cm}
+
+{\color{codeframe}\rule{0.8\textwidth}{1.4pt}}
+
+\vspace{0.8cm}
+
+{\sffamily\large
+ Verilator vs.\ QuestaSim $\cdot$ Python and cocotb}
+
+\vspace{2.2cm}
+
+% --- a small decorative figure: two paths to a waveform --------------------
+\begin{tikzpicture}[font=\sffamily\small,
+    box/.style={draw=codekey,fill=svbg,line width=1pt,rounded corners=3pt,
+                minimum width=3.3cm,minimum height=1.2cm,align=center}]
+  \node[box] (rtl) {\bfseries SystemVerilog\\[2pt]\scriptsize source};
+  \node[box,draw=accentalt,below left=1.1cm and -0.2cm of rtl] (ver)
+       {\bfseries Verilator\\[2pt]\scriptsize C++ compile};
+  \node[box,draw=codekeyb,below right=1.1cm and -0.2cm of rtl] (qst)
+       {\bfseries QuestaSim\\[2pt]\scriptsize event simulation};
+  \draw[-{Latex[length=3mm]},line width=1.1pt,accentalt] (rtl) -- (ver);
+  \draw[-{Latex[length=3mm]},line width=1.1pt,codekeyb] (rtl) -- (qst);
+\end{tikzpicture}
+
+\vfill
+
+{\sffamily\large Luigi Giuffrida, Alessandra Dolmeta}
+
+\vspace{4pt}
+
+{\sffamily\small Department of Electronics and Telecommunications\\
+ Politecnico di Torino}
+
+\vspace{1.0cm}
+
+{\sffamily\footnotesize\color{codenumber}
+ Draft --- \today}
+
+\end{center}
+\end{titlepage}
+
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+\begin{minipage}{0.78\textwidth}
+\small\itshape
+This booklet is one of four companions: Design, Verification, Simulation
+(this one), and a complete worked Example. It covers \tool{Verilator}
+compared with \tool{QuestaSim}, and the four ways of connecting Python,
+including \tool{cocotb}, to a testbench.
+\end{minipage}
+\end{center}
+\vspace*{\fill}
+\cleardoublepage

@@ -1,0 +1,114 @@
+\chapter{What Git Actually Does}
+\label{ch:basics}
+
+\chapabstract{The minimum theory needed before the commands make sense:
+what a repository is, what a commit is, and where your files actually
+live at each stage.}
+
+\section{Version control, in one sentence}
+
+\Git{} is a tool that records snapshots of a set of files over time, so
+that you can go back to any earlier snapshot, see what changed between
+two snapshots, and combine changes made by different people. Each
+snapshot is called a \textbf{commit}. Unlike copying a folder by hand,
+every commit is linked to the one before it, forming a history you can
+inspect, search and revert.
+
+\Git{} is \textbf{distributed}: every clone of a repository is a full
+copy of the entire history, not just a checkout of the current state.
+There is no central server that must be reachable to commit, browse
+history, or create a branch; a server is only needed to synchronise with
+other people.
+
+\section{Three places your files can be}
+
+Understanding \Git{} means understanding that a tracked file exists in
+up to three places at once.
+
+\begin{enumerate}
+  \item \textbf{Working directory.} The files you see and edit on disk.
+  \item \textbf{Staging area} (also called the \emph{index}). A
+        holding area where you assemble exactly the changes that will
+        go into the next commit. This is what makes \Git{} different
+        from most other tools: you choose what to commit, not
+        everything you touched.
+  \item \textbf{Repository.} The database of committed snapshots,
+        stored in the hidden \file{.git} folder. Once a change is
+        committed, it is part of the permanent history.
+\end{enumerate}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+      node distance=1.4cm,
+      box/.style={draw=codekey,fill=codebg,line width=1pt,
+                  rounded corners=3pt,minimum width=3.1cm,
+                  minimum height=1.3cm,align=center,font=\sffamily\small},
+      lbl/.style={font=\scriptsize\sffamily,midway,above}
+    ]
+    \node[box] (wd) {Working\\Directory};
+    \node[box,right=of wd] (idx) {Staging Area\\(Index)};
+    \node[box,draw=accentalt,right=of idx] (repo) {Local\\Repository};
+    \draw[-{Latex[length=3mm]},line width=1.1pt,codekey]
+      (wd.east) -- (idx.west) node[lbl]{\code{git add}};
+    \draw[-{Latex[length=3mm]},line width=1.1pt,accentalt]
+      (idx.east) -- (repo.west) node[lbl]{\code{git commit}};
+    \draw[-{Latex[length=3mm]},line width=1.1pt,codenumber]
+      (repo.south) --++(0,-8mm) -| (wd.south)
+      node[pos=0.25,below,font=\scriptsize\sffamily]{\code{git checkout} / \code{git restore}};
+  \end{tikzpicture}
+  \caption{The everyday local workflow: edit, stage, commit.}
+  \label{fig:basics:workflow}
+\end{figure}
+
+\begin{gotcha}{"I saved the file, so it's in Git"}
+Saving a file only changes the working directory. It is not staged
+until you run \code{git add}, and it is not part of the history until
+you run \code{git commit}. Three separate, deliberate steps.
+\end{gotcha}
+
+\section{Commits, hashes and branches}
+
+A commit is a snapshot of the whole project (not a diff), together with
+an author, a timestamp, a message, and a pointer to its parent commit.
+\Git{} identifies each commit by a SHA-1 hash (\eg
+\code{a3f1c9e...}), computed from its content: change one byte anywhere
+in the project and every commit made afterwards gets a new hash.
+
+A \textbf{branch} is nothing more than a movable pointer to a commit.
+The default branch is conventionally called \code{main} (older
+repositories use \code{master}). Creating a branch is instantaneous and
+cheap because it does not copy any files, only records a new pointer.
+\code{HEAD} is a pointer to whichever branch (or commit) you currently
+have checked out.
+
+\begin{ruleofthumb}
+If you remember one thing from this chapter: a commit is a snapshot, a
+branch is a label on a commit, and \code{HEAD} says which label you are
+standing on.
+\end{ruleofthumb}
+
+\section{Local versus remote}
+
+Everything so far happens on your machine. A \textbf{remote} is simply
+another copy of the repository, usually hosted on a server such as
+\GitHub{}, identified by a short name (conventionally \code{origin}) and
+a URL. \code{git push} sends your local commits to a remote branch;
+\code{git fetch} downloads commits from a remote without touching your
+working directory; \code{git pull} does a fetch followed by a merge (or
+rebase) into your current branch. \Cref{ch:github} covers this in
+detail.
+
+\section{Checklist}
+\label{sec:basics:checklist}
+
+\begin{itemize}
+  \item A file only enters history through \textbf{add} then
+        \textbf{commit}; there is no implicit save.
+  \item A commit is a full snapshot identified by a content hash, with
+        a pointer to its parent.
+  \item A branch is a pointer, not a copy; \code{HEAD} shows which one
+        you are on.
+  \item Every clone holds the entire history; a remote is just another
+        copy to synchronise with.
+\end{itemize}

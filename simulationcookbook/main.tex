@@ -1,0 +1,67 @@
+% ===========================================================================
+%  SystemVerilog for VHDL Designers -- The Simulation Cookbook
+%
+%  Build:   latexmk -pdf main.tex          (recommended)
+%  or:      pdflatex main && makeindex main && pdflatex main && pdflatex main
+%
+%  One of four companion booklets (Design, Verification, Simulation -- this
+%  one, Example) split out of the original SystemVerilog cookbook. Covers
+%  Verilator versus QuestaSim, and Python/cocotb testbenches.
+%  Cross-references to material now living in a sibling booklet are named
+%  rather than numbered (\refdesignbook and friends, in preamble/macros.tex).
+% ===========================================================================
+\documentclass[11pt,a4paper,twoside,openright]{book}
+
+\input{../_shared/preamble/packages}
+\input{../_shared/preamble/listings}
+\input{../_shared/preamble/macros}
+
+\makeindex
+
+\graphicspath{%
+  {figures/}%
+  {chapters/08-verilator/figures/}%
+  {chapters/09-python/figures/}%
+}
+
+\hypersetup{
+  pdftitle  = {SystemVerilog for VHDL Designers: The Simulation Cookbook},
+  pdfauthor = {Luigi Giuffrida},
+  pdfsubject= {Verilator, QuestaSim, and Python-driven testbenches},
+  pdfkeywords = {Verilator, QuestaSim, cocotb, Python, simulation},
+  colorlinks = true,
+  linkcolor  = codekey,
+  citecolor  = accent,
+  urlcolor   = accentalt,
+}
+
+\begin{document}
+
+\frontmatter
+\input{frontmatter/titlepage}
+\input{frontmatter/preface}
+\input{frontmatter/howtoread}
+
+\cleardoublepage
+\tableofcontents
+\cleardoublepage
+
+\mainmatter
+
+\subimport{chapters/08-verilator/}{chapter.tex}
+\subimport{chapters/09-python/}{chapter.tex}
+
+% ---------------------------------------------------------------------------
+\appendix
+% ---------------------------------------------------------------------------
+\subimport{backmatter/}{appendix-commands.tex}
+\subimport{backmatter/}{appendix-tooling.tex}
+
+\backmatter
+\input{backmatter/bibliography}
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Index}
+\printindex
+
+\end{document}

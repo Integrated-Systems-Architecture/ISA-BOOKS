@@ -1,0 +1,1824 @@
+\chapter{Two Languages, Two Philosophies}
+\label{ch:philosophy}
+
+\chapabstract{This chapter answers one question: why does \SV{} feel wrong to
+someone who has written \VHDL{} for five years? The answer is not syntax. The
+two languages were built for different purposes, by different communities, with
+different ideas about where correctness comes from. By the end of the chapter
+you will know where \SV{} puts the guard rails that \VHDL{} puts in the type
+system, how the \SV{} event scheduler differs from the \VHDL{} simulation
+cycle, why blocking and non-blocking assignments exist at all, and how the
+verification culture around \SV{} differs from the one around \VHDL{}. The
+chapter ends with the other half of the argument: an honest account of what
+\VHDL{} does better, and a set of criteria for choosing between the two.}
+
+% ---------------------------------------------------------------------------
+% Chapter-local helper: a Verilog compiler directive in running text.
+% ---------------------------------------------------------------------------
+
+You already know how to design digital hardware. Nothing in this book will
+teach you what a flip-flop is, what a handshake is, or why a long combinational
+path costs you frequency. What this book teaches is a second language for
+saying things you can already say, plus a set of things that the second
+language says which the first one cannot.
+
+The temptation, in the first week, is to treat \SV{} as \VHDL{} with different
+punctuation. Look up the keyword, substitute it, move on. That works for about
+two days. Then a design simulates correctly and synthesises into something
+else, or a testbench passes for the wrong reason, or a signal is one bit wide
+when you were certain you declared it as eight. At that point the missing
+knowledge is not a keyword. It is the model of the world that the language was
+built on. So this chapter is deliberately not a syntax table.
+\cref{ch:rosetta} and \cref{ch:rosetta2} are the syntax tables. This chapter
+is about where the two languages come from, and which of your instincts have
+to be retrained before those tables are safe to use.
+
+The order is: two origin stories, then the type system you are about to lose,
+then design units and the preprocessor, then the scheduler, which is the
+section that matters most, then declared intent, then the verification culture.
+The last two sections turn the argument round. Having spent the chapter on
+what \SV{} gives you, they close with what \VHDL{} does better, which is more
+than a book with this title is normally willing to admit, and with criteria
+for deciding which language a given job wants. Read them: a designer who can
+only argue one way is not much use in a language review.
+
+% ===========================================================================
+\section{Two Origins, and Why They Still Matter}
+\label{sec:philosophy:origins}
+% ===========================================================================
+
+Languages carry their origins for decades. \VHDL{} and Verilog were designed in
+the same half-decade, on the same continent, for the same industry, and they
+still ended up almost as different as two hardware description languages can
+be, because the problems their authors were paid to solve were not the same
+problem.
+
+\subsection{VHDL: a documentation language that learned to synthesise}
+
+\index{VHDL!history}\VHDL{} began in 1981 as part of the United States
+Department of Defense Very High Speed Integrated Circuit (VHSIC) programme. The
+problem the DoD had was not simulation speed and it was not designer
+productivity. It was procurement. A military system built around a custom chip
+might have to be maintained, re-qualified, and possibly re-fabricated twenty or
+thirty years after the original vendor had lost interest or gone out of
+business. The DoD wanted a vendor-neutral, machine-readable, unambiguous
+description of a circuit that a different contractor could read, understand and
+re-simulate decades later.
+
+That is a specification for a documentation language that happens to be
+executable. Everything about \VHDL{} follows from it. The syntax was derived
+from Ada, which was itself the DoD's standard programming language and which
+had been designed by committee for long-lived, safety-critical, multi-author
+software. \VHDL{} inherited Ada's verbosity, its strong typing, its explicit
+declarations, its named association, its packages and libraries, and its
+general belief that saying a thing twice in slightly different ways is a
+feature, because it lets the compiler check that you meant it.
+
+The language was released publicly in 1985 and standardised as IEEE 1076-1987;
+the revisions you care about are IEEE 1076-1993, IEEE 1076-2008, which is what
+this book assumes, and IEEE 1076-2019, whose tool support is still
+thin.\index{IEEE 1076} Note what is missing from that timeline: synthesis.
+\VHDL{} was designed to be simulated, not to be turned into gates. Synthesis
+arrived from outside, in the early 1990s, as a commercially interesting subset
+that particular tools agreed to support. IEEE 1076.6 tried to standardise that
+subset and was eventually withdrawn. To this day the synthesisable part of
+\VHDL{} is a convention enforced by tools, not a part of the language
+definition.
+
+\subsection{Verilog: a simulator that learned to be a language}
+
+\index{Verilog!history}Verilog has the opposite biography. Around 1984, Gateway
+Design Automation, a small company, sold a logic simulator called Verilog-XL.
+Verilog was its input format. Phil Moorby designed it, and he designed it for
+one purpose: to be fast to write, fast to parse, and fast to simulate on the
+hardware of 1984.
+
+The language is therefore C-flavoured, terse, and deeply pragmatic. It has
+begin/end instead of Ada's fully spelled-out closers. It has a bit-vector type
+and an integer and very little else, because that is what an event simulator
+needs. It has four-valued logic with strengths, because a 1984 simulator had to
+model pull-ups, tri-states and buses at the transistor level. It has an
+explicit textual preprocessor, because C had one and it was cheap to implement.
+And most importantly, its semantics are the semantics of its simulator: the
+language was not specified first and implemented afterwards, it was implemented
+first and specified afterwards, from the behaviour of Verilog-XL.
+
+Cadence acquired Gateway in 1989. Under commercial pressure from \VHDL{}, which
+was an open standard, Cadence put Verilog into the public domain in 1990 and
+Open Verilog International standardised it; it became IEEE 1364-1995, then
+1364-2001 (which added the things RTL designers actually needed, including
+ANSI-style port lists, \code{generate}, and signed arithmetic) and 1364-2005.
+\index{IEEE 1364}
+
+\subsection{SystemVerilog: a verification language that swallowed its host}
+
+\index{SystemVerilog!history}By the late 1990s Verilog was losing the
+verification argument. Testbenches were being written in dedicated verification
+languages -- Synopsys Vera, Verisity's \textit{e} -- because Verilog had no
+classes, no randomisation and no functional coverage. At the same time Co-Design
+Automation was developing Superlog, an extension of Verilog with C-like data
+types and higher-level constructs.
+
+Accellera, an industry consortium, assembled \SV{} out of these donated pieces:
+Superlog for the design constructs and the type system, Vera for the
+object-oriented verification layer, and a separate assertion effort for
+SystemVerilog Assertions. \SV{} 3.0 (2002) was a design-side extension; \SV{}
+3.1 (2003) added the verification half; Accellera \SV{} 3.1a became IEEE
+1800-2005.
+
+The decisive event is IEEE 1800-2009. Until then, \SV{} was formally defined as
+a set of extensions \emph{on top of} IEEE 1364 Verilog, and you needed both
+documents. In 2009 the two standards were merged: IEEE 1800-2009 contains all
+of Verilog, and IEEE 1364 was withdrawn. Verilog is no longer a language with a
+standard of its own. It is a subset of \SV{}. The current revisions are IEEE
+1800-2017, which this book targets, and IEEE 1800-2023.\index{IEEE 1800}
+
+\begin{notebox}{What ``the LRM'' means}
+Engineers say \emph{the \LRM{}} for the Language Reference Manual: IEEE 1800 for
+\SV{}, IEEE 1076 for \VHDL{}. IEEE 1800-2017 is about 1300 pages, roughly half
+of which describes things you will never synthesise. When this book says ``the
+\LRM{} requires'', you can check it: clause 4 is the scheduling semantics,
+clause 6 the data types, clause 9 the processes, clause 23 the modules and
+hierarchy.
+\end{notebox}
+
+\subsection{The practical consequence}
+
+Here is the sentence to remember from this section. \VHDL{} was designed as a
+language and later grew a synthesis subset. \SV{} was designed as a simulator
+input and later grew a type system.
+
+Both statements have visible consequences in code you will write next week.
+Because \VHDL{} was designed as a language first, its rules are uniform,
+checkable and occasionally infuriating: the analyser will reject a design that
+would have simulated perfectly well, because a rule says so. Because \SV{} grew
+outward from a simulator, its rules are permissive by default: almost anything
+you type has \emph{some} defined meaning, so the tool accepts it and gives you
+that meaning, whether or not it is the one you had in mind. Neither approach is
+stupid. \VHDL{} optimises for the case where the reader is not the author and
+the year is 2045; \SV{} optimises for the case where the author is at the
+terminal now and wants a waveform.
+
+% ===========================================================================
+\section{The Compiler Is Not Your Friend Any More}
+\label{sec:philosophy:typing}
+% ===========================================================================
+
+In \VHDL{} you have an instinct, built over years, that goes like this: if it
+analyses and elaborates, the types are right. That instinct is correct in
+\VHDL{} and it is worth a great deal. You cannot assign an \code{integer} to a
+\code{std\_logic\_vector}, you cannot add \code{1} to one without deciding in
+writing whether it is signed or unsigned, and you cannot connect a 12-bit port
+to a 16-bit signal. Each of those is a compile-time or elaboration-time
+failure, and each corresponds to a real design bug you therefore never
+shipped.
+
+\SV{} does not work this way, and the single most dangerous thing a \VHDL{}
+designer can do is carry the instinct across unchanged.
+
+\subsection{Widths do not have to match}
+
+\index{width mismatch}In \SV{}, assignment between vectors of different widths
+is legal. The right-hand side is truncated from the most significant end if it
+is too wide, and extended if it is too narrow: with zeros if the expression is
+unsigned, by sign extension if it is signed. No warning is required by the
+\LRM{}. \cref{lst:philosophy:width} shows the whole problem in six lines.
+
+\begin{svcode}[caption={Width rules in action. Nothing here is an error.},label={lst:philosophy:width}]
+module width_demo;
+  logic [7:0] a;
+  logic [3:0] b;
+  logic [3:0] sum4;
+  logic [4:0] sum5;
+
+  initial begin
+    a    = 8'hAB;
+    b    = a;             // b = 4'hB   : silently truncated
+    sum4 = 4'hF + 4'h1;   // sum4 = 4'h0: the carry is lost
+    sum5 = 4'hF + 4'h1;   // sum5 = 5'h10: operands widened to 5 bits
+    $display("b=%h sum4=%h sum5=%h", b, sum4, sum5);
+  end
+endmodule
+\end{svcode}
+
+Look carefully at the last two assignments, because they are the same
+expression producing two different results. \SV{} computes the width of an
+arithmetic expression from its \emph{context}, and the assignment target is
+part of that context. In line 10 the target is four bits wide, so the addition
+is done in four bits and the carry out disappears. In line 11 the target is
+five bits wide, so both operands are first extended to five bits and the carry
+is kept. The expression did not change. The declaration of the variable you
+assigned it to changed the arithmetic.
+
+\VHDL{} has no equivalent behaviour because it has no equivalent hole. The
+corresponding code does not compile, and the fix is forced to be explicit.
+
+\begin{rosetta}
+\begin{rleft}
+signal a    : unsigned(7 downto 0);
+signal b    : unsigned(3 downto 0);
+signal sum5 : unsigned(4 downto 0);
+
+-- b <= a;  -- length mismatch: rejected
+b    <= a(3 downto 0);
+sum5 <= resize(a(3 downto 0), 5)
+      + to_unsigned(1, 5);
+\end{rleft}
+\begin{rright}
+logic [7:0] a;
+logic [3:0] b;
+logic [4:0] sum5;
+
+// b = a;   // legal, truncates
+assign b    = a[3:0];
+assign sum5 = 5'(a[3:0]) + 5'd1;
+\end{rright}
+\end{rosetta}
+
+The \VHDL{} side says \code{resize} because it must. The \SV{} side does not
+have to say anything, which is exactly why you should teach yourself to say
+something anyway: the cast \code{5'(...)} documents the intent and makes the
+widening visible to the next reader. \cref{ch:rosetta} covers the width and
+signedness rules in full, including the difference between \code{>>} and
+\code{>>>}, which catches people at least as often.
+
+\begin{gotcha}{Your ports do not have to match either}
+Port width mismatch at instantiation is also legal. Connecting a 16-bit signal
+to an 8-bit input port silently drops the top eight bits; connecting an 8-bit
+signal to a 16-bit port zero-extends it. In \VHDL{} this is an elaboration
+error and your synthesis run stops. In \SV{} it is a Tuesday. This is the
+single most common cause of ``it worked in the block-level testbench and broke
+in the system'' among people new to the language. Named port connections
+(\code{.data\_i(my\_data)}) protect you against wiring the wrong port; they do
+not protect you against wiring it at the wrong width.
+\end{gotcha}
+
+\subsection{Types that look familiar and are not}
+
+\index{logic}\index{std\_logic}\code{logic} is the type you will use for
+essentially everything in RTL, and the first thing to say about it is that it
+is \emph{not} \code{std\_logic}. It is close: it is a four-valued type with the
+values \code{0}, \code{1}, \code{x} and \code{z}. But it has no strengths.
+\code{std\_logic} has nine values, including the weak strengths \code{L},
+\code{H}, \code{W} and the don't-care \code{-}. Those extra values matter in
+two places you have probably used them: pull-up modelling, and \code{-} in a
+\code{case} choice or a comparison, which is a trap in \VHDL{} anyway because
+\code{-} does not mean don't-care to the \code{=} operator. \SV{} has no
+\code{-}. Its don't-care in a case statement is a different mechanism
+(\code{casez}, or better, the \code{unique} and \code{priority} qualifiers),
+covered in \cref{ch:rosetta2}.
+
+The second thing to say about \code{logic} is subtler and more important.
+\code{logic} is not a wire. In original Verilog there were two families,
+\emph{nets} (\kw{wire}, \code{tri}, \code{wand}) which model connections and
+can have several drivers resolved together, and \emph{variables} (\kw{reg})
+which model storage inside a process and may have only one driver.
+\code{logic}\index{wire}\index{reg} is simply a better name for \kw{reg}: it is
+a single-driver, four-valued variable that you may also drive with a single
+continuous assignment. If you genuinely need multiple drivers resolved -- a
+tri-state bus -- you need \kw{wire}. The \VHDL{} habit of writing
+\code{std\_logic} everywhere and relying on the resolution function translates
+to \code{logic} everywhere and \emph{not} relying on resolution, because
+\code{logic} will not resolve; a second driver is an error.
+
+Then there are the two-state types, which have no \VHDL{} counterpart at all
+and are a genuine trap.
+
+\begin{gotcha}{\code{int} is not \code{integer}, and it hides your reset bugs}
+\SV{} has two-state types: \kw{bit} (1 bit), \kw{byte} (8), \kw{shortint} (16),
+\kw{int} (32), \kw{longint} (64). Two-state means the variable can only hold
+\code{0} or \code{1}. It cannot hold \code{x}. It initialises to \code{0}, not
+to \code{x}.
+
+That last sentence is the trap. A \VHDL{} designer relies on a signal starting
+at \code{'U'} or \code{'X'} and propagating that unknown through the design
+until reset drives it: a red waveform after reset is how you find the register
+you forgot to reset. Declare that register as \kw{int} or \kw{bit} and it
+starts at zero, the simulation looks clean, and the silicon powers up
+arbitrarily. Use \code{logic} for anything that is hardware. Keep the two-state
+types for loop counters, testbench bookkeeping and class members, where the
+speed and the absence of \code{x} are what you want.
+
+Note also that \SV{}'s \kw{int} is 32-bit and signed by definition, whereas
+\VHDL{}'s \code{integer} is a 32-bit signed type whose range is defined by the
+standard but whose subtype you are expected to constrain. There is no \SV{}
+equivalent of \code{natural} or of \code{range 0 to 15}, and therefore no
+runtime range check.
+\end{gotcha}
+
+\subsection{Names you never declared}
+
+\index{implicit net declaration}Verilog inherited from its simulator days a
+rule that would be unthinkable in \VHDL{}: some undeclared identifiers are not
+errors. If a name that has never been declared appears in an instance port
+connection, or on the left-hand side of a continuous assignment, the tool
+creates a one-bit net called that, and carries on.
+
+\begin{svcode}[caption={A typo that costs you an afternoon},label={lst:philosophy:implicit}]
+module counter (input logic clk, output logic [3:0] cnt_o);
+  logic [3:0] cnt_d, cnt_q;
+
+  assign cnt_d = cnt_q + 4'd1;
+
+  sink u_sink (.d_i(cnt_qq), .q_o(cnt_o));  // typo: cnt_qq never declared
+
+  always_ff @(posedge clk) cnt_q <= cnt_d;
+endmodule
+\end{svcode}
+
+\cref{lst:philosophy:implicit} compiles. \code{cnt\_qq} becomes a one-bit
+implicit net, driven by nothing, so it is \code{z}. The port it feeds is four
+bits wide, so the one-bit net is padded with zeros and the submodule sees
+\code{4'b000z}: the top bits are a clean \code{0} and only bit 0 carries the
+\code{z}. That is the reason the bug is hard to see. A wholly undriven signal
+shows up as \code{zzzz} in the waveform and in every print; \code{000z} looks
+almost like data, and any arithmetic on it quietly turns into \code{x}. In
+\VHDL{} this is one line of error output naming the undeclared identifier.
+
+The remedy is not optional. Put the directive
+\chOneDir{default\_nettype none} at the top of every file: it switches
+implicit net creation off, and the typo above becomes the compile error it
+should always have been.\index{default\_nettype}
+
+\begin{tipbox}{The two lines that go in every file}
+Begin every \file{.sv} file with \chOneDir{default\_nettype none} and end it
+with \chOneDir{default\_nettype wire}. The closing line matters because
+compiler directives are not scoped to a file: they persist through the whole
+compilation, so a file that switches the default off and does not switch it
+back will break the next file the tool reads, which may be somebody else's
+IP.
+
+\begin{svcode}
+`default_nettype none
+
+module fifo #(parameter int unsigned DEPTH = 8) (
+  input  wire  logic clk_i,
+  input  wire  logic rst_ni,
+  // ...
+);
+  // ...
+endmodule
+
+`default_nettype wire
+\end{svcode}
+Once implicit nets are off, undeclared input ports also become errors, which is
+why the ports above are written \code{input wire logic}: with the default net
+type set to none you must say what kind of thing an input port is.
+\end{tipbox}
+
+\subsection{The linter is the new type checker}
+
+\index{linting}\index{Verilator}Put the previous three subsections together and
+a picture emerges. \SV{} will not stop you from writing a width mismatch, an
+inferred latch, an incomplete sensitivity list, an unconnected port, a
+multiply-driven signal or an undeclared name. The language does not consider
+these to be its problem.
+
+The industry's answer is a lint tool, run automatically, treated as a gate. The
+cultural position that \VHDL{} gives to the analyser, \SV{} gives to the
+linter. This is not a workaround adopted by sloppy teams. It is the mainstream
+professional practice, and every serious \SV{} project you will join has it
+wired into continuous integration.
+
+Concretely, the free option is \tool{Verilator}, which is a very good linter
+even if you never use it as a simulator:
+
+\begin{shcode}
+verilator --lint-only -Wall --timing -f files.f --top-module cordic_rot
+\end{shcode}
+
+\code{-Wall} turns on the checks that are off by default, including the
+width-mismatch warnings (\code{WIDTHTRUNC} and \code{WIDTHEXPAND} in
+\tool{Verilator}~5; older versions call both of them \code{WIDTH}),
+\code{UNUSED}, \code{UNDRIVEN}, \code{CASEINCOMPLETE}, \code{LATCH} and
+\code{BLKSEQ}. Commercial linters (\tool{Spyglass}, \tool{AscentLint},
+\tool{Questa AutoCheck}) do the same job with more rules and a rule-set
+configuration you inherit from your employer. \refsimulationbook sets
+\tool{Verilator} up properly.
+
+The other half of the answer is a written coding standard. The best public one
+is the lowRISC style guide, used by the OpenTitan project; it is freely
+available, it is short, and its rules are exactly the rules that stop the
+failures described in this section.\index{lowRISC style guide}
+\index{OpenTitan} It is worth reading in full before you write your first
+thousand lines. Google's internal Verilog style guide and the ETH Zurich /
+PULP platform conventions are close relatives.
+
+\begin{ruleofthumb}
+Replace the instinct ``if it compiles, the types are right'' with ``if the
+linter is clean, the widths are right''. A \SV{} compile that produces no
+output has told you almost nothing.
+\end{ruleofthumb}
+
+% ===========================================================================
+\section{Design Units, Libraries and the Preprocessor}
+\label{sec:philosophy:units}
+% ===========================================================================
+
+\index{design unit}\VHDL{} has five kinds of design unit: entity, architecture,
+configuration, package and package body. Three of them are primary (entity,
+package, configuration) and two are secondary (architecture, package body),
+meaning they cannot be analysed until their primary exists. Each analysed unit
+is deposited into a \emph{library}, which is a real directory of compiled
+objects on disk, and the default library is called \code{work}. Referring to
+something in another library requires you to say so twice, once to make the
+library visible and once to make the name visible:
+
+\begin{rosetta}
+\begin{rleft}
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+library work;
+use work.cordic_pkg.all;
+
+entity cordic_rot is
+  generic (ITER : positive := 14);
+  port (
+    clk_i  : in  std_logic;
+    rst_ni : in  std_logic;
+    -- ...
+  );
+end entity cordic_rot;
+
+architecture rtl of cordic_rot is
+  signal x_q : signed(15 downto 0);
+begin
+  -- ...
+end architecture rtl;
+\end{rleft}
+\begin{rright}
+import cordic_pkg::*;
+
+module cordic_rot #(
+  parameter int unsigned ITER = 14
+) (
+  input  logic clk_i,
+  input  logic rst_ni
+  // ...
+);
+  data_t x_q;
+  // ...
+endmodule
+\end{rright}
+\end{rosetta}
+
+The structural differences are worth spelling out.
+
+\textbf{One unit, not two.} A \code{module} is entity and architecture in one.
+The interface and the body cannot drift apart, and there is no way to compile
+two architectures of the same entity and pick between them at elaboration. The
+\VHDL{} configuration has no everyday counterpart: \SV{} inherits a
+\code{config}/\code{library} mechanism from Verilog-2001, but it is rarely
+used, and parameterisation plus
+\chOneDir{ifdef}\index{conditional compilation} do the same job. If you used
+configurations to swap a behavioural model for a gate netlist, in \SV{} you do
+it by choosing which files you compile.
+
+\textbf{No library clause.} \index{compilation unit}\SV{} module names live in
+a single global namespace. If two modules called \code{fifo} are compiled into
+the same design, that is a collision, and the usual fix is a project-wide name
+prefix, exactly as in C. What \SV{} has instead of libraries is the
+\emph{compilation unit}. Everything declared outside any module lands in a
+scope called \code{\$unit}. Whether \code{\$unit} covers one file or all the
+files on the command line is, by the \LRM{}, tool-dependent.
+
+\begin{gotcha}{Never declare anything at compilation-unit scope}
+Because \code{\$unit} may be one file for one tool and all files for another,
+a \code{typedef} or a \code{parameter} written outside a module compiles under
+\tool{Verilator} and fails under \tool{VCS}, or vice versa, or, worse still,
+compiles under both and means different things. Put every shared declaration in
+a \kw{package} and import it. There is no \VHDL{} habit that leads you into
+this, but there is a C habit that does, and \SV{} looks enough like C to
+tempt you.
+\end{gotcha}
+
+\textbf{Packages exist and behave nearly as you expect.}\index{package} A
+\SV{} package holds \code{typedef}s, \code{parameter}s, \code{function}s,
+\code{task}s and class declarations. Import it with \code{import
+cordic\_pkg::*;} for everything or \code{import cordic\_pkg::data\_t;} for one
+name, and refer to individual names explicitly with
+\code{cordic\_pkg::data\_t}. The scope-resolution operator \code{::} is the
+counterpart of \VHDL{}'s selected name \code{work.cordic\_pkg.data\_t}. A
+package must be compiled before anything that imports it, exactly as in
+\VHDL{}. There is no package body: the implementations go in the package
+itself.
+
+\textbf{And there is a preprocessor.}\index{preprocessor} This is the piece
+with no \VHDL{} analogue whatsoever. Verilog inherited from C a purely textual
+substitution pass that runs before the language is parsed:
+\chOneDir{define} creates a macro, \chOneDir{ifdef}\slash{}\chOneDir{ifndef}\slash{}
+\chOneDir{else}\slash{}\chOneDir{endif} conditionally include text, and
+\chOneDir{include} pastes one file into another.
+
+\begin{svcode}[caption={Compiler directives: text substitution, not language},label={lst:philosophy:defines}]
+`ifndef CORDIC_DEFS_SVH
+`define CORDIC_DEFS_SVH
+
+`define CORDIC_MAX_ITER 16
+`define ASSERT(name, prop) name: assert property (prop)
+
+`ifdef SYNTHESIS
+  `define SIM_ONLY(x)
+`else
+  `define SIM_ONLY(x) x
+`endif
+
+`endif
+\end{svcode}
+
+What this buys you is real. Conditional compilation lets one source tree serve
+simulation, synthesis, formal and emulation, with the assertion-heavy parts
+excluded from the flows that cannot take them, and it lets you define something
+once and use it in a hundred files without a package import. \VHDL{} has no
+equivalent until the conditional analysis directives of VHDL-2019, whose tool
+support is thin enough that you should not plan around it.
+
+What it costs you is also real. Macros have no types, no scope and no
+namespace; one defined anywhere is visible everywhere after that point, and
+redefining it is legal. They are invisible to the elaborated design, so no
+waveform or hierarchy browser will show you one. The universal conventions are
+to prefix every macro name with the project name, to guard every included file
+as in \cref{lst:philosophy:defines}, and to prefer a package \code{parameter}
+to a \chOneDir{define} whenever a parameter will do. Use the preprocessor for
+what must happen before parsing, and for nothing else.
+
+\begin{notebox}{\chOneDir{include} is not \code{use}}
+\chOneDir{include} is textual. It does not create a scope, does not check for
+duplicate definitions, and can be placed inside a module body, inside a port
+list, or anywhere else the resulting text would be legal. \VHDL{}'s \code{use}
+is a name-visibility statement about a unit that has already been analysed. The
+two look similar in a file header and have nothing in common. If a colleague
+tells you to ``just include the package'', they mean import it.
+\end{notebox}
+
+% ===========================================================================
+\section{The Simulation Cycle: Where Your Intuition Breaks}
+\label{sec:philosophy:sched}
+% ===========================================================================
+
+This is the most important section in the chapter. Everything above is a matter
+of discipline; this is a matter of semantics. If you carry your \VHDL{}
+scheduling model into \SV{} unchanged, you will write designs that simulate
+differently on two simulators and blame the tools.
+
+\subsection{What VHDL does}
+
+\index{delta cycle}You know this already, but state it precisely, because the
+precision is the point of comparison.
+
+A \VHDL{} simulation cycle has two phases in a fixed order. First the
+\emph{update} phase: every signal with a transaction scheduled for the current
+time $T_c$ takes its new value, and if the new value differs from the old one,
+an event is posted on that signal. Second the \emph{evaluate} phase: every
+process sensitive to a signal that had an event resumes, and runs until it
+suspends again. Assignments a process makes to signals do not take effect
+during the evaluate phase. They schedule transactions, and the earliest a
+transaction can be scheduled for is $T_c$ plus one \emph{delta} -- an
+infinitesimal step that does not advance simulated time.
+
+Then the simulator computes the next time $T_n$. If $T_n = T_c$, because
+somebody scheduled a delta-delayed transaction, the whole cycle repeats at the
+same simulated time. That is a delta cycle. Time only advances when no
+transaction remains scheduled for the current time.
+
+Two consequences follow, and both are why \VHDL{} feels safe.
+
+First, \emph{a signal read inside a process always returns the value it had at
+the start of the current cycle}, no matter what the process assigned to it
+three lines earlier. That is a rule of the language, not a convention. A
+variable behaves the other way round: it updates immediately, because it is not
+visible outside the process and needs no scheduling discipline.
+
+Second, and this is the important one, \emph{a clocked \VHDL{} process is
+race-free by construction}. Consider two processes, both sensitive to
+\code{clk}, one assigning \code{q1 <= d} and the other \code{q2 <= q1}. Both
+resume in the evaluate phase of the same cycle. Both read the pre-update values.
+Both schedule for the next delta. The order in which the simulator happens to
+run them cannot change the result, so a shift register is a shift register
+regardless. You have never had to think about this, and that is the achievement.
+
+\begin{notebox}{Postponed processes}
+\VHDL{} also has \code{postponed process}, which runs once at the end of the
+last delta cycle of a time step, when no further delta activity remains. It
+exists for monitoring and reporting code that must see the settled value rather
+than an intermediate delta. Keep it in mind: \SV{} has a region with exactly
+this purpose, and it is even called Postponed.
+\end{notebox}
+
+\subsection{What SystemVerilog does}
+
+\index{event regions}\SV{} does not have a two-phase cycle. It has a
+\emph{time slot} containing nine regions, executed in order, with two loops
+that can send execution back to an earlier region. The regions are Preponed,
+Active, Inactive, NBA, Observed, Reactive, Re-Inactive, Re-NBA and Postponed.
+\cref{fig:philosophy:sched} puts the two models side by side.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\sffamily\scriptsize,
+      bx/.style={draw=codeframe,fill=codebg,line width=0.7pt,
+                 rounded corners=1.5pt,minimum width=38mm,
+                 minimum height=6mm,align=center,inner sep=3pt},
+      sb/.style={bx,minimum width=30mm},
+      hd/.style={font=\sffamily\small\bfseries,text=codekey},
+      an/.style={font=\sffamily\scriptsize\itshape,text=codenumber,
+                 anchor=west,align=left,text width=32mm},
+      ar/.style={-{Stealth[length=1.8mm]},line width=0.7pt,draw=codekey},
+      fb/.style={-{Stealth[length=1.8mm]},line width=0.7pt,draw=accentalt,
+                 dashed},
+      lb/.style={font=\sffamily\tiny,text=accentalt}
+    ]
+
+    % ---------------- VHDL column ----------------
+    \node[hd] at (0,1.5) {VHDL simulation cycle};
+    \node[bx] (v1) at (0,0.6)  {advance time to $T_c$};
+    \node[bx] (v2) at (0,-0.9) {\textbf{update phase}\\signals take new values,\\events posted};
+    \node[bx] (v3) at (0,-2.6) {\textbf{evaluate phase}\\sensitive processes resume\\and run to suspension};
+    \node[bx] (v4) at (0,-4.3) {assignments schedule\\transactions; compute $T_n$};
+    \node[bx] (v5) at (0,-5.8) {postponed processes\\(only when $T_n > T_c$)};
+
+    \draw[ar] (v1) -- (v2);
+    \draw[ar] (v2) -- (v3);
+    \draw[ar] (v3) -- (v4);
+    \draw[ar] (v4) -- (v5);
+
+    \draw[fb] (v4.west) -- (-2.75,-4.3) -- (-2.75,-0.9) -- (v2.west);
+    \node[lb,rotate=90,anchor=south] at (-2.9,-2.6)
+         {delta cycle: $T_n = T_c$};
+
+    % ---------------- SV column ----------------
+    \node[hd] at (6.9,1.5) {SystemVerilog time slot};
+    \node[sb] (s1) at (6.9,0.6)  {Preponed};
+    \node[sb] (s2) at (6.9,-0.3) {Active};
+    \node[sb] (s3) at (6.9,-1.2) {Inactive};
+    \node[sb] (s4) at (6.9,-2.1) {NBA};
+    \node[sb] (s5) at (6.9,-3.0) {Observed};
+    \node[sb] (s6) at (6.9,-3.9) {Reactive};
+    \node[sb] (s7) at (6.9,-4.8) {Re-Inactive};
+    \node[sb] (s8) at (6.9,-5.7) {Re-NBA};
+    \node[sb] (s9) at (6.9,-6.6) {Postponed};
+
+    \draw[ar] (s1) -- (s2);
+    \draw[ar] (s2) -- (s3);
+    \draw[ar] (s3) -- (s4);
+    \draw[ar] (s4) -- (s5);
+    \draw[ar] (s5) -- (s6);
+    \draw[ar] (s6) -- (s7);
+    \draw[ar] (s7) -- (s8);
+    \draw[ar] (s8) -- (s9);
+
+    \node[an] at (8.6,0.6)  {sample values for\\assertions and\\clocking inputs};
+    \node[an] at (8.6,-0.3) {blocking assignments,\\continuous assignments,\\RHS of \texttt{<=}};
+    \node[an] at (8.6,-1.2) {\texttt{\#0} delays};
+    \node[an] at (8.6,-2.1) {left sides of \texttt{<=}\\are updated};
+    \node[an] at (8.6,-3.0) {concurrent assertions\\evaluated};
+    \node[an] at (8.6,-3.9) {\texttt{program} blocks,\\assertion actions};
+    \node[an] at (8.6,-5.7) {clocking-block\\outputs driven};
+    \node[an] at (8.6,-6.6) {\texttt{\$monitor},\\\texttt{\$strobe}};
+
+    \draw[fb] (s4.west) -- (5.05,-2.1) -- (5.05,-0.3) -- (s2.west);
+    \node[lb,rotate=90,anchor=south] at (4.9,-1.2) {iterate};
+    \draw[fb] (s8.west) -- (4.35,-5.7) -- (4.35,-0.3) -- (s2.west);
+    \node[lb,rotate=90,anchor=south] at (4.2,-3.5) {re-enter};
+  \end{tikzpicture}
+  \caption{The \VHDL{} simulation cycle and the \SV{} time slot. \VHDL{}
+    separates update from evaluate once, and repeats the pair in delta cycles.
+    \SV{} splits the same job across nine regions and iterates between them
+    until no events remain.}
+  \label{fig:philosophy:sched}
+\end{figure}
+
+Region by region, in the terms you already have:
+
+\begin{description}[leftmargin=1.6em,style=nextline,font=\normalfont\ttfamily]
+\item[Preponed] Nothing changes value here. Values are \emph{sampled} for
+  concurrent assertions and for clocking-block inputs. This is what
+  \code{\#1step} means: sample as the value was immediately before this time
+  slot.
+\item[Active] Where ordinary procedural code runs. Blocking assignments take
+  effect, continuous assignments are evaluated, \code{\$display} prints, and
+  the \emph{right-hand sides} of non-blocking assignments are evaluated and
+  queued. Processes here execute in an order the \LRM{} deliberately leaves
+  unspecified.
+\item[Inactive] Processes that executed an explicit \code{\#0} delay.
+\item[NBA] The non-blocking assignment queue is applied: the left-hand sides
+  now take the values that were computed in Active. This is \VHDL{}'s update
+  phase.
+\item[Observed] Concurrent assertion properties are evaluated, using the values
+  sampled in Preponed.
+\item[Reactive] Testbench code in a \code{program} block, and the action blocks
+  of assertions.
+\item[Re-Inactive, Re-NBA] The same as Inactive and NBA, for processes in the
+  reactive set. Clocking-block outputs are driven in Re-NBA.
+\item[Postponed] \code{\$monitor} and \code{\$strobe}. Read-only: nothing may
+  change a value here.
+\end{description}
+
+The loops matter as much as the regions. After NBA, if anything that just
+happened created new active events, execution returns to Active and the
+Active/Inactive/NBA group repeats until all three are empty. This iteration is
+the exact counterpart of a chain of \VHDL{} delta cycles. There is a second
+loop from the reactive group back to Active, so a testbench that drives a
+signal can wake design code inside the same time slot.
+
+\begin{notebox}{The regions the \LRM{} lists that this book ignores}
+IEEE 1800-2017 Figure 4-1 actually shows more than nine regions: Pre-NBA,
+Post-NBA, Post-Observed, Pre-Re-NBA and Post-Re-NBA exist as well. They are
+reserved for PLI and VPI callbacks, so that a C model attached to the simulator
+can run at a defined point relative to the language's own events. No \SV{} you
+write ever executes in them, and they are omitted from
+\cref{fig:philosophy:sched} for clarity.
+\end{notebox}
+
+\subsection{Blocking, non-blocking, and why Verilog needed them}
+
+\index{blocking assignment}\index{non-blocking assignment}Now the pieces join
+up. \SV{} has two procedural assignment operators:
+
+\begin{itemize}
+\item \code{=}, the \emph{blocking} assignment. It evaluates its right-hand
+  side and updates its target immediately, in the Active region, before the
+  next statement in the process runs. It behaves like a \VHDL{}
+  \kw{variable}.
+\item \code{<=}, the \emph{non-blocking} assignment. It evaluates its
+  right-hand side in the Active region, queues the result, and updates its
+  target later, in the NBA region. It behaves like a \VHDL{} \kw{signal} with a
+  delta delay.
+\end{itemize}
+
+That is the whole mapping, and it is exact enough to rely on:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{\VHDL{}} & \textbf{\SV{}} \\
+\midrule
+\code{variable v : ...;\quad v := expr;} & \code{logic v;\quad v = expr;} \\
+\code{signal s : ...;\quad s <= expr;}   & \code{logic s;\quad s <= expr;} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Here is the historical point that makes the whole design comprehensible.
+\VHDL{} never needed to invent the non-blocking assignment, because the signal
+\emph{already} had a delta-delayed update built into its definition: there is
+only one kind of assignment to a signal, and it is always deferred. Verilog
+started from the opposite place, with an immediate procedural assignment and
+\code{always} blocks scheduled in an unspecified order, so writing a shift
+register was genuinely ambiguous. The non-blocking assignment was added to
+Verilog-XL, and standardised in IEEE 1364-1995, precisely to recover the
+discipline \VHDL{} had from birth: evaluate everything, then update
+everything.
+
+Look at the same register in both languages, and read the right-hand pane as
+``the \code{<=} is doing what your \VHDL{} signal did automatically'':
+
+\begin{rosetta}
+\begin{rleft}
+regs : process (clk_i, rst_ni) is
+begin
+  if rst_ni = '0' then
+    q <= (others => '0');
+  elsif rising_edge(clk_i) then
+    q <= d;
+  end if;
+end process regs;
+\end{rleft}
+\begin{rright}
+always_ff @(posedge clk_i or
+            negedge rst_ni) begin
+  if (!rst_ni) q <= '0;
+  else         q <= d;
+end
+\end{rright}
+\end{rosetta}
+
+Eight lines against five, and the five say the same thing. The \code{'0} is
+\SV{}'s unsized fill literal, the counterpart of \code{(others => '0')}: it
+fills the target with zeros whatever its width. Note that the \SV{} sensitivity
+list is \code{negedge rst\_ni}, not the plain \code{rst\_ni} of the \VHDL{}
+process. \SV{} requires every term of an \code{always\_ff} event control to be
+edge-qualified, and it needs the polarity to know which edge starts the
+asynchronous reset. \VHDL{} works out the same thing from the \code{if}
+statement.
+
+\subsection{The classic race}
+
+Now the failure that this machinery exists to prevent.
+\cref{lst:philosophy:race} is a two-stage shift register written with blocking
+assignments.
+
+\begin{svcode}[caption={A race. This design has two legal outcomes.},label={lst:philosophy:race}]
+module shift_bad (input logic clk, input logic d, output logic q2);
+  logic q1;
+  always_ff @(posedge clk) q1 = d;    // blocking: wrong
+  always_ff @(posedge clk) q2 = q1;   // blocking: wrong
+endmodule
+\end{svcode}
+
+Both processes wake in the Active region of the same time slot. The \LRM{} does
+not say which runs first. If the first runs first, \code{q1} takes the value of
+\code{d} immediately, then the second reads the \emph{new} \code{q1} and
+\code{q2} follows \code{d} in a single cycle: one flop, not two. If the second
+runs first, \code{q2} takes the old \code{q1} and you get the two-stage shift
+register you intended. Both are legal. Two simulators may disagree; one
+simulator may disagree with itself after you add an unrelated module and change
+its internal scheduling order. Synthesis, meanwhile, will happily produce two
+flip-flops, so the gate-level netlist need not match the RTL simulation.
+
+\begin{gotcha}{The failure mode you have never had to think about}
+In \VHDL{} you could write the two processes in either order, in either file,
+and get the same answer every time, because signal semantics forbid the race.
+In \SV{} the ordering of \code{always} blocks within the Active region is
+explicitly unspecified, so the race is real and the language will not warn you.
+Change one character in \cref{lst:philosophy:race}:
+
+\begin{svcode}
+  always_ff @(posedge clk) q1 <= d;
+  always_ff @(posedge clk) q2 <= q1;
+\end{svcode}
+
+Now both right-hand sides are evaluated in Active, using the old values, and
+both targets are updated in NBA. The order of the two blocks is irrelevant.
+This is why the rule exists, and it is why \tool{Verilator}'s \code{BLKSEQ}
+warning and every commercial lint rule set flag a blocking assignment inside a
+clocked block as an error, not a style issue.
+\end{gotcha}
+
+The rule that follows is the first thing anyone will tell you about \SV{}, and
+now you know why it is true rather than merely being told it.
+
+\begin{ruleofthumb}
+Non-blocking (\code{<=}) for everything a clock edge writes. Blocking
+(\code{=}) for everything combinational. Never mix the two in one
+\code{always} block, and never write the same variable from two blocks.
+\end{ruleofthumb}
+
+The reasoning for the combinational half is the mirror image. Inside an
+\code{always\_comb}, a blocking assignment behaves like a \VHDL{} variable in a
+combinational process: intermediate results are visible to later statements in
+the same execution, which is exactly what you want when you are describing a
+chain of logic. Using \code{<=} there would push the update into the NBA
+region, so a later statement in the same block would read the stale value, and
+the block would then have to be re-executed, producing extra delta activity,
+slower simulation and, in some cases, a mismatch with synthesis.
+
+\subsection{Testbenches race too}
+
+\index{clocking block}The design-side race has a clean rule. The
+testbench-side race does not, and it needs language support.
+
+Consider a testbench driving a synchronous input:
+
+\begin{svcode}
+initial begin
+  @(posedge clk);
+  data = 8'h5A;    // Active region, same time slot as the DUT's clock edge
+end
+\end{svcode}
+
+The \DUT samples \code{data} on the same edge, and the testbench writes it in
+the Active region of that same time slot, so whether the \DUT sees the old
+value or the new one depends on which process the simulator happens to run
+first. The ``use non-blocking'' rule does not fully save you here, because the
+testbench also wants to \emph{read} \DUT outputs at the clock edge, and
+reading has the same ambiguity. Verilog testbench writers solved this by hand
+for twenty years, inserting small delays after the clock edge. \SV{} solved it
+in the language, with the \emph{clocking block}: a declaration that names a
+clock and states, once, when its signals are sampled and when they are
+driven.
+
+\begin{svcode}[caption={A clocking block removes the testbench race by construction},label={lst:philosophy:clkblk}]
+module tb;
+  logic       clk = 1'b0;
+  logic       vld, ready;
+  logic [7:0] data;
+
+  always #5ns clk = ~clk;
+
+  clocking cb @(posedge clk);
+    default input #1step output #1ns;
+    output vld, data;
+    input  ready;
+  endclocking
+
+  initial begin
+    @(cb);
+    cb.vld  <= 1'b1;         // driven in Re-NBA, 1 ns after the edge
+    cb.data <= 8'h5A;
+    @(cb);
+    if (cb.ready) $display("accepted");  // sampled 1step before the edge
+  end
+endmodule
+\end{svcode}
+
+\code{input \#1step} means every clocking-block input is sampled in the
+Preponed region, before any design code in that time slot has run, so it can
+never see a value the \DUT produced at this very edge. \code{output \#1ns}
+means every drive happens 1\,ns after the edge, safely inside the cycle. The
+race is gone by construction, and it stays gone when somebody adds another
+\code{always} block to the design six months later. \refverificationbook builds
+testbenches on this foundation.
+
+\begin{notebox}{Whatever happened to \code{program} blocks?}
+\index{program block}\SV{} 3.1 introduced the \kw{program} block, borrowed from
+Vera: a container whose code runs in the Reactive region, which is after all
+design code in the same time slot, so testbench statements could never race
+with the design. It solved a real problem, but it also brought restrictions
+(no \code{always} blocks inside, particular termination semantics) and it was
+largely superseded by clocking blocks, which fix the same races without
+constraining the testbench structure. UVM does not use \code{program} blocks.
+You will meet them in older code and in textbooks; you do not need to write
+them.
+\end{notebox}
+
+\begin{gotcha}{\code{after} is not \code{\#}}
+\VHDL{}'s \code{s <= v after 5 ns} schedules a transaction, with inertial
+delay: a pulse shorter than 5\,ns is swallowed. \SV{}'s \code{\#} is not a
+scheduling annotation on an assignment, it is a statement delay, and its two
+placements mean different things. \code{a = \#5 b} evaluates \code{b} now,
+suspends the process for 5\,ns and then assigns; the process is blocked for
+those 5\,ns. \code{a <= \#5 b} evaluates \code{b} now and schedules the update
+for 5\,ns later without blocking. Neither is inertial. And in synthesisable
+RTL you should write no \code{\#} delays at all -- the closest \SV{} gets to
+\VHDL{}'s inertial behaviour is on gate primitives and continuous assignments,
+which is not where you will be working.
+\end{gotcha}
+
+% ===========================================================================
+\section{Intent, Declared and Checked}
+\label{sec:philosophy:intent}
+% ===========================================================================
+
+\SV{} gave away the type safety that \VHDL{} has. It got something back that
+\VHDL{} does not have, and the trade is more even than it first looks. In
+\VHDL{} a process is a process: whether it describes a flip-flop, combinational
+logic or a latch is something the reader, the simulator and the synthesiser
+each work out from the shape of the code inside it. There is no place to write
+down which of the three you meant, so no tool can tell you that you wrote
+something else. Every \VHDL{} designer has produced a latch by forgetting an
+\code{else} in a combinational process, and the analyser said nothing, because
+nothing was wrong with the \emph{types}.
+
+\SV{}-2005 added three specialised process keywords whose only purpose is to
+state intent so that a tool can check it.\index{always\_ff}
+\index{always\_comb}\index{always\_latch}
+
+\begin{itemize}
+\item \code{always\_ff} declares sequential logic. Its event control must
+  contain only edge-qualified terms; the variables it writes may not be written
+  anywhere else; and tools check that what it describes is in fact a
+  flip-flop.
+\item \code{always\_comb} declares combinational logic. Its sensitivity list is
+  inferred from everything the block reads, \emph{including inside functions it
+  calls}; the variables it writes may not be written anywhere else; and a tool
+  will warn if the code as written infers a latch. It also executes once at the
+  end of time zero, whether or not any input changed, so the outputs are
+  consistent from the start of the simulation.
+\item \code{always\_latch} declares a latch on purpose, so that a real latch
+  does not look like a mistake.
+\end{itemize}
+
+\begin{rosetta}
+\begin{rleft}
+-- intent is not stated; a missing
+-- else silently infers a latch
+comb : process (all) is
+begin
+  if sel = '1' then
+    y <= a;
+  else
+    y <= b;
+  end if;
+end process comb;
+\end{rleft}
+\begin{rright}
+// intent is stated and checked
+always_comb begin
+  if (sel) y = a;
+  else     y = b;
+end
+\end{rright}
+\end{rosetta}
+
+The \VHDL{}-2008 \code{process (all)} form removes the incomplete sensitivity
+list problem, which is the other half of the same class of bug, so that part is
+a draw. What \VHDL{} still has no way to express is the sentence ``this block
+is combinational, please complain if it is not''.
+
+Argue it this way. \VHDL{} applies static checking to \emph{data}: what a value
+is, how wide it is, what may be assigned to what. \SV{} applies static checking
+to \emph{structure}: what kind of hardware a block of code describes, and
+whether anything else drives the same variable. Neither language checks what
+the other checks. A \VHDL{} designer arriving in \SV{} should use
+\code{always\_ff} and \code{always\_comb} everywhere with the same reflex that
+made them declare a signal as \code{unsigned(11 downto 0)} rather than
+\code{std\_logic\_vector}: it is free, and it converts a class of silent bugs
+into a message.
+
+\begin{tipbox}{Naming, and why the industry cares about it}
+\SV{} has no reserved suffix conventions, so a project's naming rules do a job
+that the language does not. Two notes before the list. These rules apply to
+design code you intend to keep; the small throwaway examples in this book ---
+a counter, a FIFO, a shift register --- drop the suffixes so that the line
+under discussion fits in a narrow column, and the CORDIC sources of
+\refexamplebook follow the rules in full. And the rules themselves matter less
+than picking one set and holding to it. The set below comes from the lowRISC guide and is
+close to universal in modern \SV{}:
+
+\begin{itemize}
+\item \code{\_i}, \code{\_o}, \code{\_io} on module ports for input, output and
+  bidirectional. The direction is then visible at every use, not only at the
+  declaration.
+\item \code{\_n} for active-low, always as the last element before the
+  direction: a reset input is \code{rst\_ni}.
+\item \code{\_d} and \code{\_q} for the input and the output of a register.
+  \code{cnt\_d} is what will be stored, \code{cnt\_q} is what is stored. An
+  \code{always\_ff} then contains nothing but \code{cnt\_q <= cnt\_d;} and all
+  the logic lives in an \code{always\_comb} that computes \code{cnt\_d}.
+\item Lower case with underscores for signals and instances, upper case for
+  \code{parameter}s and macros, \code{\_t} for a \code{typedef}, \code{\_e} for
+  an \code{enum}, \code{\_pkg} for a package.
+\end{itemize}
+
+The \code{\_d}/\code{\_q} convention deserves a specific defence: it makes the
+register boundary visible in the source. In \VHDL{} you can usually see it
+because the clocked process is a separate lump of text; in a language where
+\code{always\_ff @(posedge clk\_i) x <= y;} is one line, you need the names to
+carry the information.
+\end{tipbox}
+
+\begin{tipbox}{One clock, one reset, one \code{always\_ff}}
+Give every \code{always\_ff} exactly one clock and at most one asynchronous
+reset. Do not put logic for two clock domains in one block, do not gate a clock
+inside the event control, and do not use a signal as both a clock and data.
+Clock-domain crossings get their own dedicated modules with their own lint and
+CDC checks. This is the same discipline you already apply in \VHDL{}; \SV{}
+simply makes it easier to violate, because the terse syntax invites you to put
+more into one block.
+\end{tipbox}
+
+\subsection{Brevity is a feature}
+
+The register comparison above was eight lines against five. That ratio holds
+across most RTL, and it is not only about typing speed. Verbosity has a real
+cost: a design that fits on one screen can be checked by eye, and a design that
+takes three screens cannot. When the same finite-state machine is 120 lines
+instead of 300, more of it is visible at once and structural mistakes stand
+out.
+
+The savings come from several places at once: no separate entity, no
+\code{architecture} wrapper, no declarative region separate from the body, no
+explicit type conversions, \code{begin}/\code{end} omitted for a single
+statement, ANSI port lists with types inline, and the \code{'0} fill literal.
+Nothing on that list is free, since every item is an explicitness you have
+given up, but the aggregate effect on readability is positive and it is one of
+the honest reasons the industry moved.
+
+% ===========================================================================
+\section{Verification: the Bigger Break}
+\label{sec:philosophy:verif}
+% ===========================================================================
+
+Everything so far has been about writing hardware. The larger difference
+between the two ecosystems is about proving that the hardware is right, and
+here the gap is not a matter of syntax at all. It is a different theory of what
+a testbench \emph{is}.
+
+\subsection{The VHDL testbench you already write}
+
+\index{testbench!VHDL}In \VHDL{}, a testbench is another design unit. It is an
+entity with an empty port list and an architecture that instantiates the device
+under test and drives it from one or more processes. The stimulus is
+procedural, directed and written by hand: assert reset, wait, apply a value,
+wait for a clock edge, check the output with \code{assert ... report ...
+severity ...}. Reference data comes from a file read with \code{TEXTIO} or from
+a function written in the testbench.
+
+\begin{vhdlcode}[caption={The shape of a directed VHDL testbench},label={lst:philosophy:vhdltb}]
+stim : process is
+begin
+  rst_ni <= '0';
+  wait for 40 ns;
+  rst_ni <= '1';
+  wait until rising_edge(clk_i);
+
+  req_x_i     <= to_signed(16#2000#, 16);
+  req_y_i     <= (others => '0');
+  req_valid_i <= '1';
+  wait until rising_edge(clk_i) and req_ready_o = '1';
+  req_valid_i <= '0';
+
+  wait until rising_edge(clk_i) and rsp_valid_o = '1';
+  assert abs(to_integer(rsp_x_o) - 11585) < 4
+    report "cos result out of tolerance" severity error;
+
+  std.env.stop;
+end process stim;
+\end{vhdlcode}
+
+There is nothing wrong with this. It is readable, deterministic and easy to
+debug, and for a small block with a handful of interesting cases it is the
+right answer. Its limitation is arithmetical rather than aesthetic: you verify
+exactly the cases you thought of, and the number of cases you can hand-write
+does not grow with the size of the design, while the number of cases the design
+can get wrong does. The language gives you nothing beyond this: \VHDL{} has no
+classes, no inheritance, no constrained randomisation and no functional
+coverage constructs, only \code{ieee.math\_real.uniform}, which is a random
+number generator rather than a stimulus generator.
+
+\subsection{Verification as a software problem}
+
+\index{constrained random}\index{functional coverage}The \SV{} verification
+half of the language starts from a different premise: verifying a large design
+is a software engineering problem, so give the verification engineer software
+engineering tools. Four ideas follow, and each one changes what a testbench
+looks like. The constructs behind them are \refverificationbook; what follows here
+is only the argument for why they exist.
+
+\textbf{Transactions instead of pin wiggles.} You stop writing values onto
+individual signals and start describing a \emph{transaction}: a read of four
+bytes from address \code{0x40}, a rotation of a vector by an angle. A separate
+component, the driver, knows how to turn a transaction into pin activity for a
+particular protocol. The test then says what should happen, not how the wires
+move, and the same test survives a change of bus protocol.
+
+\textbf{Constrained random instead of directed vectors.} Instead of enumerating
+inputs, you describe the \emph{legal input space} and let the tool draw from
+it. This is the deepest change of habit in the whole book.
+
+\textbf{Functional coverage as the exit criterion.} If the stimulus is random,
+``all my tests passed'' means nothing on its own, because you no longer know
+what was tried. So you write down, separately and explicitly, the situations
+that must occur, and the simulator counts them. A run is worth something when
+the coverage model says the interesting cases happened.
+
+\textbf{Object-oriented reuse.} Drivers, monitors, scoreboards and sequences
+are classes, and a new project extends them rather than copying them. This is
+what UVM is: not an extension of the language but a class library written in
+\SV{}, which \refverificationbook takes apart.
+
+\cref{lst:philosophy:crv} is a minimal version of the first three ideas.
+
+\begin{svcode}[caption={Constraints describe the legal space; coverage measures what happened},label={lst:philosophy:crv}]
+class rot_req;
+  rand bit signed [15:0] x, y;
+  rand bit signed [15:0] theta;
+  rand bit               small_angle;
+
+  // the legal input space, written once
+  constraint c_range {
+    x inside {[-16384:16383]};
+    y inside {[-16384:16383]};
+    small_angle -> theta inside {[-1024:1023]};
+  }
+endclass
+
+covergroup cg_req with function sample(bit signed [15:0] theta);
+  cp_theta : coverpoint theta {
+    bins neg_large = {[-32768:-8193]};
+    bins neg_small = {[-8192:-1]};
+    bins zero      = {0};
+    bins pos_small = {[1:8192]};
+    bins pos_large = {[8193:32767]};
+  }
+endgroup
+\end{svcode}
+
+The constraint block is declarative. It does not say what to do; it says what
+is true of every legal input. Calling \code{req.randomize()} asks a constraint
+solver for a value satisfying all of it, and calling it ten thousand times with
+different seeds explores parts of the space you would never have enumerated by
+hand. The \code{covergroup} then records what actually came out, so you can
+tell the difference between ``ten thousand runs'' and ``ten thousand runs that
+all did the same thing''.
+
+\subsection{The metric-driven loop}
+
+The two flows differ in shape, not only in tooling.
+\cref{fig:philosophy:flows} draws them.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\sffamily\scriptsize,
+      bx/.style={draw=codeframe,fill=codebg,line width=0.7pt,
+                 rounded corners=1.5pt,minimum width=34mm,
+                 minimum height=7mm,align=center,inner sep=3pt},
+      dm/.style={draw=codeframe,fill=tipbg,line width=0.7pt,
+                 diamond,aspect=2.1,align=center,inner sep=1pt,
+                 minimum width=30mm},
+      dn/.style={bx,fill=tipbg},
+      hd/.style={font=\sffamily\small\bfseries,text=codekey},
+      ar/.style={-{Stealth[length=1.8mm]},line width=0.7pt,draw=codekey},
+      lb/.style={font=\sffamily\tiny,text=accentalt}
+    ]
+    \node[hd] at (0,1.2) {Directed};
+    \node[bx] (d1) at (0,0.3)  {list the cases you\\can think of};
+    \node[bx] (d2) at (0,-1.3) {write one test each};
+    \node[bx] (d3) at (0,-2.9) {run them all};
+    \node[dn] (d4) at (0,-4.5) {they pass};
+    \node[bx] (d5) at (0,-6.1) {sign off\\(what was missed\\is unknown)};
+    \draw[ar] (d1) -- (d2);
+    \draw[ar] (d2) -- (d3);
+    \draw[ar] (d3) -- (d4);
+    \draw[ar] (d4) -- (d5);
+
+    \node[hd] at (7.5,1.2) {Coverage-driven};
+    \node[bx] (c1) at (7.5,0.3)  {describe the legal\\input space as\\constraints};
+    \node[bx] (c2) at (7.5,-1.3) {write the coverage\\model: what must\\happen};
+    \node[bx] (c3) at (7.5,-2.9) {run many seeds;\\a scoreboard checks\\every result};
+    \node[dm] (c4) at (7.5,-4.6) {coverage\\complete?};
+    \node[bx] (c5) at (7.5,-6.4) {sign off against\\a measured metric};
+    \draw[ar] (c1) -- (c2);
+    \draw[ar] (c2) -- (c3);
+    \draw[ar] (c3) -- (c4);
+    \draw[ar] (c4) -- node[lb,right,pos=0.4] {yes} (c5);
+    \draw[ar] (c4.west) -- (4.9,-4.6) -- (4.9,0.3) -- (c1.west);
+    \node[lb,rotate=90,anchor=south] at (4.75,-2.1)
+         {no: add constraints, add seeds};
+  \end{tikzpicture}
+  \caption{Directed verification stops when the tests you wrote pass.
+    Coverage-driven verification stops when a measurement says the input space
+    has been exercised. Only the second one has a closed loop.}
+  \label{fig:philosophy:flows}
+\end{figure}
+
+The mental shift is from ``I will write a test for every case I can think of''
+to ``I will describe the legal input space and let the tool find the cases''.
+The first is bounded by your imagination. The second is bounded by your
+coverage model, which is a written artefact that a colleague can review and
+that a project manager can track. When a bug escapes a coverage-driven flow,
+the post-mortem question is precise and answerable: which coverage point would
+have caught it, and why was it not in the model?
+
+\begin{gotcha}{Random stimulus without a scoreboard proves nothing}
+A directed test carries its expected result in the same file. A random test
+cannot. If you randomise the inputs, something else has to know what the right
+answer is: a reference model, a golden function, a protocol checker, an
+assertion. Newcomers write the constraints first because they are the fun part,
+run a million cycles, see no errors and conclude that the design works. The
+design was never checked. Build the checker before the generator, always.
+\end{gotcha}
+
+\subsection{Be fair to VHDL}
+
+None of the above is impossible in \VHDL{}, and it would be dishonest to
+suggest otherwise. \index{OSVVM}\index{UVVM}OSVVM and UVVM are mature,
+maintained, free \VHDL{} verification libraries. OSVVM's \code{RandomPkg} gives
+randomisation with weighted distributions and \code{CoveragePkg} gives
+functional coverage with bins and goals; both libraries add scoreboards and
+transaction-level interfaces, and both are used in production, particularly in
+European aerospace and industrial companies.
+
+\begin{vhdlcode}[caption={OSVVM: constrained random and coverage in VHDL (sketch)},label={lst:philosophy:osvvm}]
+library osvvm;
+use osvvm.RandomPkg.all;
+use osvvm.CoveragePkg.all;
+-- ...
+stim : process is
+  variable rv  : RandomPType;
+  variable cov : CoveragePType;
+begin
+  cov.AddBins(GenBin(-32768, 32767, 5));   -- five bins over the range
+  while not cov.IsCovered loop
+    theta := rv.RandInt(-32768, 32767);
+    drive_transaction(theta);              -- a procedure, not pin wiggles
+    cov.ICover(theta);
+  end loop;
+  cov.WriteBin;
+  std.env.stop;
+end process stim;
+\end{vhdlcode}
+
+So the honest statement of the difference is this. It is not that \VHDL{}
+cannot do coverage-driven verification. It is that in \SV{} these constructs
+are in the language, in the \LRM{}, in every commercial simulator, in the
+university curriculum and in the job advertisements, whereas in \VHDL{} they
+are a library you must choose, install and persuade your team to adopt. The
+difference is one of ecosystem and industrial default rather than of
+possibility. That distinction matters when you are deciding what to learn,
+because the ecosystem is what you will be hired into.
+
+\begin{notebox}{Assertions on both sides}
+\index{assertion}\VHDL{}'s \code{assert ... report ... severity} is an
+immediate, procedural check: it tests a condition at the moment the statement
+executes. \SV{} has the same thing (\code{assert (cond) else \$error(...);})
+and adds \emph{concurrent} assertions, which describe behaviour over time
+using a temporal sequence language: \code{assert property (@(posedge clk\_i)
+req\_valid\_i \&\& !req\_ready\_o |=> \$stable(req\_x\_i));}. Those are
+evaluated in the Observed region on values sampled in Preponed, which is
+exactly why the scheduler section came first. The sequence language is a
+chapter of its own: \refverificationbook. \VHDL{} can express the same properties
+with PSL, which \VHDL{}-2008 integrated into the language, but PSL support
+varies between tools and the construct is much less commonly taught.
+\end{notebox}
+
+% ===========================================================================
+\section{The Contrasts in One Table}
+\label{sec:philosophy:summary}
+% ===========================================================================
+
+\cref{tab:philosophy:summary} collects the argument. Read it as a summary, not
+as a reference: every row is a topic that a later chapter treats properly.
+
+\begin{table}[htbp]
+  \centering
+  \caption{The philosophical contrasts, summarised.}
+  \label{tab:philosophy:summary}
+  \small
+  \begin{tabularx}{\linewidth}{@{}lXX@{}}
+    \toprule
+    & \textbf{\VHDL{}} & \textbf{\SV{}} \\
+    \midrule
+    Typing
+      & Strong and static. Nearly everything is checked at analysis or
+        elaboration.
+      & Weak by default. Widths and signedness are adjusted silently. \\
+    Conversions
+      & Never implicit. \code{to\_integer}, \code{unsigned()},
+        \code{resize} are compulsory.
+      & Almost always implicit. Casts exist and are a matter of discipline. \\
+    Where errors are caught
+      & The analyser.
+      & The linter, the coding standard and simulation. \\
+    Design units
+      & Entity, architecture, configuration, package, package body.
+      & One \code{module}. Packages exist; configurations do not, in
+        practice. \\
+    Namespaces
+      & Libraries with \code{work} as default; \code{library}/\code{use}.
+      & One global namespace plus packages and \code{::}; the compilation
+        unit is best left empty. \\
+    Preprocessor
+      & None before VHDL-2019, whose support is thin.
+      & Full textual preprocessor: \chOneDir{define}, \chOneDir{ifdef},
+        \chOneDir{include}. \\
+    Concurrency model
+      & Signals with delta-delayed update; two-phase cycle.
+      & Nine event regions per time slot, with iteration. \\
+    Deferred update
+      & Built into the \kw{signal}; there is only one kind of signal
+        assignment.
+      & Chosen per statement: \code{<=} defers, \code{=} does not. \\
+    Race handling
+      & Race-free between processes by construction.
+      & Race-free only if you follow the assignment rules and use clocking
+        blocks. \\
+    Declared intent
+      & None. A process is a process.
+      & \code{always\_ff}, \code{always\_comb}, \code{always\_latch}, checked
+        by the tool. \\
+    Genericity
+      & Generics, generate, unconstrained arrays, VHDL-2008 generic
+        packages.
+      & Parameters, \code{generate}, parameterised interfaces and classes. \\
+    Verification constructs
+      & In the language: none beyond \code{assert}/\code{report}. In
+        libraries: OSVVM, UVVM.
+      & In the language: classes, \code{rand}, constraints, \code{covergroup},
+        SVA, mailboxes. \\
+    Standard
+      & IEEE 1076; current 2008, with 2019 poorly supported.
+      & IEEE 1800; current 2017/2023. Absorbed IEEE 1364 in 2009. \\
+    Free tools
+      & Mature free simulation of the whole language. Synthesis via
+        \tool{Yosys} plugins.
+      & \tool{Verilator} and \tool{Yosys}: fast, but a language subset
+        (\refsimulationbook). \\
+    Industrial default
+      & European aerospace, defence, FPGA houses, academia.
+      & ASIC design and verification worldwide; UVM is the de facto
+        methodology. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+One row deserves an extra sentence. ``Free tools'' is not a footnote for this
+book: \tool{Verilator} is the reason you can do serious \SV{} work on a
+laptop, and \refsimulationbook is built on it. Be aware
+of its boundaries, though. \tool{Verilator} compiles a language subset into
+C++; it is not a general-purpose event simulator, it is two-state, and it
+implements neither covergroups nor the constraint solver, so UVM is out of
+reach. \refsimulationbook states this precisely and lists what works where. The row is picked up again in
+\cref{sec:philosophy:vhdlwins}, where the free-tool position is one of the
+places \VHDL{} is ahead.
+
+% ===========================================================================
+\section{What Actually Changes in Your Habits}
+\label{sec:philosophy:habits}
+% ===========================================================================
+
+Abstractions are easier to remember when they come with a list of
+behaviours. Here is what to change on day one.
+
+\subsection{Stop doing}
+
+\begin{itemize}
+\item \textbf{Stop trusting a clean compile.} No messages means the file
+  parsed. It does not mean the widths agree, the ports are connected, the block
+  is combinational or the name existed. A file is not finished until the linter
+  is clean too.
+\item \textbf{Stop assuming a name is declared.} Until
+  \chOneDir{default\_nettype none} is in the file, an undeclared name is a
+  one-bit wire, not an error.
+\item \textbf{Stop expecting a range check.} There is no \code{natural}, no
+  \code{range 0 to 9} and no subtype constraint, so nothing complains when a
+  value leaves the range you had in mind. If it must be checked, assert it.
+\item \textbf{Stop reaching for two-state types because they look tidy.}
+  \kw{int} and \kw{bit} in RTL hide exactly the reset bugs that \code{'U'}
+  propagation used to reveal.
+\end{itemize}
+
+\subsection{Start doing}
+
+\begin{itemize}
+\item \textbf{Start with the directive pair.} Put
+  \chOneDir{default\_nettype none} at the top of every file, and
+  \chOneDir{default\_nettype wire} at the bottom of it.
+\item \textbf{Start using \code{always\_ff} and \code{always\_comb}
+  exclusively.} Plain \code{always} in new RTL is a smell, and
+  \code{always @(*)} is a worse one.
+\item \textbf{Start naming with suffixes:} \code{\_i}, \code{\_o},
+  \code{\_ni}, \code{\_d}, \code{\_q}, \code{\_t}, \code{\_e}. It costs nothing
+  and it makes a code review possible.
+\item \textbf{Start running the linter from the first hour.} Put
+  \code{verilator --lint-only -Wall} in your \file{Makefile} before the second
+  module, not after the first bug; \refsimulationbook shows the full setup.
+\item \textbf{Start reading the \LRM{}, clause 4.} Ten pages on scheduling
+  semantics will save you a week over a project.
+\item \textbf{Start writing the checker before the stimulus.}
+  \refverificationbook builds testbenches in that order for a reason.
+\end{itemize}
+
+\subsection{Be paranoid about, for the first month}
+
+\begin{itemize}
+\item \textbf{Every width:} every assignment, port connection, concatenation
+  and constant. Read the lint report before you open the waveform.
+\item \textbf{Every \code{=} inside a clocked block, and every \code{<=} inside
+  a combinational one.} Both are legal and both are wrong.
+\item \textbf{Every signed operation.} If any operand of an expression is
+  unsigned, the whole expression is evaluated unsigned, so one unsigned
+  constant changes the result. \cref{ch:rosetta} treats this properly.
+\item \textbf{Every port left unconnected.} \code{.*} and omitted ports are
+  legal and quiet.
+\item \textbf{Every testbench signal driven at a clock edge.} If it is not
+  inside a clocking block, assume it races until you have proved otherwise.
+\item \textbf{Every \code{case} without a \code{default}.} There is no
+  \code{when others} obligation in \SV{}: write the \code{default}, or use
+  \code{unique case} and let the tool check it.
+\end{itemize}
+
+The list is not a list of hard things. It is a list of things the language does
+not check for you, and almost every one is caught by a lint rule that somebody
+else has already written, in a configuration file you will inherit on your
+first day of work. The point of this chapter is to explain why those rules
+exist, so that when one fires you know what it is protecting you from rather
+than looking for the pragma that switches it off.
+
+Which brings the argument to its other half. Everything up to here has been
+about what changes, and mostly about what you gain, when you move to \SV{}.
+The two sections that close the chapter are about what you leave behind, and
+about how to decide, for a particular project, whether leaving it behind is
+the right trade. The honest answer to the first question is: more than a book
+with this title normally admits.
+
+% ===========================================================================
+\section{What \VHDL{} has that \SV{} does not}
+\label{sec:philosophy:vhdlwins}
+\label{sec:beyond:vhdlwins}
+
+Almost everything above is a case for \SV{}, or at least an explanation of it.
+This section is the case against, and it is not a short list. Read it before
+you argue that one language is simply better than the other, and read it again
+before you propose a language change to a team that has a working \VHDL{}
+flow.
+
+\subsection{A type system that catches errors at compile time}
+\index{type system}
+
+This is the big one, and \cref{sec:philosophy:typing} has already made the
+core of the argument: widths and signedness that \VHDL{} checks at analysis
+time, \SV{} adjusts silently, and the compensation is a lint tool rather than
+a compiler. Two consequences of that were not stated there.
+
+The first is about your own types. \VHDL{} lets you define a scalar type that
+is genuinely new, an address type that is not interchangeable with a data type
+of the same width, and the compiler enforces the distinction. \SV{} has
+\code{typedef}, but a typedef is an alias, not a new type: assigning an
+\code{addr\_t} to a \code{data\_t} of the same width is legal and silent. All
+the discipline a \VHDL{} designer gets from naming a type has to come from
+review instead.
+
+The second is about arithmetic in the large. \VHDL{}'s \code{signed} and
+\code{unsigned} are distinct types and mixing them requires a conversion you
+have to write down. In \SV{}, signedness is a property of an expression,
+computed by rules that involve every operand, so one unsigned intermediate
+three terms away turns an arithmetic right shift into a logical one.
+\cref{ch:rosetta} spends pages on those rules for a reason, and the reason is
+that they are the price of this section's first paragraph.
+
+\begin{ruleofthumb}
+The single biggest practical loss in moving to \SV{} is compile-time width
+checking. Compensate with lint. Run a lint tool on every commit and treat
+width warnings as errors, because your compiler will not.
+\end{ruleofthumb}
+
+\subsection{Physical types with units}
+\index{physical type}
+
+\VHDL{} has physical types: quantities with units and a compiler that checks
+them. \code{time} is the built-in one, and you can declare your own:
+
+\begin{vhdlcode}
+type capacitance is range 0 to 1e9
+  units
+    ff;  pf = 1000 ff;  nf = 1000 pf;
+  end units;
+
+constant t_setup : time := 250 ps;
+wait for t_setup;
+\end{vhdlcode}
+
+\code{250 ps} is a value of type \code{time}, not an integer that you have
+agreed to interpret as picoseconds. Adding it to a voltage is a compile error.
+\SV{} has \code{time} as a 64-bit integer scaled by \code{timeunit} and
+\code{timeprecision} directives that are per-file and easy to get wrong; the
+number \code{250} in \code{\#250} means whatever the current time unit says it
+means.
+
+\subsection{User-defined resolution functions}
+\index{resolution function}
+
+\code{std\_logic} is not built into \VHDL{}. It is an ordinary enumerated type
+in an ordinary package, and its multi-driver behaviour comes from an ordinary
+function that you could have written. If you need a bus where multiple drivers
+resolve by summing, or by taking the maximum, or by flagging a conflict as an
+error, you write the resolution function and declare the signal to use it.
+
+\SV{} has exactly one resolution rule, wired into the language for \code{wire}
+and friends, and no way to change it. In practice this matters less than it
+sounds, because almost nobody writes custom resolution functions. It is still
+a real expressive difference, and it explains why \code{std\_logic} feels so
+principled compared with \SV{}'s four-state \code{logic}.
+
+\subsection{Operator overloading}
+\index{operator overloading}
+
+In \VHDL{} you can define \code{"+"} for your own type. This is why
+\code{numeric\_std} exists at all, why \code{fixed\_pkg} can write \code{a * b}
+for fixed-point values, and why a package of complex numbers is twenty lines
+long. \SV{} has no operator overloading of any kind. A complex multiply is a
+function call, and it looks like one.
+
+\subsection{Configurations}
+\index{configuration}
+
+A \VHDL{} configuration is a separate design unit that binds entities to
+architectures and component instances to entities, without touching the
+design. It is how you swap a behavioural model for a gate-level netlist for
+one instance in one simulation.
+
+\SV{} has \code{config} blocks in the \LRM{}, and almost no support for them
+in tools. In practice you do the same job with file lists,
+\chOneDir{ifdef}, or a wrapper module, and you lose the compile-time record of
+what was bound to what.
+
+Note the asymmetry, because it is the fairest way to state this one. \SV{} has
+a construct \VHDL{} lacks that points the other way: \code{bind} attaches an
+extra module instance to an existing one from outside, without editing the
+design, which is how assertions and coverage are kept out of synthesisable
+files (\cref{ch:beyond}). So \VHDL{} can swap an implementation cleanly and
+\SV{} can attach an observer cleanly, and neither can do the other's trick.
+
+\subsection{Fixed- and floating-point packages}
+\index{fixed\_pkg}\index{float\_pkg}
+
+\VHDL{}-2008 ships \code{ieee.fixed\_pkg} and \code{ieee.float\_pkg} in the
+standard library. These are not toys. \code{sfixed} and \code{ufixed} are
+arrays indexed by a signed range where index 0 is the units bit, so the type
+carries the binary point:
+
+\begin{vhdlcode}
+signal a : sfixed(2 downto -13);   -- Q3.13
+signal b : sfixed(1 downto -14);   -- Q2.14
+signal p : sfixed(4 downto -27);   -- exactly right for a*b
+begin
+  p <= a * b;                      -- width and binary point tracked
+  q <= resize(p, q'high, q'low);   -- explicit, checked rounding
+\end{vhdlcode}
+
+The width of a product, the alignment of an addition, and the rounding of a
+resize are all computed by the package from the types. The compiler catches
+the mistake where you add a Q1.14 to a Q2.13 without shifting.
+
+\SV{} has nothing comparable. There is no standard fixed-point library, no
+binary-point tracking, and no compiler help. You write
+\code{logic signed [15:0]}, you write \code{// Q1.14} in a comment, and you
+keep the alignment right in your head:
+
+\begin{svcode}
+// a is Q1.14, b is Q1.14  ->  product is Q2.28 in 32 bits
+logic signed [31:0] prod;
+assign prod = a * b;
+// take Q1.14 back out: >>> 14, then truncate. Rounding is your problem.
+assign result = prod[29:14];
+\end{svcode}
+
+This matters directly for \refexamplebook. The CORDIC rotator is fixed-point
+arithmetic from end to end, and every shift, every truncation and every
+saturation is checked by nothing but review. A \VHDL{} implementation of the
+same algorithm would have caught several classes of error at compile time. Be
+disciplined: put the format in the type name (\code{data\_t} for Q1.14 in
+\code{cordic\_pkg}), never mix formats without a comment saying why, and write
+assertions on the numeric range.
+
+\subsection{Deferred constants and separate package bodies}
+
+A \VHDL{} package declares what is visible; the package body holds the
+implementation, and can be recompiled without recompiling everything that uses
+the package. A deferred constant lets the value itself live in the body, so a
+change to a lookup table does not force a recompilation of every client. \SV{}
+packages have no body: everything is in one file, and every change invalidates
+every dependent compilation unit. On a large design this is a real difference
+in build time.
+
+\subsection{Protected types, generic packages, and 2019}
+
+\VHDL{}-2002 protected types give encapsulated shared state with mutual
+exclusion, which is most of what a \SV{} class does (\refverificationbook) minus
+inheritance.
+\VHDL{}-2008 generic packages and generic types give a genuine template
+mechanism, closer in spirit to a C++ template than \SV{} parameters are. Both
+are well specified. Support is the problem: generic packages work in the major
+simulators, thinly in synthesis; \VHDL{}-2019 interfaces, mode views and
+conditional analysis are excellent ideas with, at present, one or two
+implementations between them.
+
+\subsection{What you can do with a zero tool budget}
+\index{open-source tools}
+
+This one is decided by which half of the language a free tool has to cover.
+
+For \VHDL{}, free simulation is mature and covers essentially the whole
+language, \VHDL{}-93, -2002 and -2008 alike, at a speed that is perfectly
+usable for a block-level regression. A student with no licences can analyse,
+elaborate, simulate and dump waveforms for any \VHDL{} design in this book,
+and the language they are learning is the whole language.
+
+For \SV{} the free tools implement a subset, and the subset is not an
+arbitrary one. \tool{Verilator} is excellent, \refsimulationbook is devoted
+to it, and it is a compiler rather than an event-driven kernel. It does not
+read \VHDL{} at all, so a mixed-language hierarchy needs a commercial
+simulator. It is two-state, so the reset bug whose symptom is an \code{x}
+propagating through the design does not appear. It implements neither
+covergroups nor the constraint solver, and it has no route to UVM.
+\refsimulationbook states those four boundaries precisely and gives the feature-by-feature position for the
+version used in this book. \tool{Icarus Verilog} covers Verilog-2005 well and
+\SV{} patchily, and it is not a tool to build a flow on.
+
+Put the two together and the asymmetry is uncomfortable. If your budget is
+zero and your language is \VHDL{}, you can do everything. If your language is
+\SV{}, you can do the design half completely and quickly, and what falls
+outside the free tools is exactly the constrained-random and coverage
+machinery of \cref{sec:philosophy:verif}, which is the part this chapter has
+just spent ten pages calling the reason to move.
+
+\subsection{Verification frameworks that need no licence either}
+\index{OSVVM}\index{UVVM}
+
+\cref{sec:philosophy:verif} already said that OSVVM and UVVM give \VHDL{} most
+of the same verification capability. Two points belong here rather than there,
+because they are about the comparison rather than about the technique.
+
+The first is that OSVVM's randomisation is coverage-driven: it biases the next
+draw towards bins that are still empty, instead of drawing uniformly and
+hoping. For many problems that closes the loop faster than a raw constraint
+solver does, and it is a genuinely better idea, not a poor imitation of one.
+
+The second is the learning cost. A working OSVVM testbench is a day's work. A
+working UVM testbench is not, as \refverificationbook will make plain. Against that,
+what \SV{} has and they do not is the constraint solver as a language feature,
+assertions as a language feature, and the industry's momentum: the
+verification IP you buy comes as UVM, and the job advertisements ask for UVM.
+
+% ===========================================================================
+\section{Which language for which job}
+\label{sec:philosophy:which}
+\label{sec:beyond:which}
+
+The previous section listed what \VHDL{} does better; the rest of the chapter
+listed what \SV{} does better. Neither list settles anything by itself,
+because the question is never ``which language is better'' but ``which
+language for this project''. So: no advocacy, criteria.
+
+\textbf{Choose \VHDL{} for \RTL{} when} the design is arithmetic-heavy and
+would benefit from \code{fixed\_pkg}; when the team is already fluent and the
+cost of retraining is not repaid; when the flow is safety-critical and the
+stronger type system is worth real money in review time; when the tool budget
+is zero, since free \VHDL{} simulation covers the whole language and the free
+\SV{} tools do not; or when the customer requires it, which in aerospace and
+rail is common.
+
+\textbf{Choose \SV{} for \RTL{} when} the design is control-heavy and
+structural, with many similar blocks and wide buses that interfaces and packed
+structs make tractable, both of which \cref{ch:beyond} covers; when you need parameterised
+types across a hierarchy; when the same source must be read by a Verilog-only
+tool, which is most open-source \RTL{} and most vendor IP; or when the
+verification is going to be \SV{} anyway and you want one language in the
+repository.
+
+\textbf{Choose \SV{} for verification} in almost all cases where the
+environment must scale: constrained random, functional coverage, assertions,
+and UVM are a coherent package, and the industry has standardised on it. That
+package is what \refverificationbook teaches. The exception is a
+\VHDL{}-only shop with a working OSVVM or UVVM environment, and that exception
+is legitimate.
+
+\textbf{Mix them.} This is the common industrial answer and it works.
+Practically every commercial simulator supports a mixed-language hierarchy:
+\VHDL{} \RTL{} instantiated inside a \SV{} testbench, or the reverse. In
+\tool{QuestaSim} you compile each language with its own compiler,
+\code{vcom -2008} and \code{vlog -sv}, into the same library, and elaborate
+the two together. The seams are the port types (map
+\code{std\_logic\_vector} to packed vectors and keep the boundary plain: no
+records, no interfaces, no enumerations across the boundary) and the inability
+to bind \SV{} assertions into a \VHDL{} instance. Plan the boundary
+deliberately and the arrangement is comfortable. Note that free tooling is not
+an option here at all, because \tool{Verilator} does not read \VHDL{}.
+
+\begin{notebox}{What actually decides it}
+In practice the choice is made by the existing code base, the customer, and
+the tool licences, in that order. Language merit comes fourth. Knowing both
+languages well is worth more than a correct opinion about which is better.
+\end{notebox}
+
+
+% ===========================================================================
+\section{Checklist}
+\label{sec:philosophy:checklist}
+% ===========================================================================
+
+\begin{itemize}
+\item \VHDL{} was designed as a language and grew a synthesis subset. \SV{}
+  was designed as a simulator input and grew a type system. Every difference
+  in this chapter follows from that.
+\item Correctness in \VHDL{} comes from the analyser; in \SV{} it comes from
+  the linter, the coding standard and simulation. Wire
+  \code{verilator --lint-only -Wall} into your build on day one.
+\item Widths never have to match in \SV{}. Assignments, expressions and port
+  connections truncate or extend silently. Check every one.
+\item \code{logic} is \code{std\_logic} without strengths and with a single
+  driver. Use it for all RTL. Do not use \kw{int} or \kw{bit} for hardware:
+  two-state types start at zero and hide missing resets.
+\item Put \chOneDir{default\_nettype none} at the top of every file and
+  \chOneDir{default\_nettype wire} at the bottom, or an undeclared name will
+  silently become a one-bit wire.
+\item When you see \code{library ieee; use ieee.numeric\_std.all;}, write
+  \code{import my\_pkg::*;}. Put every shared \code{typedef} and
+  \code{parameter} in a package; never declare anything at compilation-unit
+  scope.
+\item \chOneDir{define} and \chOneDir{include} are textual and unscoped. Prefix
+  macro names, guard included files, and prefer a package parameter whenever
+  one will do.
+\item \VHDL{} signal assignment $\equiv$ \SV{} \code{<=}; \VHDL{} variable
+  assignment $\equiv$ \SV{} \code{=}. \code{<=} evaluates in Active and updates
+  in NBA: \VHDL{}'s evaluate/update pair, recreated by hand.
+\item Non-blocking for everything a clock edge writes, blocking for everything
+  combinational, never both in one block, never two blocks writing the same
+  variable. \VHDL{} gave you this for free; \SV{} does not.
+\item Declare intent: \code{always\_ff} for sequential, \code{always\_comb} for
+  combinational, \code{always\_latch} when you mean it. One clock and at most
+  one asynchronous reset per \code{always\_ff}.
+\item In a testbench, drive and sample synchronous signals through a clocking
+  block. \code{input \#1step} samples in Preponed, before any design code has
+  run in that time slot.
+\item Verification in \SV{} is a software problem: transactions, constrained
+  random stimulus, functional coverage as the exit criterion, classes for
+  reuse. Write the checker before the generator: random stimulus without a
+  scoreboard proves nothing.
+\item OSVVM and UVVM give \VHDL{} most of the same capability, and OSVVM's
+  coverage-driven randomisation closes the loop faster than a raw constraint
+  solver on many problems. The difference is ecosystem, industrial default and
+  learning cost, not possibility.
+\item Know what you are giving up, because it is not nothing: compile-time
+  width and signedness checking, genuinely distinct user-defined types,
+  physical types with units, user-defined resolution, operator overloading,
+  \code{fixed\_pkg} and \code{float\_pkg}, configurations, deferred constants
+  and separate package bodies. Compensate with lint, naming and review, in that
+  order.
+\item There is no \SV{} fixed-point library. Put the format in the type name,
+  never mix formats without a comment saying why, and assert the numeric
+  range. This is the single largest source of unchecked error in the CORDIC of
+  \refexamplebook.
+\item On a zero tool budget, \VHDL{} gets the whole language and \SV{} gets a
+  fast subset: no \VHDL{} at the boundary, two-state only, no covergroups, no
+  constraint solver, no UVM. Plan the flow around that, not around a hope.
+\item The language choice is made by the existing code base, the customer and
+  the tool licences, in that order, and by language merit fourth. Mixed-language
+  hierarchies are normal and need a plain port boundary.
+\end{itemize}

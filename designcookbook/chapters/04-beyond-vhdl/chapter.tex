@@ -1,0 +1,877 @@
+\chapter{Beyond VHDL: The Design-Side Additions}
+\label{ch:beyond}
+
+\chapabstract{\cref{ch:rosetta} and \cref{ch:rosetta2} were a translation
+exercise: every \VHDL{} construct had a \SV{} counterpart, and the job was to
+find it. This chapter covers the constructs with no \VHDL{} source to
+translate from: interfaces, clocking blocks, the checked \code{always}
+variants, packed structures and unions, typed enumerations, parameterised
+types, the preprocessor, \code{generate} and \code{bind}. Every one of them
+elaborates into hardware or into the hierarchy around it. At the end you will
+be able to read a modern \SV{} design, and to write one that is shorter and
+safer than the \VHDL{} you would have written instead.}
+
+A large part of \SV{} is Verilog with the sharp edges filed off, and the two
+preceding chapters covered that part. What remains is genuinely new, and it
+splits cleanly in two.
+
+The first half is design-side, and it is this chapter. The order is
+deliberate. Interfaces come first, because they change the shape of a
+hierarchy and everything after them can be declared inside one. Then come the
+constructs that change the shape of a single module: intent-carrying
+\code{always} forms, packed structures, typed enumerations, type parameters,
+and the preprocessor you should mostly avoid. \code{generate} and \code{bind}
+close the chapter, because \kw{bind} is the one construct here that changes
+what you can attach to a module you did not write, and it is the bridge to
+everything that follows.
+
+The second half is verification-side: dynamic data types, classes,
+constrained randomisation, functional coverage, assertions and dynamic
+threads. \VHDL{} has nothing comparable, and it is the reason the industry
+verifies in \SV{} even where it designs in \VHDL{}. That half is
+\refverificationbook, immediately after this one, because none of it makes sense
+until you have seen what it is for.
+
+One question belongs to neither half: what does \VHDL{} still do better? That
+is a question about the two languages rather than about \SV{} alone, and
+\cref{ch:philosophy} answers it, next to the account of where the two
+languages came from.
+
+% ===========================================================================
+\section{Interfaces}
+\label{sec:beyond:interfaces}
+\index{interface}
+
+This is the single biggest structural addition to the language, and the one
+that changes how you write hierarchy.
+
+Consider a small memory-mapped bus: request, write enable, address, write
+data, byte enables, grant, read valid, read data, error. Nine signals, plus a
+clock and a reset. In \VHDL{} you name every one of them at least three
+times: once in the entity of the master, once in the entity of the slave, and
+once in each port map. Add a byte-enable signal six months later and you edit
+four files. Get the direction wrong in one of them and the compiler tells you
+nothing until elaboration, if at all.
+
+\SV{} lets you declare the bundle once, as a first-class design object:
+
+\begin{svcode}[caption={A small memory-mapped bus as an interface},label={lst:beyond:iface}]
+interface simple_bus #(parameter int AW = 12,
+                       parameter int DW = 32)
+                     (input logic clk, input logic rst_n);
+
+  logic            req;      // master -> slave
+  logic            we;
+  logic [AW-1:0]   addr;
+  logic [DW-1:0]   wdata;
+  logic [DW/8-1:0] be;
+  logic            gnt;      // slave  -> master
+  logic            rvalid;
+  logic [DW-1:0]   rdata;
+  logic            err;
+
+  // One write transaction, written once, usable by every master.
+  task automatic write(input logic [AW-1:0] a,
+                       input logic [DW-1:0] d);
+    @(posedge clk);
+    req <= 1'b1; we <= 1'b1; addr <= a; wdata <= d; be <= '1;
+    do @(posedge clk); while (gnt !== 1'b1);
+    req <= 1'b0; we <= 1'b0;
+  endtask
+
+  modport master  (input  clk, rst_n, gnt, rvalid, rdata, err,
+                   output req, we, addr, wdata, be,
+                   import write);
+
+  modport slave   (input  clk, rst_n, req, we, addr, wdata, be,
+                   output gnt, rvalid, rdata, err);
+
+  modport monitor (input  clk, rst_n, req, we, addr, wdata, be,
+                          gnt, rvalid, rdata, err);
+endinterface
+\end{svcode}
+
+Three things are happening in \cref{lst:beyond:iface}, and they are worth
+separating.
+
+\textbf{The bundle.} The nine \kw{logic} declarations are the signals
+themselves. An interface instance is a real object in the hierarchy, like a
+module instance: it has a name, it can be parameterised, and it can be found
+in the wave viewer at \code{top.bus.addr}.
+
+\textbf{The direction views.} A \kw{modport}\index{modport} is a named view of
+the bundle from one participant's point of view. It carries no signals of its
+own; it says which of the interface's signals that participant may drive and
+which it may only read. The same wires are \code{output} in the
+\code{master} view and \code{input} in the \code{slave} view. Declaring the
+directions once, in one place, is exactly the property \VHDL{} record ports
+lack.
+
+\textbf{The behaviour.} The \code{write} task lives inside the interface and
+drives the interface's own signals. Any master that imports it through its
+modport can call \code{bus.write(12'h040, 32'hDEAD\_BEEF)} and get a
+protocol-correct transaction. The protocol is written once and cannot drift
+between testbench and design.
+
+Instantiation collapses accordingly:
+
+\begin{svcode}[caption={Instantiating the interface: one connection instead of fifteen},label={lst:beyond:ifaceinst}]
+module ram (simple_bus.slave b);
+  // inside, the signals are b.req, b.addr, b.wdata, ...
+endmodule
+
+module top;
+  logic clk, rst_n;
+
+  simple_bus #(.AW(12), .DW(32)) bus (.clk(clk), .rst_n(rst_n));
+
+  cpu     u_cpu (.b(bus.master));
+  ram     u_ram (.b(bus.slave));
+  bus_mon u_mon (.b(bus.monitor));
+endmodule
+\end{svcode}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      blk/.style={draw=codeframe,line width=1pt,fill=codebg,rounded corners=2pt,
+                  minimum width=20mm,minimum height=22mm,align=center,
+                  font=\small\sffamily},
+      w/.style={draw=codekey,line width=0.5pt,-{Latex[length=1.3mm]}},
+      lbl/.style={font=\scriptsize\sffamily,align=center}]
+
+    % --- left: discrete ports ---------------------------------------------
+    \node[blk] (a1) at (0,0)   {cpu};
+    \node[blk] (a2) at (3.6,0) {ram};
+    \foreach \i in {0,...,7} {
+      \draw[w] ($(a1.east)+(0,1.05-0.3*\i)$) -- ($(a2.west)+(0,1.05-0.3*\i)$);
+    }
+    \node[lbl] at (1.8,-1.75) {15 named ports,\\declared in three places};
+
+    % --- right: one interface ---------------------------------------------
+    \node[blk] (b1) at (7.6,0)  {cpu};
+    \node[blk] (b2) at (11.2,0) {ram};
+    \draw[line width=3pt,draw=accent] (b1.east) -- (b2.west);
+    \node[draw=accent,fill=white,line width=0.8pt,rounded corners=2pt,
+          font=\scriptsize\ttfamily,inner sep=3pt] at (9.4,0) {simple\_bus};
+    \node[lbl,anchor=south] at (8.5,0.35) {.master};
+    \node[lbl,anchor=south] at (10.4,0.35) {.slave};
+    \node[lbl] at (9.4,-1.75) {one connection,\\directions declared once};
+  \end{tikzpicture}
+  \caption{The same connection with discrete ports and with an interface. The
+  modport names on the right are the only place a direction is written.}
+  \label{fig:beyond:iface}
+\end{figure}
+
+\Cref{fig:beyond:iface} makes the structural point. What it does not show is
+the maintenance point: adding a signal to the bus means editing one file, and
+every module that does not use the new signal needs no change at all.
+
+\subsection{Parameterised interfaces}
+
+An interface takes parameters exactly as a module does, and the parameters
+propagate into every module that receives it. Inside \code{ram}, the width of
+\code{b.addr} is whatever \code{AW} was at the instance. You can read the
+parameter back through the port:
+
+\begin{svcode}
+module ram (simple_bus.slave b);
+  localparam int DEPTH = 1 << $bits(b.addr);
+  logic [$bits(b.wdata)-1:0] mem [DEPTH];
+endmodule
+\end{svcode}
+
+This is the closest \SV{} gets to a \VHDL{} generic package: the interface
+carries both the types and the objects, and the module adapts to them without
+declaring a single generic of its own.
+
+\subsection{Tasks in interfaces, and virtual interfaces}
+
+A modport can \kw{import} a task or a function, and it can also \kw{export}
+one, meaning that the interface declares a prototype and the connected module
+supplies the body. Importing is the common case and the one to learn first.
+
+Interfaces become far more powerful once classes enter the picture
+(\refverificationbook). A class-based testbench holds a \emph{virtual
+interface}\index{virtual interface}: a handle to an interface instance, stored
+in a variable, assigned at run time. That is what lets a testbench object
+which lives in no hierarchy at all reach down and wiggle a wire.
+\refverificationbook builds a complete testbench on the mechanism. The declaration
+looks like this, and it is the only bridge between the class world and the
+module world:
+
+\begin{svcode}
+class bus_driver;
+  virtual simple_bus.master vif;   // a handle, not an instance
+  function new(virtual simple_bus.master v); vif = v; endfunction
+  task run(); vif.write(12'h10, 32'h1); endtask
+endclass
+\end{svcode}
+
+\begin{notebox}{Interfaces are not entities}
+An interface is not a lightweight module. It may contain \code{initial} and
+\code{always} blocks, assertions, covergroups, tasks, functions, parameters,
+types, and even other interface instances. Some verification IP is delivered
+almost entirely as an interface. Keep design interfaces boring: signals,
+modports, and at most a clocking block.
+\end{notebox}
+
+\subsection{What synthesises, and what does not}
+
+Interfaces are synthesisable, and every major synthesis tool in current use
+accepts them. They are still avoided in some flows: certain sign-off,
+formal-equivalence and legacy scripting flows expect flat port lists, and some
+IP-delivery rules forbid them outright because the customer's tool chain may
+be older than yours. The pragmatic answer is to keep to a safe subset:
+
+\begin{itemize}
+  \item interface instances that are static and elaborated once, never created
+        in a \code{generate} loop whose bounds are not constant;
+  \item \kw{modport} on every port, so that directions are explicit;
+  \item no tasks with timing controls (\code{@}, \code{\#}) in anything that
+        is synthesised, and no clocking blocks in the design half;
+  \item no dynamic types, no classes, no covergroups in an interface that
+        reaches synthesis; put those in a separate verification interface
+        bound to the design (\cref{sec:beyond:bind});
+  \item parameters, packed structs and enums are fine.
+\end{itemize}
+
+\begin{ruleofthumb}
+Use interfaces freely at the testbench boundary and between blocks you own.
+Think twice before putting one on the top-level pins of a chip or on a
+deliverable IP block.
+\end{ruleofthumb}
+
+\subsection{Compared with \VHDL{} records and mode views}
+
+\VHDL{}-2008 lets you put a record in a port, which solves half the problem:
+
+\begin{rosetta}
+\begin{rleft}
+type bus_req_t is record
+  req   : std_logic;
+  addr  : std_logic_vector(11 downto 0);
+  wdata : std_logic_vector(31 downto 0);
+end record;
+
+entity ram is
+  port (clk   : in  std_logic;
+        req_i : in  bus_req_t;
+        rsp_o : out bus_rsp_t);
+end entity;
+\end{rleft}
+\begin{rright}
+module ram (simple_bus.slave b);
+  // b.req, b.addr, b.wdata,
+  // b.gnt, b.rdata ...
+endmodule
+\end{rright}
+\end{rosetta}
+
+The \VHDL{} record port bundles signals, but every element of a record port
+has the mode of the port itself. A bidirectional bus therefore needs two
+record types, one per direction, and you are back to naming things twice. The
+record also cannot carry the write procedure.
+
+\VHDL{}-2019 addresses this directly with \emph{interfaces} and \emph{mode
+views}\index{VHDL-2019}, which are close in spirit to a modport: a view
+declaration gives each record element its own direction, and a port declared
+with that view behaves like a modport. It is the right feature. The problem
+is support: at the time of writing, mode views are implemented in only a
+handful of tools, and no mainstream synthesis flow accepts them. Treat
+\VHDL{}-2019 as a language you can read but not yet ship.
+
+% ===========================================================================
+\section{Clocking blocks}
+\label{sec:beyond:clocking}
+\index{clocking block}
+
+Every \VHDL{} testbench you have written contains a line like
+\code{wait for 2 ns;} placed just after a clock edge, so that the stimulus
+does not change at the same instant the design samples it. That convention is
+the entire race-avoidance strategy of a classical \VHDL{} testbench, and it is
+carried in the author's head, not in the language.
+
+\SV{} makes it a declaration. A \kw{clocking} block names a clock, lists the
+signals that are read and written with respect to that clock, and attaches a
+\emph{skew} to each direction. It is declared inside an interface, which is
+why it appears in a design chapter at all.
+
+\begin{svcode}[caption={A clocking block fixes sampling and driving skew},label={lst:beyond:cb}]
+interface simple_bus (input logic clk, input logic rst_n);
+  logic req, gnt;
+  logic [11:0] addr;
+
+  clocking cb @(posedge clk);
+    default input #1step output #1ns;
+    output req, addr;
+    input  gnt;
+  endclocking
+
+  modport tb (clocking cb, input clk, rst_n);
+endinterface
+\end{svcode}
+
+One line declares both skews. \code{input \#1step} samples every signal listed
+as \code{input} one \emph{time step} before the clock edge, so a reader sees
+the value the design saw and never the value the design has just produced.
+\code{output \#1ns} delays every assignment to a clocking-block output until
+\SI{1}{\nano\second} after the edge, in the middle of the cycle, where no
+flip-flop can be confused by it. Using the block is unremarkable:
+\code{@(bus.cb)} waits for the clocking event, \code{bus.cb.addr <= 12'h040}
+drives, and \code{bus.cb.gnt} reads.
+
+Note the direction convention, because it trips up everyone once. A clocking
+block is written from the point of view of the \emph{testbench}, so what the
+testbench drives is \code{output}, even though those same wires are inputs to
+the design.
+
+That is as much as a design reader needs. A clocking block is not
+synthesisable, and the rest of the subject belongs to the testbench:
+\refverificationbook explains what \code{\#1step} means in terms of the scheduler
+regions, why the drive skew is what stops the stimulus racing the design, and
+what happens when a clocking-block output and a plain procedural assignment
+target the same signal. The point to take away here is structural. The timing
+relationship between testbench and design is now written down once, inside the
+interface that carries the protocol, instead of being repeated as a hand-tuned
+delay in every stimulus block.
+
+% ===========================================================================
+\section{Declaring intent: \texttt{always\_comb}, \texttt{always\_ff}, \texttt{always\_latch}}
+\label{sec:beyond:always}
+\index{always\_comb}\index{always\_ff}\index{always\_latch}
+
+\VHDL{} has one process. \SV{} has one general \code{always} plus three
+specialised forms whose only purpose is to let you state what you meant so
+that the tool can check it. This is a language feature with no \VHDL{}
+counterpart: in \VHDL{} an accidental latch is caught by a synthesis warning,
+if you read your logs.
+
+\begin{svcode}
+always_comb begin              // combinational; tool checks it
+  y = a & b;
+end
+
+always_ff @(posedge clk or negedge rst_n) begin
+  if (!rst_n) q <= '0;
+  else        q <= d;
+end
+
+always_latch begin
+  if (en) q <= d;              // latch, and you said so on purpose
+end
+\end{svcode}
+
+What is actually checked differs between the three, and the differences
+matter.
+
+\code{always\_comb} has an inferred sensitivity list that includes everything
+read in the block \emph{and everything read inside any function it calls}.
+That last part is the fix for the classic \code{always @(a or b)} bug where a
+signal was left out of the list. It also runs once at time zero regardless of
+any event, so the outputs are consistent from the start; a \VHDL{} process
+with a sensitivity list does the same, so this will feel natural. Two further
+restrictions: no timing controls are allowed inside it, and the variables it
+writes may not be written by any other process. That second rule is stronger
+than anything in \VHDL{}, and it turns a whole class of multiple-driver bugs
+into a compile error.
+
+\code{always\_ff} requires exactly one event control and the same
+single-writer rule. What the \LRM{} does \emph{not} require is that you use
+non-blocking assignments inside it; that is a lint rule, not a language rule.
+Tools warn, and you should treat the warning as an error.
+
+\code{always\_latch} checks nothing you could not check yourself. Its value is
+documentary: it tells the next reader that the latch is intentional, and it
+lets a lint rule flag every latch that is \emph{not} inside one.
+
+\begin{ruleofthumb}
+In new \SV{} \RTL{}, plain \code{always} appears only in testbenches. Every
+synthesisable process is \code{always\_comb}, \code{always\_ff} or, rarely,
+\code{always\_latch}.
+\end{ruleofthumb}
+
+\subsection{\texttt{unique}, \texttt{unique0} and \texttt{priority}}
+\index{unique}\index{priority}
+
+The same idea applies to decisions. \VHDL{} case statements must be
+exhaustive, which the compiler enforces; \SV{} case statements need not be,
+so the language offers modifiers that state your assumption instead.
+
+\begin{svcode}
+unique case (sel)          // exactly one branch matches, no overlap
+  2'b00: y = a;
+  2'b01: y = b;
+  2'b10: y = c;
+  2'b11: y = d;
+endcase
+
+priority if (irq_hi)  grant = HI;   // at least one matches;
+else if (irq_mid) grant = MID;      // first match wins
+else if (irq_lo)  grant = LO;
+\end{svcode}
+
+\code{unique} asserts two things: at least one branch matches, and no two
+branches match simultaneously. \code{unique0} drops the first requirement, so
+"none of them" is legal but overlap is not. \code{priority} asserts only that
+at least one branch matches, and keeps the written order.
+
+At simulation time these become runtime checks: the simulator issues a
+violation report when the assumption fails, with the values that caused it. At
+synthesis time they become directives, the modern replacement for the
+\code{// synopsys parallel\_case} and \code{full\_case} pragmas. That is where
+the danger lies.
+
+\begin{gotcha}{\texttt{unique} is a promise, not a check, in synthesis}
+Synthesis believes you. If you write \code{unique case} over a
+one-hot-encoded signal and the signal is momentarily not one-hot in silicon,
+the synthesised logic may produce something that the \RTL{} simulation never
+produced, because synthesis used your promise to optimise away the
+multiplexer priority. The simulator flags the violation; the gates do not.
+Only write \code{unique} when a separate mechanism makes the claim true: an
+assertion, a formal proof, or a structurally one-hot encoding.
+\end{gotcha}
+
+While on the subject of case: \SV{} inherits \code{casex} and \code{casez}
+from Verilog, and adds \code{case ... inside}, which uses wildcard matching in
+one direction only.
+
+\begin{gotcha}{\texttt{casex} treats an X in the \emph{expression} as a wildcard}
+\code{casez} treats \code{Z} (and \code{?}) in the case \emph{items} as
+don't-care, which is what you want. \code{casex} additionally treats \code{X}
+and \code{Z} in the \emph{selecting expression} as don't-care. So an
+uninitialised or corrupt signal carrying \code{X} matches the first branch and
+simulation carries on as though nothing were wrong, hiding exactly the bug
+that \code{X} was there to reveal. \VHDL{}'s \code{std\_logic} case statement
+would have forced you to write a \code{when others} and think about it. Never
+write \code{casex}. Prefer \code{case (x) inside} with \code{4'b1???} style
+items, which is both readable and X-safe.
+\end{gotcha}
+
+% ===========================================================================
+\section{Packed structures and unions}
+\label{sec:beyond:struct}
+\index{struct!packed}\index{union!packed}
+
+This is the construct \VHDL{} designers miss most once they have used it, and
+it is the one to adopt first.
+
+A \kw{packed} struct is a named bit vector. The fields occupy contiguous bits,
+the first-declared field is the most significant, and the whole object behaves
+as a single vector wherever a vector is expected. It can cross a port, sit in
+an array, be assigned from a literal, be cast to and from a plain vector, and
+be indexed by name.
+
+\begin{svcode}[caption={An instruction word decoded by field name},label={lst:beyond:instr}]
+typedef struct packed {
+  logic [6:0] funct7;
+  logic [4:0] rs2;
+  logic [4:0] rs1;
+  logic [2:0] funct3;
+  logic [4:0] rd;
+  logic [6:0] opcode;
+} instr_r_t;                    // exactly 32 bits, MSB first
+
+module decoder (
+  input  logic [31:0] iword,
+  output logic [4:0]  rd_o,
+  output logic        is_add_o
+);
+  instr_r_t ins;
+  assign ins       = instr_r_t'(iword);   // a cast, not a conversion
+  assign rd_o      = ins.rd;
+  assign is_add_o  = (ins.opcode == 7'b0110011) &&
+                     (ins.funct3 == 3'b000) && (ins.funct7 == '0);
+endmodule
+\end{svcode}
+
+Compare this with the same decoder written against bit indices. The
+\SV{} version cannot silently shift by one when someone widens \code{funct7},
+and \code{\$bits(instr\_r\_t)} tells you the width without counting. The cast
+\code{instr\_r\_t'(iword)} is free: it reinterprets bits, it does not convert
+values, and it is a compile error if the widths differ.
+
+Packed structs nest, cross ports, and form arrays:
+
+\begin{svcode}
+typedef struct packed {
+  logic        valid;
+  logic [3:0]  id;
+  instr_r_t    ins;
+} pipe_stage_t;                  // 1 + 4 + 32 = 37 bits
+
+pipe_stage_t stage [0:3];        // unpacked array of packed structs
+pipe_stage_t [3:0] pipe;         // packed array: one 148-bit object
+
+always_ff @(posedge clk) begin
+  stage[0] <= '{valid: 1'b1, id: next_id, ins: instr_r_t'(iword)};
+  for (int i = 1; i < 4; i++) stage[i] <= stage[i-1];
+end
+\end{svcode}
+
+The \code{'\{...\}} form is an assignment pattern, and naming the fields makes
+it order-independent. \code{'\{default: '0\}} zeroes an arbitrarily
+complicated structure in one line, which is worth knowing for reset branches.
+
+\begin{rosetta}
+\begin{rleft}
+type instr_r_t is record
+  funct7 : std_logic_vector(6 downto 0);
+  rs2    : std_logic_vector(4 downto 0);
+  rs1    : std_logic_vector(4 downto 0);
+  funct3 : std_logic_vector(2 downto 0);
+  rd     : std_logic_vector(4 downto 0);
+  opcode : std_logic_vector(6 downto 0);
+end record;
+
+-- and a hand-written function
+-- to_record(slv) : 20 lines of
+-- slicing, maintained by hand.
+\end{rleft}
+\begin{rright}
+typedef struct packed {
+  logic [6:0] funct7;
+  logic [4:0] rs2;
+  logic [4:0] rs1;
+  logic [2:0] funct3;
+  logic [4:0] rd;
+  logic [6:0] opcode;
+} instr_r_t;
+
+// and the conversion is
+instr_r_t'(iword)
+\end{rright}
+\end{rosetta}
+
+The \VHDL{} record is a fine data structure, but it has no defined bit layout,
+so moving between a record and a \code{std\_logic\_vector} means writing and
+maintaining a pair of conversion functions. That is the whole difference:
+\kw{packed} gives the record a layout.
+
+\begin{gotcha}{Unpacked structs are not vectors}
+Leave out the word \kw{packed} and you get an unpacked struct. It is still
+useful in testbenches, where fields can be queues and strings, but it has
+no bit layout, cannot be cast to a vector, cannot cross a synthesisable port
+as a vector, and cannot be assigned from a literal vector. Forgetting
+\kw{packed} on an \RTL{} type produces a wall of type errors that never
+mention the missing word.
+\end{gotcha}
+
+\subsection{Packed unions}
+
+A packed union gives two names to the same bits:
+
+\begin{svcode}
+typedef union packed {
+  instr_r_t     r;              // decoded as an R-type
+  instr_i_t     i;              // decoded as an I-type
+  logic [31:0]  raw;            // or as a plain word
+} instr_t;
+
+instr_t w;
+assign w.raw = iword;
+assign rs1   = w.r.rs1;         // same bits, different view
+\end{svcode}
+
+Every member of a packed union must have the same width; the compiler
+enforces it. This is the clean way to express a register that has a
+field-oriented view and a byte-oriented view, or an instruction word with
+several formats.
+
+\SV{} also has \emph{tagged} unions, which add a hidden tag field and let the
+compiler check that you read the member you last wrote, with
+\code{case ... matches} for discrimination. They are elegant and almost
+unsupported: several major simulators accept them and most synthesis tools do
+not. Know they exist; do not build a design on them.
+
+% ===========================================================================
+\section{Enumerations that carry a base type}
+\label{sec:beyond:enum}
+\index{enumeration}
+
+A \VHDL{} enumeration is an abstract type whose encoding is chosen by
+synthesis unless you attach an attribute. A \SV{} enumeration is a set of
+named constants of a base type you choose, and the encoding is part of the
+declaration:
+
+\begin{svcode}
+typedef enum logic [2:0] {
+  IDLE = 3'b001, RUN = 3'b010, DONE = 3'b100
+} state_e;                       // explicitly one-hot
+
+typedef enum logic [1:0] { A, B, C } small_e;  // 0, 1, 2 by default
+\end{svcode}
+
+The base type also fixes what happens on reset: \code{logic}-based
+enumerations start at \code{X}, which is what you want, because an
+uninitialised state machine should be visibly broken. Using \kw{bit} as the
+base type would start it at zero and hide the missing reset.
+
+Enumerations have built-in methods, which have no \VHDL{} counterpart at all
+beyond \code{'image} and \code{'succ}:
+
+\begin{svcode}
+state_e s = RUN;
+$display("%s", s.name());   // "RUN"  -- the reason to use them in $display
+s = s.next();               // DONE   (wraps round after the last)
+s = s.prev();               // RUN
+$display("%0d", s.num());   // 3      -- number of members
+state_e f = s.first();      // IDLE
+state_e l = s.last();       // DONE
+\end{svcode}
+
+\code{.name()} alone justifies the construct: every waveform dump, every
+log message and every assertion failure can print the state by name with no
+lookup table. \code{.next()} and \code{.prev()} wrap around, so a loop written
+as "advance until you reach \code{last()}" runs forever if you write the exit
+test wrongly; iterate with \code{for (int i = 0; i < s.num(); i++)} instead.
+
+\begin{notebox}{Enumerations are strongly typed, up to a point}
+You cannot assign an integer to an enumeration variable without an explicit
+cast: \code{s = state\_e'(2)} compiles, \code{s = 2} does not. But the cast is
+not checked: \code{state\_e'(3'b111)} produces a variable holding a value
+with no name, and \code{.name()} returns an empty string for it. This is
+weaker than \VHDL{}, where the type simply has no such value.
+\end{notebox}
+
+% ===========================================================================
+\section{Parameterised types and elaboration-time computation}
+\label{sec:beyond:params}
+\index{parameter!type}
+
+\VHDL{} generics carry values. \SV{} parameters carry values \emph{and types}:
+
+\begin{svcode}[caption={A FIFO parameterised by the type it carries},label={lst:beyond:paramtype}]
+module fifo #(
+  parameter type T     = logic [7:0],
+  parameter int  DEPTH = 8
+)(
+  input  logic clk, rst_n,
+  input  logic push, pop,
+  input  T     din,
+  output T     dout,
+  output logic full, empty
+);
+  T mem [DEPTH];
+  localparam int PTRW = $clog2(DEPTH);
+  // ...
+endmodule
+
+// instantiated with a struct as the payload:
+fifo #(.T(pipe_stage_t), .DEPTH(16)) u_f ( ... );
+\end{svcode}
+
+The FIFO now works for any packed type without knowing its width, and
+\code{\$bits(T)} recovers the width where it is needed. In \VHDL{} the same
+effect requires a generic package (2008) or a generic subprogram (2019), both
+of which are more verbose and, more importantly, only partially supported:
+generic packages work in the major commercial simulators, \tool{QuestaSim}
+among them, but synthesis support has historically been patchy, and generic
+subprograms are 2019 and effectively unavailable.
+
+Related tools:
+
+\begin{itemize}
+  \item \code{type(expr)}\index{type() operator} yields the type of an
+        expression, so \code{type(din) tmp;} declares a variable that follows
+        the port. It is useful in macros and in generic code.
+  \item \code{\$bits(x)}\index{\$bits} gives the width in bits of a type or an
+        expression, including a whole struct.
+  \item Functions are evaluated at elaboration when their arguments are
+        constant, so you can compute parameters:
+\end{itemize}
+
+\begin{svcode}[caption={A constant function initialising a localparam array},label={lst:beyond:constfn}]
+function automatic int unsigned atan_rom_entry(int unsigned i);
+  // evaluated at elaboration time; no hardware is built
+  return int'($atan(2.0**(-real'(i))) * (2.0**13));
+endfunction
+
+localparam int unsigned ATAN [0:13] =
+  '{ atan_rom_entry(0),  atan_rom_entry(1),  atan_rom_entry(2),
+     atan_rom_entry(3),  atan_rom_entry(4),  atan_rom_entry(5),
+     atan_rom_entry(6),  atan_rom_entry(7),  atan_rom_entry(8),
+     atan_rom_entry(9),  atan_rom_entry(10), atan_rom_entry(11),
+     atan_rom_entry(12), atan_rom_entry(13) };
+\end{svcode}
+
+This is the same technique \code{cordic\_pkg} in \refexamplebook uses to build
+its arctangent table, and it is one place where \SV{} and \VHDL{} are genuinely
+equivalent: a \VHDL{} constant initialised by a pure function does the same job,
+and does it with better type checking.
+
+The real package differs from the sketch above in three details, and each of
+them matters. It scales by $2^{15}$, not $2^{13}$, because the rotator's
+internal angle format \code{iangle\_t} carries two guard bits below the
+external Q2.13 format. It rounds with \code{\$rtoi(x + 0.5)} rather than
+truncating with \code{int'(x)}, which is worth up to one LSB on every entry.
+And it writes a \code{for} loop instead of fourteen calls. The first difference
+alone scales the whole table by four: the sketch above starts 6433, 3798,
+2006, \dots{} while \code{ATAN\_ROM} starts 25736, 15193, 8027, \dots{} Read
+the real one before you copy either.
+
+\begin{tipbox}{Write the loop, not the list}
+A \code{for} loop inside a constant function returning an unpacked array is
+cleaner than the fourteen calls above, and every current simulator and
+synthesis tool supports it. Write \code{localparam int ATAN [0:13] =
+build\_atan();} and put the loop in \code{build\_atan}. That is what
+\code{cordic\_pkg} does. \tool{Icarus Verilog} is the exception: it cannot
+return an unpacked array from a function, which is why \refsimulationbook shows
+how to generate the same table from Python instead.
+\end{tipbox}
+
+% ===========================================================================
+\section{\texttt{let}, \texttt{`define}, and the preprocessor}
+\label{sec:beyond:macro}
+\index{`define}\index{let}
+
+Parameters and constant functions cover almost everything a design needs to
+compute before elaboration. What they do not cover is text, and for text
+\SV{} has a C-style preprocessor. \VHDL{} has nothing of the kind before 2019,
+and you have not missed much.
+
+\code{`define} performs textual substitution with no type, no scope and no
+respect for the hierarchy. A macro defined in one file is visible in every
+file compiled afterwards in the same compilation unit, which means two IP
+blocks that both define \code{`WIDTH} will fight. Use \code{parameter} and
+\code{localparam} for values, \code{typedef} for types, and reserve
+\code{`define} for things a parameter genuinely cannot express: include
+guards, tool-conditional code, and macros that must expand to declarations.
+
+\code{let} covers many of the remaining cases with proper scoping and proper
+argument semantics:
+
+\begin{svcode}
+let handshake(v, r) = v && r;          // scoped, typed, no textual games
+let is_pow2(n)      = (n & (n-1)) == 0;
+
+always_comb accept = handshake(req_valid_i, req_ready_o);
+\end{svcode}
+
+A \code{let} is expanded at each use with the arguments bound at that point,
+so it can refer to signals in the scope where it is used, unlike a function.
+It is legal in assertions, which is where it earns its keep.
+
+\begin{gotcha}{Macros are text, and text does not respect precedence}
+\code{`define SUM(a,b) a + b} followed by \code{x = `SUM(1,2) * 3;} yields
+\code{1 + 2 * 3}, that is \code{7}. Always parenthesise both the arguments and
+the whole body: \code{`define SUM(a,b) ((a) + (b))}. This is the oldest bug in
+C and it arrived in \SV{} unchanged.
+\end{gotcha}
+
+% ===========================================================================
+\section{\texttt{generate} and \texttt{bind}}
+\label{sec:beyond:bind}
+\index{generate}\index{bind}
+
+Everything so far has changed what you can write \emph{inside} a module. The
+last two constructs change what you can build \emph{out of} modules, and the
+second of them is the most useful thing in this chapter.
+
+\code{generate} needs little explanation, because you already have it:
+\code{for}, \code{if} and \code{case} generate blocks map one-to-one onto the
+\VHDL{} constructs of \cref{sec:rosetta:generate}. Two differences are worth
+remembering. The loop variable is declared \kw{genvar} rather than being
+implicit in the loop, and naming the block, \code{: g\_lane} after the loop
+header, is strongly advised because the name becomes part of the hierarchical
+path. An unnamed generate block gets a tool-invented name such as
+\code{genblk3}, and every waveform path, every \code{bind} target and every
+constraint that mentions it then depends on how many unnamed blocks happen to
+precede it in the file.
+
+\kw{bind} is the interesting one, and it has no \VHDL{} equivalent whatsoever.
+
+\begin{svcode}[caption={Binding a checker to a design without touching its source},label={lst:beyond:bindex}]
+module handshake_chk (input logic clk, rst_n,
+                      input logic valid, ready);
+  property no_drop;
+    @(posedge clk) disable iff (!rst_n)
+      valid && !ready |=> valid;
+  endproperty
+  a_no_drop: assert property (no_drop)
+    else $error("valid dropped before ready");
+endmodule
+
+// Attach it to every instance of the module type:
+bind cordic_rot handshake_chk u_chk_req (
+  .clk(clk_i), .rst_n(rst_ni),
+  .valid(req_valid_i), .ready(req_ready_o));
+
+// ...or to one specific instance only:
+bind u_dut.u_cordic handshake_chk u_chk_rsp (
+  .clk(clk_i), .rst_n(rst_ni),
+  .valid(rsp_valid_o), .ready(rsp_ready_i));
+\end{svcode}
+
+\kw{bind} instantiates a module (or an interface, or a program) \emph{inside}
+another module's scope, from outside, without editing that module. Inside the
+bound instance, the target's internal signals are visible by name, so a
+checker can watch a state register that never reaches a port.
+
+Why this matters: it is the mechanism that makes assertion-based verification
+possible on \RTL{} you do not own. You receive a block from another team, or
+from a vendor, and you attach a hundred assertions and a functional coverage
+model to it in a separate file that your flow can strip out for synthesis. In
+\VHDL{} your only options are to edit the source or to be content with what
+the ports expose.
+
+\begin{tipbox}{Keep bound checkers in their own file list}
+Put \code{bind} statements and checker modules in a \file{*\_bind.sv} file
+compiled only for simulation and formal. The design file list stays clean, the
+synthesis tool never sees an assertion, and nobody has to remember a
+\code{`ifndef SYNTHESIS} guard.
+\end{tipbox}
+
+\begin{gotcha}{A bound port connection is elaborated in the target's scope}
+The expressions in a \code{bind} port list are resolved inside the target
+module, not where the \code{bind} statement is written. That is the whole
+point, and it is also the trap: a name that happens to exist in the target
+with a different width is connected and silently truncated or extended,
+exactly as an ordinary port connection would be, and a name that does not
+exist in the target is an elaboration error pointing at a file that contains
+no such signal. Connect every port by name, and check the widths by hand the
+first time.
+\end{gotcha}
+
+Two things in \cref{lst:beyond:bindex} are not explained here. The
+\kw{property} and the \code{assert property} belong to SystemVerilog
+Assertions, which is \refverificationbook; and what a bound checker is actually
+worth, in a testbench that is already running constrained-random stimulus, is
+the subject of \refverificationbook. This chapter owns the construct: \code{bind}
+attaches a module to a module. The next two chapters spend it.
+
+% ===========================================================================
+\section{Checklist}
+\label{sec:beyond:checklist}
+% ===========================================================================
+
+\begin{itemize}
+  \item \textbf{Use an interface} for any bundle of more than about four
+        signals that crosses more than one module boundary. Give it a
+        \kw{modport} per role.
+  \item \textbf{Use a packed struct} wherever you would have written a
+        \VHDL{} record on a port. It crosses a port, it casts to a vector,
+        and the field names survive into the waveform.
+  \item \textbf{Give every enumeration a base type.} The tool will not
+        choose one for you the way a \VHDL{} synthesiser does.
+  \item \textbf{\code{always\_comb}, \code{always\_ff}, \code{always\_latch}},
+        never a bare \code{always}, in \RTL{}. They are free assertions.
+  \item \textbf{\code{unique} and \code{priority} are promises}, and the
+        synthesiser believes them. Only write one where you can prove it.
+  \item \textbf{Compute constants at elaboration} with a constant function
+        rather than pasting a table into the source, and check that your
+        tools accept it before you rely on it.
+  \item \textbf{Declare the testbench timing, do not time it by hand.} Where
+        a \VHDL{} testbench writes \code{wait for 2 ns;} after every edge, an
+        \SV{} interface carries a clocking block with
+        \code{default input \#1step output \#1ns} and the question does not
+        come up again. \refverificationbook uses it.
+  \item \textbf{Name every generate block.} \code{: g\_lane} after the loop
+        header, always. The name becomes the hierarchical path, and
+        \code{genblk3} is not a path you want in a script.
+  \item \textbf{\code{bind} a checker} onto somebody else{\rq}s \RTL{} rather
+        than editing it. There is no \VHDL{} equivalent and it is one of the
+        most useful things in the language.
+  \item \textbf{Prefer a parameter to a \tick{define}.} The preprocessor has
+        no scope and no types.
+\end{itemize}

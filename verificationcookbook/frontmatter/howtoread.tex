@@ -1,0 +1,65 @@
+% ---------------------------------------------------------------------------
+% howtoread.tex
+% ---------------------------------------------------------------------------
+\chapter*{How to Read This Booklet}
+\addcontentsline{toc}{chapter}{How to Read This Booklet}
+\markboth{How to Read This Booklet}{How to Read This Booklet}
+
+\section*{Typographic conventions}
+
+\begin{itemize}
+  \item \code{Monospaced text} is code: an identifier, a keyword, a file name
+        or a command.
+  \item \kw{Coloured monospaced text} marks a language keyword under
+        discussion.
+  \item \file{Green monospaced text} is a file in the accompanying source
+        tree.
+  \item \tool{Sans-serif} names are tools: \tool{QuestaSim}, \tool{Verilator},
+        \tool{cocotb}, \tool{GTKWave}.
+\end{itemize}
+
+\section*{The three kinds of box}
+
+\begin{gotcha}{What a trap looks like}
+A trap marks a mistake that VHDL experience makes you \emph{more} likely to
+commit, not less.
+\end{gotcha}
+
+\begin{tipbox}{What a recipe looks like}
+A recipe is a pattern to copy. When the text says ``write it like this'',
+this is the box it is in.
+\end{tipbox}
+
+\begin{notebox}{What a note looks like}
+A note supplies background: where a construct came from, what the standard
+actually says, why a tool behaves the way it does. Skip these on a first
+reading and come back when something surprises you.
+\end{notebox}
+
+\begin{ruleofthumb}
+A rule of thumb is one line you should be able to recite from memory.
+\end{ruleofthumb}
+
+\section*{If you have been told to write a testbench by Friday}
+
+\Cref{ch:tb} is self-contained. Read it, take the layered structure, and
+ignore \cref{ch:uvm} entirely until somebody asks you for reuse across
+projects. If your simulator is \tool{Verilator} or you have no licence at
+all, or your golden model is already written in Python, see
+\refsimulationbook once the structure here makes sense.
+
+\section*{If you already know the design-side language}
+
+Start at \cref{ch:toolkit}: it is the vocabulary (classes, dynamic types,
+constrained randomisation, functional coverage, assertions, dynamic
+threads) that the rest of this booklet assumes. None of it is
+synthesisable, and none of it has a VHDL counterpart, so there is nothing to
+translate here, only to learn.
+
+\section*{The companion booklets}
+
+This is the \textbf{Verification Cookbook}. \refdesignbook covers the
+design-side language this booklet assumes you already know.
+\refsimulationbook covers \tool{Verilator}, \tool{QuestaSim} and
+Python/\tool{cocotb} testbenches. \refexamplebook works one CORDIC design
+through all of it, including the testbenches built here.

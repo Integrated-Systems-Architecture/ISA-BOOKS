@@ -1,0 +1,1782 @@
+\chapter{A Complete Example: A CORDIC Rotator}
+\label{ch:case}
+
+\chapabstract{One design of real, if modest, complexity, written twice. This
+chapter contains the complete \VHDL{} and \SV{} sources for an iterative
+CORDIC rotator, four testbenches for it in three languages, a Python golden
+model, and the evidence that all of them agree. Every file is reproduced in
+full, and every line of output quoted here was produced by actually running
+the tools.}
+
+\section{What We Are Building, and Why This Example}
+\label{sec:case:what}
+
+\index{CORDIC}The block is \code{cordic\_rot}: a rotation-mode CORDIC that
+takes a vector $(x, y)$ and an angle $\theta$ and returns the vector rotated
+by $\theta$, scaled by a fixed gain. Feed it $x = \text{\code{X0\_UNIT}}$,
+$y = 0$ and it hands you $(\cos\theta, \sin\theta)$.
+
+That is a small specification. What makes it the right example for this book
+is everything the implementation needs in order to satisfy it:
+
+\begin{itemize}
+  \item a \textbf{fixed-point number format} that somebody has to choose, and
+        that neither language will check for you in the same way;
+  \item a \textbf{constant table} computed at elaboration from a
+        transcendental function, which is where \VHDL{}'s
+        \code{ieee.math\_real} and \SV{}'s \code{\$atan} meet;
+  \item a \textbf{control state machine}, small enough to read on one page;
+  \item a \textbf{parameterised datapath} with shifts, adds and a saturating
+        output stage;
+  \item a \textbf{handshake protocol} on both ports, which is what makes a
+        proper monitor and scoreboard necessary rather than decorative;
+  \item and \textbf{arithmetic} whose correct answer is not obvious by
+        inspection, so a golden model earns its keep.
+\end{itemize}
+
+If you understand every line of this chapter, you can write \SV{}. There is
+nothing else in the language you will meet in your first year that is not a
+variation on something here.
+
+\Cref{fig:case:block} is the whole block. Three stages and a controller: a
+coarse rotation that folds the angle into the range where the algorithm
+converges, a micro-rotation datapath that iterates $N$ times, and a saturating
+narrow-down on the way out.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\small\sffamily,
+      node distance=6mm,
+      blk/.style={draw=codekey,fill=svbg,line width=0.9pt,rounded corners=2pt,
+                  minimum height=11mm,minimum width=26mm,align=center,
+                  inner sep=4pt},
+      rom/.style={draw=accent,fill=tipbg,line width=0.9pt,rounded corners=2pt,
+                  minimum height=9mm,minimum width=20mm,align=center},
+      ctl/.style={draw=accentalt,fill=warnbg,line width=0.9pt,
+                  rounded corners=2pt,minimum height=9mm,minimum width=26mm,
+                  align=center},
+      ar/.style={-{Latex[length=2.2mm]},draw=codenumber,thick}]
+
+    \node[blk] (coarse) {coarse\\rotation};
+    \node[blk,right=14mm of coarse] (micro) {micro-rotation\\$x,y,z$};
+    \node[blk,right=14mm of micro] (sat) {saturating\\narrow};
+    \node[rom,below=9mm of micro] (romn) {\code{ATAN\_ROM}};
+    \node[ctl,above=9mm of micro] (fsm) {FSM\\ \scriptsize IDLE / ROTATE / DONE};
+
+    \node[left=11mm of coarse,align=right,font=\scriptsize\ttfamily]
+      (in) {req\_x\\req\_y\\req\_theta};
+    \node[right=11mm of sat,align=left,font=\scriptsize\ttfamily]
+      (out) {rsp\_x\\rsp\_y};
+
+    \draw[ar] (in.east)     -- (coarse.west);
+    \draw[ar] (coarse.east) -- (micro.west);
+    \draw[ar] (micro.east)  -- (sat.west);
+    \draw[ar] (sat.east)    -- (out.west);
+    \draw[ar] (romn.north)  -- (micro.south);
+    \draw[ar] (fsm.south)   -- (micro.north);
+
+    % the fold-back path: one iteration per clock
+    \draw[ar] ([yshift=3mm]micro.east) -- ++(0.7,0) -- ++(0,-1.35)
+              -- ++(-4.6,0) -- ([yshift=-3mm]micro.west);
+    \node[font=\scriptsize,below=1.5mm of micro,xshift=15mm,yshift=-1mm]
+      {one iteration per clock};
+
+    \node[font=\scriptsize\itshape,left=1mm of coarse,yshift=-9mm,
+          anchor=north east] {\phantom{x}};
+    \node[font=\scriptsize,above=0.5mm of in] {\itshape valid / ready};
+    \node[font=\scriptsize,above=0.5mm of out] {\itshape valid / ready};
+  \end{tikzpicture}
+  \caption{The \code{cordic\_rot} datapath. The coarse-rotation stage runs
+  once per transaction; the micro-rotation stage runs $N$ times, reusing one
+  adder pair and one shifter pair. A transaction takes $N + 2$ clock cycles.}
+  \label{fig:case:block}
+\end{figure}
+
+\begin{notebox}{Folded, not pipelined}
+This is the area-efficient shape: one set of adders, reused $N$ times, at a
+throughput of one transaction every $N + 2$ cycles. The other shape unrolls
+the loop into $N$ pipeline stages and accepts one transaction per cycle at
+roughly $N$ times the area. \Cref{sec:case:exercises} asks you to build that
+version, because the interesting part is not the datapath but what happens to
+the handshake.
+\end{notebox}
+
+\section{The Algorithm}
+\label{sec:case:algorithm}
+
+\index{CORDIC!rotation mode}A rotation by $\theta$ is
+\[
+  \begin{pmatrix} x' \\ y' \end{pmatrix} =
+  \begin{pmatrix} \cos\theta & -\sin\theta \\
+                  \sin\theta & \cos\theta \end{pmatrix}
+  \begin{pmatrix} x \\ y \end{pmatrix} ,
+\]
+which needs four multiplications and two transcendental functions. Volder's
+observation in 1959 was that if you restrict yourself to rotations by the
+particular angles $\alpha_i = \arctan 2^{-i}$, the matrix becomes
+\[
+  \begin{pmatrix} x_{i+1} \\ y_{i+1} \end{pmatrix} =
+  \cos\alpha_i
+  \begin{pmatrix} 1 & -d_i 2^{-i} \\ d_i 2^{-i} & 1 \end{pmatrix}
+  \begin{pmatrix} x_i \\ y_i \end{pmatrix} ,
+  \qquad d_i = \pm 1 ,
+\]
+and the only operations left inside the matrix are a shift and an add. Drop
+the $\cos\alpha_i$ scale factor, keep a running account of how much angle is
+left to rotate, and you have the algorithm:
+
+\begin{align}
+  x_{i+1} &= x_i - d_i \, (y_i \gg i) \label{eq:case:x}\\
+  y_{i+1} &= y_i + d_i \, (x_i \gg i) \label{eq:case:y}\\
+  z_{i+1} &= z_i - d_i \, \alpha_i    \label{eq:case:z}
+\end{align}
+
+with $z_0 = \theta$ and $d_i = +1$ if $z_i \ge 0$, $-1$ otherwise. The
+decision is the sign bit of $z_i$: no comparison, no subtraction, one wire.
+
+Three consequences follow, and all three appear in the code.
+
+\subsection{The processing gain}
+
+Dropping $\cos\alpha_i$ at every step means the vector grows. After $N$
+iterations the length has been multiplied by
+\[
+  K_N = \prod_{i=0}^{N-1} \sqrt{1 + 2^{-2i}} ,
+\]
+which converges very quickly: $K_{14} = 1.6467602540$ and the limit is
+$K_\infty = 1.6467602581$. The gain is a constant, so you can cancel it once,
+in advance, by pre-scaling the input. The package exposes
+\code{X0\_UNIT} $= \operatorname{round}(2^{14}/K) = 9949$ for exactly this
+purpose.
+
+\begin{notebox}{Which $K$?}
+The testbenches use $K = 1.6467602581210656$, the limit, while the true gain
+for $N = 14$ is $1.6467602540312922$. The difference is $4 \times 10^{-9}$,
+about $6.7\times10^{-5}$ of one LSB in Q1.14, so it is invisible next to the
+$2.5$ LSB of real quantisation error. Using the limit is the conventional
+choice because it does not change when you change $N$. If you ever tighten
+the tolerance below one LSB, use the exact product for your $N$.
+\end{notebox}
+
+\subsection{The convergence range}
+
+The angle left over after all $N$ steps can only be driven to zero if the
+step you are about to take is never larger than the sum of all the steps
+remaining. That gives
+\[
+  |\theta| \le \sum_{i=0}^{\infty} \arctan 2^{-i} = 1.7433 \text{ rad}
+  \approx 99.9^\circ .
+\]
+So the raw recurrence handles a little under $\pm100^\circ$, and nothing more.
+
+\subsection{Quadrant folding}
+
+To cover the full circle you rotate by a whole quadrant first, which costs
+nothing because a rotation by $\pm\pi/2$ is a swap and a negation:
+\[
+  +\tfrac{\pi}{2}: (x,y) \mapsto (-y, x) , \qquad
+  -\tfrac{\pi}{2}: (x,y) \mapsto (y, -x) .
+\]
+One fold brings $|\theta| \le \pi$ down to $|\theta| \le \pi/2 = 1.5708$,
+comfortably inside $1.7433$. Two folds would cover $|\theta| \le 3\pi/2$, and
+the design does not do them: it accepts $|\theta| \le \pi$ and fires an
+assertion otherwise. Range reduction of an arbitrary angle belongs upstream,
+where it can be done once for a whole stream.
+
+\Cref{fig:case:converge} shows what the micro-rotations actually do. Each one
+overshoots, and the overshoot halves.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[font=\small\sffamily,scale=1.0]
+    \def\R{3.0}
+    % unit circle
+    \draw[codeframe,line width=0.8pt] (0,0) circle (\R);
+    \draw[codenumber,-{Latex[length=1.8mm]}] (-\R-0.4,0) -- (\R+0.5,0)
+      node[right,font=\scriptsize]{$x$};
+    \draw[codenumber,-{Latex[length=1.8mm]}] (0,-0.4) -- (0,\R+0.5)
+      node[above,font=\scriptsize]{$y$};
+
+    % target angle 60 degrees
+    \draw[accentalt,line width=1.3pt,-{Latex[length=2.4mm]}]
+      (0,0) -- (60:\R) node[above right,font=\scriptsize]{target $\theta$};
+    \draw[accentalt,dashed] (0,0) -- (60:\R+0.45);
+
+    % successive approximations: 45, 71.6, 45+26.6-14.0=58.3, +7.1=65.4
+    \draw[codekey,line width=1.0pt,-{Latex[length=2mm]}] (0,0) -- (0:\R);
+    \node[font=\scriptsize,codekey] at (2:\R+0.32) {$i{=}0$};
+    \draw[codekey,line width=1.0pt,-{Latex[length=2mm]}] (0,0) -- (45:\R);
+    \node[font=\scriptsize,codekey] at (45:\R+0.32) {$1$};
+    \draw[codekey,line width=1.0pt,-{Latex[length=2mm]}] (0,0) -- (71.6:\R);
+    \node[font=\scriptsize,codekey] at (73:\R+0.3) {$2$};
+    \draw[codekey,line width=1.0pt,-{Latex[length=2mm]}] (0,0) -- (57.5:\R);
+    \node[font=\scriptsize,codekey] at (55:\R+0.32) {$3$};
+    \draw[codekey,line width=1.0pt,-{Latex[length=2mm]}] (0,0) -- (64.6:\R);
+    \node[font=\scriptsize,codekey] at (65.5:\R+0.3) {$4$};
+
+    \node[align=left,font=\scriptsize,anchor=north west]
+      at (-\R-0.3,-0.6)
+      {Each step rotates by $\arctan 2^{-i}$: $45.0^\circ$, $26.6^\circ$,\\
+       $14.0^\circ$, $7.1^\circ$, \ldots\ The sign alternates as the\\
+       residual angle $z$ changes sign. After 14 steps the\\
+       residual is below the resolution of the angle format.};
+  \end{tikzpicture}
+  \caption{The first four micro-rotations converging on a target of
+  $60^\circ$. The vector also grows by the processing gain at every step;
+  that growth is not drawn.}
+  \label{fig:case:converge}
+\end{figure}
+
+The table of angles is fixed at elaboration. \Cref{tab:case:atan} is the one
+this design uses, taken verbatim from the generated file
+\file{sv/cordic\_atan\_rom.svh}.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{The arctangent ROM. Values are in the internal angle format,
+  Q2.15, so one unit is $2^{-15} = 3.05\times10^{-5}$ rad.}
+  \label{tab:case:atan}
+  \begin{tabular}{@{}rrr@{\hspace{2.5em}}rrr@{}}
+    \toprule
+    $i$ & $\arctan 2^{-i}$ (rad) & Q2.15 &
+    $i$ & $\arctan 2^{-i}$ (rad) & Q2.15\\
+    \midrule
+     0 & 0.785398163 & 25736 &  7 & 0.007812341 &  256\\
+     1 & 0.463647609 & 15193 &  8 & 0.003906230 &  128\\
+     2 & 0.244978663 &  8027 &  9 & 0.001953123 &   64\\
+     3 & 0.124354995 &  4075 & 10 & 0.000976562 &   32\\
+     4 & 0.062418810 &  2045 & 11 & 0.000488281 &   16\\
+     5 & 0.031239833 &  1024 & 12 & 0.000244141 &    8\\
+     6 & 0.015623729 &   512 & 13 & 0.000122070 &    4\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{notebox}{Where the table stops paying}
+From $i = 5$ onwards the entries are exactly $2^{15-i}$: the arctangent has
+become indistinguishable from its argument at this precision. That is the
+signal that $N = 14$ is matched to a 15-bit fractional angle, and that adding
+a fifteenth iteration would buy nothing without widening the angle first.
+\end{notebox}
+
+\section{Choosing the Number Format}
+\label{sec:case:format}
+
+This is the section where a \VHDL{} designer discovers what \SV{} will not do
+for them.
+
+\subsection{The decisions}
+
+\textbf{$x$ and $y$: signed 16 bits, 14 fractional (Q1.14).} The natural
+output is a unit vector, so the range needs to cover $[-1, 1]$ with a little
+room. One integer bit gives $[-2, 2)$ and a resolution of
+$2^{-14} = 6.1\times10^{-5}$. Sixteen bits because that is what fits a
+DSP block input and what the rest of the world will hand you.
+
+\textbf{$\theta$: signed 16 bits, 13 fractional (Q2.13).} The angle has to
+reach $\pi = 3.14159$, so two integer bits are the minimum; the range is
+$[-4, 4)$ and the resolution is $1.22\times10^{-4}$ rad. Note that this is
+\emph{coarser} than the output resolution: an angle error of
+$1.22\times10^{-4}$ rad produces an output error of up to $1.22\times10^{-4}$,
+which is two LSB of Q1.14. The input quantisation, not the algorithm, is the
+dominant error term.
+
+\textbf{Guard bits: two at each end.} \code{GL = 2} extra fractional bits
+below the LSB stop the fourteen successive truncations in
+\cref{eq:case:x,eq:case:y} from accumulating into the result; each shift
+throws away up to one LSB, and fourteen of them would otherwise cost about
+four. \code{GM = 2} extra bits above the MSB give the datapath room for the
+processing gain: an input of magnitude $2$ becomes $3.3$ inside the loop, and
+without headroom it would wrap.
+
+\textbf{The output saturates rather than wraps.} A CORDIC that silently
+returns $-1.99$ when the answer was $+2.01$ is worse than one that returns
+$+1.99$, because the wrap looks like a sign error and takes an afternoon to
+find.
+
+\Cref{tab:case:formats} collects every constant.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Every number format in the design. The internal formats are the
+  external ones widened by \code{GL} at the bottom and \code{GM} at the top.}
+  \label{tab:case:formats}
+  \begin{tabular}{@{}llrrll@{}}
+    \toprule
+    Quantity & Type & Bits & Frac. & Range & Resolution\\
+    \midrule
+    $x$, $y$ in/out    & \code{data\_t}   & 16 & 14 & $[-2, 2)$ & $6.1\times10^{-5}$\\
+    $\theta$ in        & \code{angle\_t}  & 16 & 13 & $[-4, 4)$ & $1.22\times10^{-4}$\\
+    $x$, $y$ internal  & \code{idata\_t}  & 20 & 16 & $[-8, 8)$ & $1.5\times10^{-5}$\\
+    $z$ internal       & \code{iangle\_t} & 18 & 15 & $[-4, 4)$ & $3.05\times10^{-5}$\\
+    \midrule
+    \multicolumn{6}{@{}l}{\itshape Derived constants}\\
+    \code{PI\_EXT}      & \multicolumn{2}{l}{$\pi \cdot 2^{13}$}   & \multicolumn{3}{l}{25736 \quad the accepted input limit}\\
+    \code{HALF\_PI\_INT}& \multicolumn{2}{l}{$\frac{\pi}{2} \cdot 2^{15}$} & \multicolumn{3}{l}{51472 \quad the coarse-rotation threshold}\\
+    \code{X0\_UNIT}     & \multicolumn{2}{l}{$2^{14}/K$}           & \multicolumn{3}{l}{9949 \quad\ the unit-circle seed}\\
+    \code{MAX\_DATA}    & \multicolumn{2}{l}{$2^{15}-1$}           & \multicolumn{3}{l}{32767 \quad the saturation limit}\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{The error budget}
+
+Three terms, and it is worth being able to write them down before you
+simulate, so that a measured error you did not predict is a signal rather
+than a shrug.
+
+\begin{enumerate}
+  \item \textbf{Angle quantisation.} $\pm\frac12$ LSB of Q2.13, so
+        $6.1\times10^{-5}$ rad, giving up to $1.0$ LSB of Q1.14 output error.
+  \item \textbf{Residual angle after $N$ steps.} Bounded by $\alpha_{N-1} =
+        1.22\times10^{-4}$ rad, another $2.0$ LSB, but in practice much less
+        because the residual is roughly uniform in
+        $[-\alpha_{N-1}, \alpha_{N-1}]$.
+  \item \textbf{Truncation in the shifts.} Fourteen right shifts, each losing
+        up to one internal LSB of $2^{-16}$, and the guard bits mean those
+        internal LSBs are a quarter of an output LSB. Call it $1$ LSB.
+\end{enumerate}
+
+Sum: under $5$ LSB. Measured, over 308 random and directed transactions:
+$2.55$ LSB in the \VHDL{} testbench, $2.82$ in the \SV{} one. The tolerance
+in every testbench is set to $12$ LSB, which leaves room for the tails without
+being loose enough to hide a wrong sign, a wrong shift or a missing
+micro-rotation. All three of those bugs move the answer by hundreds of LSB.
+
+\begin{gotcha}{Nobody is tracking your binary point}
+\VHDL{}-2008 ships \code{ieee.fixed\_pkg}. It gives you \code{sfixed(1
+downto -14)}, and when you multiply an \code{sfixed(1 downto -14)} by an
+\code{sfixed(3 downto -13)} the compiler works out that the result is an
+\code{sfixed(5 downto -27)} and tells you so. Shifts, resizes and the
+binary-point bookkeeping are all checked at analysis time.
+
+\SV{} has nothing of the kind. \code{data\_t} is twenty bits and the binary
+point exists only in \cref{tab:case:formats}, in the comments, and in your
+head. Every one of the decisions above is a comment that the tool will never
+verify. This is the single largest thing a \VHDL{} designer gives up when
+moving to \SV{} for arithmetic work, and the mitigation is entirely
+procedural: name the formats in the package, write the widths in the
+comments, and check them against a golden model that was written
+independently.
+\end{gotcha}
+
+\begin{ruleofthumb}
+Write the number format down before you write the RTL, put it in the package
+header, and have a model that will disagree with you if you get it wrong.
+\end{ruleofthumb}
+
+\section{The Golden Model Comes First}
+\label{sec:case:model}
+
+\index{golden model}The Python model in \cref{lst:case:model} was written
+before either implementation, and both were checked against it.
+
+Two things about it are deliberate.
+
+It is \textbf{bit-exact}, not floating point. A floating point model tells
+you the design computes a rotation; a bit-exact model tells you the design
+computes \emph{this} rotation, with this rounding, these guard bits and this
+saturation. The second catches a class of bug the first cannot see: a shift
+that rounds the wrong way, a guard bit dropped one stage too early, a
+saturation limit off by one. Both checks appear in this chapter, and they
+fail on different things.
+
+It exploits the fact that \textbf{Python's \code{>>} on a negative integer
+floors}, which is exactly what an arithmetic shift right does in hardware.
+\code{-7 >> 1} is $-4$ in Python and in \VHDL{}'s \code{shift\_right} and in
+\SV{}'s \code{>>>}. It is $-3$ in C, which rounds toward zero. Writing the
+model in Python rather than C removed a whole category of mismatch before it
+could happen.
+
+\begin{gotcha}{A model that copies the RTL is worth nothing}
+The temptation, once the RTL exists, is to write the model by reading it.
+The result agrees with the RTL perfectly, including on every bug. The model
+here was written from \cref{eq:case:x,eq:case:y,eq:case:z} and the format
+table, and the first time it was run against the \VHDL{} it disagreed. The
+\VHDL{} was wrong. That is the entire value proposition.
+\end{gotcha}
+
+Running the model on its own checks it against the ideal rotation:
+
+\begin{txtcode}
+$ make model
+N = 14, K = 1.646760, 1/K = 0.607253, X0_UNIT = 9949
+HALF_PI = 51472, PI = 102944
+atan table: [25736, 15193, 8027, 4075, 2045, 1024, 512, 256, 128, 64, 32,
+             16, 8, 4]
+worst |error| over [-pi, pi] = 0.000233  (3.82 LSB)
+\end{txtcode}
+
+$3.82$ LSB over a 721-point sweep of the full circle, against a budget of
+$5$. The model is behaving as the arithmetic says it should, which means it
+is fit to be the reference.
+
+\clearpage
+\pyfile{code/cordic/python/cordic_model.py}{\file{cordic\_model.py} --- the
+bit-exact golden model. Every line maps onto one line of RTL.}{lst:case:model}
+
+\section{The VHDL Implementation}
+\label{sec:case:vhdl}
+
+Two files: a package that holds the formats, the types and the table, and an
+entity that holds the logic. The complete sources are
+\cref{lst:case:vhdlpkg,lst:case:vhdlrot} at the end of this section; the
+pieces worth stopping on are here.
+
+\subsection{The package}
+
+The subtypes are the first thing a reader meets, and they carry real
+information:
+
+\begin{vhdlcode}
+subtype data_t   is signed(DW - 1 downto 0);
+subtype angle_t  is signed(AW - 1 downto 0);
+subtype idata_t  is signed(IW - 1 downto 0);
+subtype iangle_t is signed(IA - 1 downto 0);
+\end{vhdlcode}
+
+A subtype constrains an existing type. \code{data\_t} and
+\code{signed(15 downto 0)} are interchangeable, and every assignment between
+them is checked for width and for direction. Assign an \code{idata\_t} to a
+\code{data\_t} and the analyser stops you.
+
+The arctangent table is computed by the analyser:
+
+\begin{vhdlcode}
+function build_atan_rom return atan_rom_t is
+  variable rom : atan_rom_t;
+begin
+  for i in 0 to N - 1 loop
+    rom(i) := to_signed(
+                integer(round(arctan(2.0 ** (-i)) * 2.0 ** IQA)), IA);
+  end loop;
+  return rom;
+end function build_atan_rom;
+\end{vhdlcode}
+
+\code{arctan} and \code{round} come from \code{ieee.math\_real}, which is a
+simulation and elaboration library: the call is evaluated once, when the
+constant is elaborated, and only the fourteen integers reach the netlist.
+\Cref{tab:case:atan} is literally the output of this function.
+
+The constant itself is \emph{deferred}: the package declares that it exists
+and the package body says what it is.
+
+\begin{vhdlcode}
+-- in the package declaration
+constant ATAN_ROM : atan_rom_t;
+-- in the package body, after build_atan_rom
+constant ATAN_ROM : atan_rom_t := build_atan_rom;
+\end{vhdlcode}
+
+\begin{tipbox}{Use a deferred constant to initialise from a function}
+Writing \code{constant ATAN\_ROM : atan\_rom\_t := build\_atan\_rom;} in the
+package declaration works, but it calls the function from the declaration
+while the body that defines it has not been elaborated, and analysers warn
+about that. The deferred form removes the ambiguity and costs one line. \SV{} has no equivalent: a \code{localparam} must be given
+its value where it is declared.
+\end{tipbox}
+
+The saturating narrow-down is the last piece of arithmetic in the design:
+
+\begin{vhdlcode}
+function sat_narrow (v : idata_t) return data_t is
+  constant TW : positive := IW - GL;
+  variable t  : signed(TW - 1 downto 0);
+begin
+  t := v(IW - 1 downto GL);          -- drop the guard bits
+  if t > to_signed(MAX_DATA, TW) then
+    return to_signed(MAX_DATA, DW);
+  elsif t < to_signed(MIN_DATA, TW) then
+    return to_signed(MIN_DATA, DW);
+  else
+    return resize(t, DW);
+  end if;
+end function sat_narrow;
+\end{vhdlcode}
+
+Slicing off the bottom \code{GL} bits of a \code{signed} is exactly an
+arithmetic shift right, and it rounds toward $-\infty$, matching the Python
+model.
+
+\subsection{The architecture}
+
+The coarse rotation is one \code{process (all)}:
+
+\begin{vhdlcode}
+x_ext <= shift_left(resize(req_x_i,     IW), GL);
+z_ext <= shift_left(resize(req_theta_i, IA), GL);
+
+p_coarse : process (all) is
+begin
+  if z_ext > HALF_PI_S then
+    x_load <= -y_ext;  y_load <=  x_ext;
+    z_load <=  z_ext - HALF_PI_S;
+  elsif z_ext < -HALF_PI_S then
+    x_load <=  y_ext;  y_load <= -x_ext;
+    z_load <=  z_ext + HALF_PI_S;
+  else
+    x_load <= x_ext;   y_load <= y_ext;   z_load <= z_ext;
+  end if;
+end process p_coarse;
+\end{vhdlcode}
+
+\code{resize} on a \code{signed} sign-extends; \code{shift\_left} adds the
+guard bits. Both are explicit, both are checked. If \code{IW} and the width
+of \code{x\_ext} ever disagree, the analyser says so.
+
+The micro-rotation is four concurrent assignments, which is as close as
+\VHDL{} gets to writing down \cref{eq:case:x,eq:case:y,eq:case:z} directly:
+
+\begin{vhdlcode}
+ccw    <= not z_q(IA - 1);            -- z >= 0
+x_sh   <= shift_right(x_q, iter_q);
+y_sh   <= shift_right(y_q, iter_q);
+atan_i <= ATAN_ROM(iter_q);
+
+x_rot <= x_q - y_sh   when ccw = '1' else x_q + y_sh;
+y_rot <= y_q + x_sh   when ccw = '1' else y_q - x_sh;
+z_rot <= z_q - atan_i when ccw = '1' else z_q + atan_i;
+\end{vhdlcode}
+
+\code{shift\_right} on a \code{signed} is arithmetic by definition. There is
+no way to write the wrong one.
+
+\begin{notebox}{\code{iter\_q} is a constrained integer}
+\code{signal iter\_q : natural range 0 to ITER - 1;} declares a counter that
+cannot legally hold 14. If a bug ever drove it out of range, the simulation
+would stop with a bounds error naming the line. The \SV{} counter is
+\code{logic [3:0]} and would wrap to zero in silence.
+\end{notebox}
+
+\clearpage
+\vhdlfile{code/cordic/vhdl/cordic_pkg.vhd}{\file{cordic\_pkg.vhd} --- formats,
+types, the elaboration-time arctangent ROM and the saturating narrow-down.}{lst:case:vhdlpkg}
+
+\clearpage
+\vhdlfile{code/cordic/vhdl/cordic_rot.vhd}{\file{cordic\_rot.vhd} --- the VHDL
+implementation.}{lst:case:vhdlrot}
+
+\clearpage
+\section{The SystemVerilog Implementation}
+\label{sec:case:sv}
+
+The same two files, in the same order, doing the same job. Read the
+side-by-side pairs below and then the complete sources in
+\cref{lst:case:svpkg,lst:case:svrot}.
+
+\subsection{Package and types}
+
+\begin{rosetta}
+\begin{rleft}
+package cordic_pkg is
+  constant DW : positive := 16;
+  subtype data_t is
+    signed(DW - 1 downto 0);
+  ...
+end package cordic_pkg;
+
+-- in the design unit:
+library work;
+  use work.cordic_pkg.all;
+\end{rleft}
+\begin{rright}
+package cordic_pkg;
+  parameter int unsigned DW = 16;
+  typedef logic signed [DW-1:0]
+          data_t;
+  ...
+endpackage : cordic_pkg
+
+// in the design unit:
+module cordic_rot
+  import cordic_pkg::*;
+\end{rright}
+\end{rosetta}
+
+A \code{typedef} creates a genuinely new name, but it carries no constraint:
+\code{data\_t} is sixteen bits interpreted as two's complement, and that is
+all the tool knows. Assigning a twenty-bit value to it truncates, silently.
+The \code{import} on the module header is the tidy form, and it scopes the
+import to that module rather than to the compilation unit.
+
+\subsection{The constant table}
+
+\begin{rosetta}
+\begin{rleft}
+-- declaration
+constant ATAN_ROM : atan_rom_t;
+
+-- body
+constant ATAN_ROM : atan_rom_t
+  := build_atan_rom;
+\end{rleft}
+\begin{rright}
+function automatic atan_rom_t
+    build_atan_rom();
+  ...
+endfunction
+
+localparam atan_rom_t ATAN_ROM
+  = build_atan_rom();
+\end{rright}
+\end{rosetta}
+
+Inside the function, \code{\$atan} plays the part of \code{arctan} and
+\code{\$rtoi} the part of \code{integer(round(...))}:
+
+\begin{svcode}
+rom[i] = iangle_t'($rtoi($atan(2.0 ** (-i)) * (2.0 ** IQA) + 0.5));
+\end{svcode}
+
+\code{\$rtoi} truncates toward zero, so the \code{+ 0.5} is doing the
+rounding that \VHDL{}'s \code{round} does for you. Forget it and every entry
+in the table is one too small, the rotations are all slightly short, and the
+error grows with the angle: a bug that a tolerance of 12 LSB would not catch
+at small angles and would catch at large ones.
+
+\begin{gotcha}{A constant function is not portable}
+A function that returns an unpacked array, used to initialise a
+\code{localparam}, is legal IEEE 1800 and works in \tool{Verilator} 5.020 and
+in the commercial simulators. \tool{Icarus Verilog} 12 rejects it outright:
+\code{Array rom needs an array index here} followed by \code{Unable to
+evaluate parameter ATAN\_ROM}. Some synthesis front ends refuse
+\code{\$atan} in a constant expression too. When portability matters, generate
+the table from a script instead --- \cref{sec:case:python} does exactly that,
+and \file{sv/cordic\_atan\_rom.svh} is the result.
+\end{gotcha}
+
+\subsection{Widening and coarse rotation}
+
+\begin{rosetta}
+\begin{rleft}
+x_ext <= shift_left(
+           resize(req_x_i, IW), GL);
+z_ext <= shift_left(
+           resize(req_theta_i, IA), GL);
+\end{rleft}
+\begin{rright}
+x_ext = idata_t'(req_x_i)      <<< GL;
+z_ext = iangle_t'(req_theta_i) <<< GL;
+\end{rright}
+\end{rosetta}
+
+The cast sign-extends because both types are signed. This is one of the few
+places where \SV{}'s implicit width rules genuinely help: the cast states the
+intent and the shift does the rest, in one line instead of two nested calls.
+It is also one line in which a typo -- \code{iangle\_t} where you meant
+\code{idata\_t} -- compiles happily and truncates two bits.
+
+\subsection{The micro-rotation}
+
+\begin{rosetta}
+\begin{rleft}
+x_sh <= shift_right(x_q, iter_q);
+
+x_rot <= x_q - y_sh
+         when ccw = '1'
+         else x_q + y_sh;
+\end{rleft}
+\begin{rright}
+x_sh = x_q >>> iter_q;
+
+if (ccw) x_rot = x_q - y_sh;
+else     x_rot = x_q + y_sh;
+\end{rright}
+\end{rosetta}
+
+\begin{gotcha}{\code{>>} and \code{>>>} look almost the same}
+\code{x\_q >> iter\_q} compiles, simulates, and gives the right answer for
+every positive input. It is wrong for every negative one, and half of a
+random stimulus stream is negative, so the failure is loud --- if you have a
+scoreboard. If your testbench prints waveforms for a human to inspect, and
+the human happens to look at a positive case, this bug ships. \VHDL{} makes
+it unwriteable.
+\end{gotcha}
+
+\subsection{The state machine}
+
+\begin{rosetta}
+\begin{rleft}
+type state_t is
+  (ST_IDLE, ST_ROTATE, ST_DONE);
+
+p_fsm : process (all) is
+begin
+  state_d <= state_q;
+  req_ready_o <= '0';
+  case state_q is
+    when ST_IDLE =>
+      req_ready_o <= '1';
+      ...
+  end case;
+end process p_fsm;
+\end{rleft}
+\begin{rright}
+typedef enum logic [1:0] {
+  ST_IDLE, ST_ROTATE, ST_DONE
+} state_e;
+
+always_comb begin
+  state_d = state_q;
+  req_ready_o = 1'b0;
+  unique case (state_q)
+    ST_IDLE: begin
+      req_ready_o = 1'b1;
+      ...
+  endcase
+end
+\end{rright}
+\end{rosetta}
+
+Three differences, all of them consequential.
+
+The \VHDL{} enumeration has no encoding: the synthesis tool picks one, and
+you influence it with an attribute. The \SV{} enumeration has an explicit
+base type, \code{logic [1:0]}, and that is what goes into the flip-flops. The
+\SV{} version is more honest about the hardware and less convenient when you
+want the tool to choose one-hot for you.
+
+The \VHDL{} \code{case} must cover every value of \code{state\_t} or the
+analyser complains, and there are exactly three. The \SV{} \code{case} covers
+three of four possible two-bit values, so it needs a \code{default}, and
+\code{unique} asks the simulator to check at run time that exactly one branch
+matched. \VHDL{} gets that check for free from its type system.
+
+\code{always\_comb} is not quite \code{process (all)}. Both derive the
+sensitivity list. \code{always\_comb} additionally executes once at time
+zero, and it includes the contents of any function it calls in the
+sensitivity list. Neither of them checks for an inferred latch: the default
+assignments at the top of the block are your responsibility in both
+languages.
+
+\subsection{Registers and checks}
+
+\begin{rosetta}
+\begin{rleft}
+p_regs : process (clk_i, rst_ni) is
+begin
+  if rst_ni = '0' then
+    state_q <= ST_IDLE;
+    x_q     <= (others => '0');
+  elsif rising_edge(clk_i) then
+    state_q <= state_d;
+    x_q     <= x_d;
+  end if;
+end process p_regs;
+\end{rleft}
+\begin{rright}
+always_ff @(posedge clk_i or
+            negedge rst_ni) begin
+  if (!rst_ni) begin
+    state_q <= ST_IDLE;
+    x_q     <= '0;
+  end else begin
+    state_q <= state_d;
+    x_q     <= x_d;
+  end
+end
+\end{rright}
+\end{rosetta}
+
+This is the pair that will convince you the two languages are the same
+language wearing different clothes. \code{'0} is the one novelty: an unsized
+fill literal that takes the width of its context, so it works for a two-bit
+enumeration and a twenty-bit datapath without being told the width.
+
+The checks are where \SV{} pulls ahead. Both designs carry an immediate
+assertion on the input range:
+
+\begin{rosetta}
+\begin{rleft}
+assert req_theta_i
+         <= to_signed(PI_EXT, AW)
+   and req_theta_i
+         >= to_signed(-PI_EXT, AW)
+  report "|theta| > pi"
+  severity error;
+\end{rleft}
+\begin{rright}
+assert (req_theta_i <=  angle_t'(PI_EXT) &&
+        req_theta_i >= -angle_t'(PI_EXT))
+  else $error("cordic_rot: |theta| > pi (%0d)",
+              req_theta_i);
+\end{rright}
+\end{rosetta}
+
+But the second check --- that a stalled request holds its payload steady --- is
+a \emph{temporal} property, and there the two diverge completely. In \SV{} it
+is four lines:
+
+\begin{svcode}
+property p_req_stable;
+  @(posedge clk_i) disable iff (!rst_ni)
+    (req_valid_i && !req_ready_o) |=>
+      $stable(req_x_i) && $stable(req_y_i) && $stable(req_theta_i);
+endproperty
+a_req_stable : assert property (p_req_stable)
+  else $error("cordic_rot: request payload changed while stalled");
+\end{svcode}
+
+In \VHDL{} it is a process with five variables that remembers the previous
+cycle by hand, twenty lines in \cref{lst:case:vhdlrot}, or it is PSL, which
+is a second language with patchy tool support. This is the clearest single
+win for \SV{} in the whole design.
+
+\clearpage
+\svfile{code/cordic/sv/cordic_pkg.sv}{\file{cordic\_pkg.sv} --- the
+SystemVerilog package.}{lst:case:svpkg}
+
+\clearpage
+\svfile{code/cordic/sv/cordic_rot.sv}{\file{cordic\_rot.sv} --- the
+SystemVerilog implementation.}{lst:case:svrot}
+
+\clearpage
+\section{The Two Implementations Compared}
+\label{sec:case:compare}
+
+\Cref{tab:case:lines} counts the lines. Both files are commented at the same
+density, so the ratio is meaningful.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Source size. Comments and blank lines are included, because the
+  two files were written to the same commenting standard.}
+  \label{tab:case:lines}
+  \begin{tabular}{@{}lrrl@{}}
+    \toprule
+    & VHDL & SystemVerilog & \\
+    \midrule
+    package        & 148 & 140 & \\
+    implementation & 253 & 242 & \\
+    testbench      & 290 & 689 & (interface + package + top)\\
+    \midrule
+    design total   & 401 & 382 & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The design is a wash: 401 lines against 382, five per cent. That is worth
+saying plainly, because the folklore holds that \SV{} is dramatically
+terser. For \emph{structural} RTL it is not. The savings that folklore is
+remembering come from interfaces, from packed structs, and above all from
+testbenches, and this design uses none of the first two.
+
+The testbench is the opposite: 290 lines against 689, and the \SV{} version
+does more. That is the real comparison, and \cref{sec:case:vhdltb} and
+\cref{sec:case:svtb} put the two side by side.
+
+Four places where the languages genuinely differ for this design:
+
+\textbf{The type system did work for the \VHDL{}.} Three width errors were
+caught by the analyser while this design was being written, before anything
+was simulated. The equivalent \SV{} errors surfaced as \code{WIDTHEXPAND} and
+\code{WIDTHTRUNC} warnings from \code{verilator --lint-only -Wall}, which is
+a perfectly good substitute \emph{provided you run it}, and which no student
+runs by default. The mitigation is a \code{make lint} target that fails the
+build.
+
+\textbf{The constant table is a draw with a portability asterisk.} Both
+languages compute it at elaboration from a transcendental function. \VHDL{}'s
+version works in every tool that implements the standard;
+\SV{}'s does not (see the trap in \cref{sec:case:sv}).
+
+\textbf{The enumeration encoding favours \VHDL{} for synthesis and \SV{} for
+debugging.} A \VHDL{} state type lets the tool pick the encoding; a \SV{} one
+tells you what is in the flip-flops. Which you want depends on whether you
+are closing timing or reading a waveform.
+
+\textbf{Assertions favour \SV{} decisively.} One temporal property is four
+readable lines in \SV{} and twenty unreadable ones in \VHDL{}. Multiply that
+by the ten protocol properties a real bus interface has.
+
+\begin{notebox}{And one thing this design should have used}
+\code{ieee.fixed\_pkg} was available for the \VHDL{} and was not used, so
+that the two implementations would be structurally comparable. A production
+\VHDL{} design of this kind should use it: it would have made
+\cref{tab:case:formats} machine-checkable instead of documentation.
+\end{notebox}
+
+\clearpage
+\section{The VHDL Testbench}
+\label{sec:case:vhdltb}
+
+\Cref{lst:case:vhdltb} is a self-checking \VHDL{} testbench, written the way a
+\VHDL{} designer writes one: a stimulus process, a checking process,
+procedures instead of classes, and a golden model built from
+\code{ieee.math\_real}. It is the baseline the rest of the chapter is measured
+against.
+
+\subsection{The parts, and what each one costs}
+
+\textbf{The generic is the \VHDL{} plusarg.}
+
+\begin{vhdlcode}
+entity tb_cordic_rot is
+  generic (
+    G_N_RANDOM : natural  := 300;
+    G_TOL_LSB  : natural  := 12;
+    G_SEED1    : positive := 7;
+    G_SEED2    : positive := 13
+  );
+end entity tb_cordic_rot;
+\end{vhdlcode}
+
+Elaborate it with \code{vsim -gG\_N\_RANDOM=1000 tb\_cordic\_rot} and you
+change the run without touching the source. Unlike a \SV{} plusarg, a generic
+is fixed at elaboration rather than read at run time, so changing it means
+elaborating again, not merely restarting.
+
+\textbf{The clock, with a stop condition.}
+
+\begin{vhdlcode}
+clk <= not clk after CLK_PERIOD / 2 when not halt else '0';
+\end{vhdlcode}
+
+A \VHDL{} simulation traditionally ends by running out of events, so the
+clock has to be stoppable. \code{std.env.finish} (VHDL-2008) is the modern
+alternative and the testbench uses both: it sets \code{halt} and then calls
+\code{finish}.
+
+\textbf{Driving on the falling edge.} The \code{send} procedure asserts
+\code{req\_valid} and then waits for falling edges:
+
+\begin{vhdlcode}
+procedure send (x, y, theta : integer) is
+begin
+  req_x     <= to_signed(x, DW);
+  req_theta <= to_signed(theta, AW);
+  req_valid <= '1';
+  loop
+    wait until falling_edge(clk);
+    exit when req_ready = '1';
+  end loop;
+  wait until rising_edge(clk);
+  wait until falling_edge(clk);
+  req_valid <= '0';
+end procedure send;
+\end{vhdlcode}
+
+This is the convention that keeps the testbench out of a race with the DUT,
+and it works. It is also a lie about the hardware: no real driver changes its
+outputs half a cycle before the clock. A \SV{} clocking block expresses the
+truth --- drive $1$~ns after the edge, sample the value that existed just
+before it --- and does not need the convention.
+
+\textbf{No constraint solver.}
+
+\begin{vhdlcode}
+impure function rand_int (lo, hi : integer) return integer is
+begin
+  uniform(seed1, seed2, r);
+  return lo + integer(floor(r * real(hi - lo + 1)));
+end function rand_int;
+\end{vhdlcode}
+
+\code{uniform} from \code{ieee.math\_real} is the whole of \VHDL{}'s random
+number support. A uniform distribution over an interval is six lines; a
+distribution weighted toward the quadrant boundaries is however many lines you
+care to write. In \SV{} the same thing is a \code{dist} clause inside a
+\code{constraint} block. This is a real productivity difference, and it is the
+one OSVVM exists to close.
+
+\textbf{The structural point: monitor and scoreboard cannot be separated.}
+
+\begin{vhdlcode}
+p_check : process is
+  variable pend   : req_array_t(0 to Q_DEPTH - 1);
+  variable p_head : natural := 0;
+  variable p_tail : natural := 0;
+begin
+  ...
+  if req_valid = '1' and req_ready = '1' then       -- monitor
+    pend(p_tail) := (x => to_integer(req_x), ...);
+    p_tail := (p_tail + 1) mod Q_DEPTH;
+  end if;
+  if rsp_valid = '1' and rsp_ready = '1' then       -- scoreboard
+    cur := pend(p_head);
+    ...
+\end{vhdlcode}
+
+The observation of the request channel and the checking of the response
+channel are in one process because they have to share the pending queue, and
+a \VHDL{} process variable is the only cheap way to share mutable state. There
+is no mailbox to put a transaction into and no dynamic object to put in it.
+
+The consequence is not that the testbench is worse --- it works, and it found
+bugs --- but that it does not decompose. You cannot lift the monitor out and
+reuse it against a gate-level netlist, or run two of them, or subscribe a
+coverage collector to the same stream, without rewriting.
+
+\begin{gotcha}{Sharing a queue through a signal does not work}
+The first version of this testbench logged each accepted request into a
+\code{signal} array indexed by a counter, for the checking process to read.
+Every entry read back as zero. A signal assignment inside a process takes
+effect after the process suspends, the index is itself a signal, and the two
+delta-cycle behaviours interact in a way that is correct by the standard and
+useless in practice. The fix was to make the checking process observe the
+request channel itself, which is what a \SV{} monitor does anyway.
+\end{gotcha}
+
+\subsection{Running it}
+
+Three commands: make a library, analyse the three files in dependency order,
+elaborate and run the top.
+
+\begin{shcode}
+vlib work
+vcom -2008 cordic_pkg.vhd cordic_rot.vhd tb_cordic_rot.vhd
+vsim -c -gG_N_RANDOM=300 tb_cordic_rot -do "run -all; quit"
+\end{shcode}
+
+Everything the testbench has to say about itself comes from \code{report}
+statements, so the summary reads the same whatever tool executed it. Stripped
+of the per-simulator prefix that decorates each line, the run prints:
+
+\begin{txtcode}
+=== cordic_rot testbench (VHDL) ===
+ITER=14  random=300
+------------------------------------------------
+scoreboard: 308 transactions checked, 0 failed
+worst error: 2.5458225901211335 LSB (tolerance 12)
+------------------------------------------------
+*** TEST PASSED ***
+\end{txtcode}
+
+308 transactions rather than 300, because the directed list runs first and the
+random phase is counted on top of it. The worst error, $2.55$ LSB, is the
+number \cref{sec:case:format} predicted from the error budget.
+
+Before any of that, at time zero, the run also emits a handful of warnings
+from \code{numeric\_std} itself, of the form
+\code{NUMERIC\_STD.">": metavalue detected, returning FALSE}. They are worth
+understanding rather than silencing by reflex.
+
+\begin{notebox}{Those metavalue warnings are \VHDL{} telling you something}
+At time zero, before the first assignment has propagated, the DUT's inputs
+are \code{'U'}. The comparison \code{z\_ext > HALF\_PI\_S} on a vector
+containing \code{'U'} cannot produce a meaningful answer, so
+\code{numeric\_std} says so and returns \code{FALSE}. The message comes from
+the IEEE library, not from the simulator, so every compliant tool reports it.
+Verilog has no \code{'U'}: an uninitialised variable is \code{X}, and
+\code{X > 5} quietly evaluates to \code{X} and then to false in an \code{if},
+with no warning at all. \VHDL{} is being more informative, not more broken.
+
+For a regression, where the noise buries the result, put
+
+\begin{tclcode}
+set NumericStdNoWarnings 1
+\end{tclcode}
+
+in the \code{do} file before \code{run -all}. Do not set it while you are
+debugging a reset: those warnings are exactly the evidence that something is
+still \code{'U'} when you thought it was driven.
+\end{notebox}
+
+\clearpage
+\vhdlfile{code/cordic/vhdl/tb_cordic_rot.vhd}{\file{tb\_cordic\_rot.vhd} ---
+the VHDL testbench, complete.}{lst:case:vhdltb}
+
+\clearpage
+\section{The SystemVerilog Testbench}
+\label{sec:case:svtb}
+
+Three files, 689 lines, and every structural idea from \refverificationbook in
+working form: an interface with clocking blocks, six classes, mailboxes
+between them, a directed phase followed by a random one, and an end of test
+that drains rather than guesses.
+
+\subsection{The interface}
+
+\Cref{lst:case:svif} is the pin bundle. The part that matters is the clocking
+block:
+
+\begin{svcode}
+clocking drv_cb @(posedge clk);
+  default input #1step output #1ns;
+  output req_valid, req_x, req_y, req_theta;
+  output rsp_ready;
+  input  req_ready, rsp_valid, rsp_x, rsp_y;
+endclocking
+\end{svcode}
+
+\code{input \#1step} samples in the Preponed region: the value that existed
+immediately before the clock edge, before any non-blocking update. \code{output
+\#1ns} drives one nanosecond after the edge. Together they remove the entire
+class of bug that the \VHDL{} testbench avoids by driving on the falling edge,
+and they model what a real driver does.
+
+\subsection{The six classes}
+
+\Cref{lst:case:svtbpkg} is the testbench package. The shape is exactly
+\refverificationbook:
+
+\begin{itemize}
+  \item \code{cordic\_txn} --- the transaction, with \code{rand} fields,
+        constraints (including a \code{dist} that biases toward the quadrant
+        boundaries), and \code{convert2string};
+  \item \code{cordic\_drv} --- the driver, which knows the handshake and
+        nothing else, and runs two threads: one feeding requests, one
+        applying random back-pressure to the response channel;
+  \item \code{cordic\_mon} --- the monitor, strictly passive, holding a queue
+        of accepted-but-unanswered requests;
+  \item \code{cordic\_sb} --- the scoreboard and its specification-level
+        reference model;
+  \item \code{cordic\_cov} --- the coverage collector, with a covergroup that
+        crosses the angle quadrant against the sign of $x_0$;
+  \item \code{cordic\_env} --- construction, connection, start-up.
+\end{itemize}
+
+The reference model is worth quoting because of what it does \emph{not} say:
+
+\begin{svcode}
+function automatic void predict(input cordic_txn t,
+                                output real x_ref, output real y_ref);
+  real th = q_to_real(t.theta, QA);
+  real xr = q_to_real(t.x0,    QF);
+  real yr = q_to_real(t.y0,    QF);
+  x_ref = K_GAIN * (xr * $cos(th) - yr * $sin(th));
+  y_ref = K_GAIN * (xr * $sin(th) + yr * $cos(th));
+endfunction
+\end{svcode}
+
+No micro-rotations, no guard bits, no quadrant folding. It states what the
+block is supposed to compute. Every implementation detail is something it can
+therefore catch.
+
+\subsection{The portability shim}
+
+At the top of \file{tb\_cordic\_pkg.sv} sit four macros, and they need
+explaining because they are the one piece of the design that exists for a
+tool rather than for the hardware.
+
+\begin{svcode}
+`ifdef VERILATOR
+  `define CB_DRV       vif
+  `define CB_MON       vif
+  `define EDGE_DRV     @(posedge vif.clk)
+  `define EDGE_MON     @(posedge vif.clk)
+`else
+  `define CB_DRV       vif.drv_cb
+  `define CB_MON       vif.mon_cb
+  `define EDGE_DRV     @(vif.drv_cb)
+  `define EDGE_MON     @(vif.mon_cb)
+`endif
+\end{svcode}
+
+\tool{Verilator} 5.020 has two problems with clocking blocks reached through
+a virtual interface, and the second one is nasty.
+
+The first is honest: a \code{modport} that exports a clocking block is
+rejected with \code{Unsupported: Modport clocking}. You see the message, you
+work around it.
+
+The second is not. A \emph{non-blocking} assignment through a virtual
+interface to a signal that is a clocking-block output is silently dropped.
+The write never happens; nothing is reported. This was not assumed --- it was
+reduced to a ten-line test case and confirmed:
+
+\begin{svcode}
+interface bif (input logic clk);
+  logic a, c;
+`ifndef NOCB
+  clocking cb @(posedge clk); output a; endclocking
+`endif
+endinterface
+// ... a class with `virtual bif v` doing:
+//        v.a <= 1'b1;   // in the clocking block
+//        v.c <= 1'b1;   // not in any clocking block
+\end{svcode}
+
+\begin{txtcode}
+=== WITH clocking block ===          === WITHOUT clocking block ===
+[ 5] a=0 c=0                         [ 5] a=0 c=0
+[15] a=0 c=1                         [15] a=1 c=1
+[25] a=0 c=1                         [25] a=1 c=1
+\end{txtcode}
+
+\code{c} takes the assignment; \code{a} does not, purely because \code{a} is
+named in a clocking block. The symptom in the real testbench was that
+\code{req\_valid} never went high, the DUT never left \code{IDLE}, and the
+run timed out after 42\,600 cycles with zero transactions completed --- with
+no error message pointing anywhere near the cause.
+
+\begin{gotcha}{A silently dropped write is the worst failure mode there is}
+An unsupported construct that produces an error message costs you ten
+minutes. One that produces wrong behaviour with no message costs you an
+afternoon, and it teaches you to distrust the tool rather than the code. This
+is the strongest argument in the book for having a second simulator: the same
+sources under \tool{QuestaSim} and under \tool{Verilator} would have located
+this in one run.
+\end{gotcha}
+
+The shim keeps one set of sources runnable in both worlds. Under any IEEE
+1800 simulator the macros expand to the clocking block, with its sampling and
+drive skew; under \tool{Verilator} they expand to the raw signals plus an
+explicit clock edge, which loses the skew and keeps the test.
+
+\subsection{Ending the test}
+
+\begin{svcode}
+task automatic wait_drain(int unsigned expected, int unsigned timeout_cyc);
+  int unsigned waited = 0;
+  while (sb.n_checked < expected && waited < timeout_cyc) begin
+    `EDGE_MON;
+    waited++;
+  end
+  if (sb.n_checked < expected)
+    $fatal(1, "timeout: only %0d of %0d transactions completed",
+           sb.n_checked, expected);
+endtask
+\end{svcode}
+
+Count what went in, wait until that many have been checked, fail if they
+never arrive. This is precisely what UVM's objection mechanism automates, and
+writing it once by hand is the fastest way to understand why the mechanism
+exists (\refverificationbook).
+
+\subsection{Running it}
+
+\begin{txtcode}
+$ make sv
+=== cordic_rot testbench ===============================
+ ITER=14  DW=16.Q14  AW=16.Q13  random=300
+--------------------------------------------------------
+ scoreboard: 308 transactions checked, 0 failed
+ worst error: 2.82 LSB (tolerance 12 LSB)
+--------------------------------------------------------
+ *** TEST PASSED ***
+ functional coverage: not collected (Verilator build)
+\end{txtcode}
+
+Note the last line. The covergroups are compiled out under \tool{Verilator},
+and so are the constraints: \code{cordic\_txn::do\_randomize()} falls back to
+\code{\$urandom\_range}. Under \tool{QuestaSim} the same three files run with
+constrained random stimulus and a coverage number at the end. That is what
+\refsimulationbook means when it says \tool{Verilator} implements a subset:
+the subset is large enough to run this testbench and small enough that two of
+its most valuable features go quiet.
+
+\clearpage
+\svfile{code/cordic/sv/cordic_if.sv}{\file{cordic\_if.sv} --- the interface,
+its clocking blocks and its modports.}{lst:case:svif}
+
+\clearpage
+\svfile{code/cordic/sv/tb_cordic_pkg.sv}{\file{tb\_cordic\_pkg.sv} --- the
+layered class testbench, complete.}{lst:case:svtbpkg}
+
+\clearpage
+\svfile{code/cordic/sv/tb_cordic_top.sv}{\file{tb\_cordic\_top.sv} --- the
+top level: clock, interface, DUT, test.}{lst:case:svtbtop}
+
+\clearpage
+\section{The C++ Testbenches}
+\label{sec:case:cpp}
+
+Three, in increasing order of structure. All three drive the same
+\tool{Verilator}-compiled model of the \SV{} RTL.
+
+\subsection{Direct: \file{tb\_cordic.cpp}}
+
+\Cref{lst:case:cpptb} is the shortest thing that does a real job: a clock
+loop, a handshake, a \code{<cmath>} reference and an error counter. Two
+hundred transactions, a tolerance check, an exit code.
+
+The part to read carefully is the cycle:
+
+\begin{cppcode}
+void tick() {
+  dut_->clk_i = 0;
+  dut_->eval();          // settle: pre-edge values are now valid
+  ctx_->timeInc(5000);   // 5 ns at 1 ps precision
+  dut_->clk_i = 1;
+  dut_->eval();          // the rising edge
+  ctx_->timeInc(5000);
+  ++cycles_;
+}
+\end{cppcode}
+
+Set the inputs while the clock is low, call \code{eval()} so the
+combinational cone settles, and only then raise the clock. That sequence is
+the C++ spelling of ``sample in the Preponed region''. Read \code{req\_ready\_o}
+after the low-phase \code{eval()} and you get the value the DUT will act on at
+the edge; read it after the high-phase \code{eval()} and you get next
+cycle's, which is a bug you will spend an hour on.
+
+\begin{gotcha}{\code{timeInc} counts in the context's time precision}
+A \code{VerilatedContext} defaults to 1 ps precision, so a 5 ns half period is
+\code{timeInc(5000)}, not \code{timeInc(5)}. Get it wrong and the logic is
+unaffected --- nothing in the design depends on absolute time --- but every
+timestamp in the log and in the VCD is out by a factor of a thousand, and the
+waveform lines up with nothing.
+
+This is not a hypothetical. In the sources shipped with this book,
+\file{tb\_cordic.cpp} uses \code{timeInc(5)} while \file{tb\_vectors.cpp} and
+\file{main\_uvmlike.cpp} use \code{timeInc(5000)}. The second pair is right.
+The first is a real bug, found while writing this chapter and left in place
+so that you can see what it looks like: nothing fails, nothing warns, and the
+reported simulation time is wrong.
+\end{gotcha}
+
+\begin{txtcode}
+$ make cpp
+----------------------------------------------
+ 200 transactions, 0 failures, worst error 2.68 LSB
+ 3206 clock cycles simulated
+ *** TEST PASSED ***
+\end{txtcode}
+
+\subsection{Bit-exact: \file{tb\_vectors.cpp}}
+
+\Cref{lst:case:cppvec} does something the other testbenches cannot: it
+compares against the Python model \emph{exactly}. The vectors arrive as a
+generated header, so a stale table is a compile error rather than a mystery.
+
+\begin{cppcode}
+#include "cordic_vectors.h"        // generated by gen_vectors.py
+...
+if (got_x != v.x || got_y != v.y) { ... ++failures; }
+\end{cppcode}
+
+The other thing this file exists to demonstrate is sign extension:
+
+\begin{cppcode}
+static inline int16_t as_signed(uint16_t raw) {
+  return static_cast<int16_t>(raw);
+}
+\end{cppcode}
+
+\begin{gotcha}{Verilator ports carry no signedness}
+A 16-bit port becomes a \code{uint16\_t} (\code{SData}). \code{logic signed [15:0]}
+and \code{logic [15:0]} produce the same C++ type. If you read
+\code{rsp\_x\_o} and compare it to a negative expected value without the cast,
+every positive result matches and every negative one fails --- or, worse, you
+compare two unsigned values and everything passes. This is the single most
+common bug in a first C++ testbench.
+\end{gotcha}
+
+\begin{txtcode}
+$ make bitexact
+----------------------------------------------
+ bit-exact check against the Python model
+ vectors generated with seed 1
+ 315 checked, 0 mismatches, 5046 clock cycles
+ *** TEST PASSED ***
+----------------------------------------------
+\end{txtcode}
+
+A tolerance check and a bit-exact check fail on different things. The
+tolerance check fails when the mathematics is wrong: a missing iteration, a
+wrong sign, a bad table entry. The bit-exact check fails when a
+\emph{rounding decision} has drifted: a shift that rounds toward zero instead
+of toward $-\infty$, a guard bit dropped one stage early, a saturation limit
+off by one. Neither subsumes the other, and a design of this kind wants both.
+
+\subsection{UVM-shaped: \file{svtlm.h}}
+
+\Refsimulationbook builds the framework; here is the CORDIC sitting in it.
+The component tree is real, printed by the running program:
+
+\begin{txtcode}
+$ make uvmlike
+[test.env.agt.seq      ] will generate 200 transactions
+--- component tree ---
+test (CordicTest)
+  env (CordicEnv)
+    agt (CordicAgent)
+      seq (CordicSeq)
+      drv (CordicDrv)
+      mon (CordicMon)
+    sb (CordicSb)
+    cov (CordicCov)
+--- run ---
+--- report ---
+[test.env.agt.drv      ] drove 200 transactions
+[test.env.sb           ] 200 checked, 0 failed, worst 2.68 LSB (tol 12)
+[test.env.cov          ] theta bins hit 4/5  [62 47 0 46 45]
+*** TEST PASSED ***
+\end{txtcode}
+
+Compare that tree with the UVM hierarchy in \refverificationbook. It is the same
+tree, with the same names, built by a factory from a string and configured
+from a key-value store, in about two hundred lines of header-only C++ and no
+library at all.
+
+Look at the coverage line, which is the most interesting output in this
+chapter: \code{[62 47 0 46 45]}. Five bins over the angle range, and the
+middle one --- $\theta$ exactly zero --- was never hit in two hundred random
+transactions. Of course it was not: the probability of a uniform draw over
+51\,473 values landing on zero is $2\times10^{-5}$. That is what a coverage
+hole looks like, and the fix is the directed list at the top of
+\cref{lst:case:svtbtop}, which sends $\theta = 0$ deliberately.
+
+\begin{ruleofthumb}
+Random stimulus will not find the corner you can name. Name it, send it, and
+use coverage to tell you about the ones you could not name.
+\end{ruleofthumb}
+
+\clearpage
+\cppfile{code/cordic/verilator/tb_cordic.cpp}{\file{tb\_cordic.cpp} --- the
+direct C++ testbench.}{lst:case:cpptb}
+
+\clearpage
+\cppfile{code/cordic/verilator/tb_vectors.cpp}{\file{tb\_vectors.cpp} --- the
+bit-exact C++ testbench.}{lst:case:cppvec}
+
+\clearpage
+\cppfile{code/cordic/verilator/svtlm.h}{\file{svtlm.h} --- the UVM-shaped
+framework: Component, AnalysisPort, Factory, ConfigDb.}{lst:case:svtlm}
+
+\clearpage
+\cppfile{code/cordic/verilator/cordic_env.h}{\file{cordic\_env.h} --- the
+CORDIC components built on \file{svtlm.h}.}{lst:case:cppenv}
+
+\clearpage
+\cppfile{code/cordic/verilator/main_uvmlike.cpp}{\file{main\_uvmlike.cpp} ---
+the test layer and the clock loop.}{lst:case:cppmain}
+
+\clearpage
+\section{The Python Testbench}
+\label{sec:case:python}
+
+\subsection{Generated everything}
+
+\Cref{lst:case:gen} is one script with four outputs, and it is the practical
+face of \refsimulationbook:
+
+\begin{itemize}
+  \item \file{vectors/cordic\_vectors.txt} --- a plain text vector file that
+        any testbench can read;
+  \item \file{verilator/cordic\_vectors.h} --- a C++ header with
+        \code{constexpr} arrays, consumed by \file{tb\_vectors.cpp};
+  \item \file{sv/cordic\_vectors.svh} --- the same table as \SV{}
+        \code{localparam} arrays;
+  \item \file{sv/cordic\_atan\_rom.svh} --- the arctangent ROM as generated
+        source, for the tools that cannot compute it themselves.
+\end{itemize}
+
+The vector file carries its own provenance, which matters more than it looks:
+
+\begin{txtcode}
+# cordic_rot test vectors
+# generated 2026-09-05 06:19:35
+# generator  gen_vectors.py  seed=1
+# format     DW=16 QF=14 AW=16 QA=13 N=14 GL=2 GM=2
+# count      315
+# x0    y0    theta xexp  yexp
+26dd  0000  0000  3fff  0001
+26dd  0000  6488  c000  0001
+\end{txtcode}
+
+Without the header, a vector file is an unreproducible blob that happens to
+be readable. With it, anyone can regenerate it and see whether it changed.
+
+\begin{gotcha}{Comment characters depend on the reader}
+This file uses \code{\#} because it is read by \code{\$fgets}/\code{\$sscanf},
+by \code{std.textio} and by a C++ \code{ifstream}, all of which are happy to
+skip a line you tell them to skip. A file destined for \code{\$readmemh} is
+different: \code{\$readmemh} accepts only \code{//} and \code{/* */}
+comments, and a \code{\#} in it is a syntax error --- or, in some tools,
+silently the value zero. Decide who reads the file before you choose the
+comment character.
+\end{gotcha}
+
+\subsection{cocotb: the same test against both languages}
+
+\Cref{lst:case:cocotb} is a testbench with no HDL in it at all. The top level
+of the simulation is the DUT; \file{cordic\_model.py} is imported directly and
+used as a bit-exact reference; the driver, the monitor and the scoreboard are
+coroutines.
+
+\begin{pycode}
+async def monitor(dut, queue, results, expected):
+    while len(results) < expected:
+        await RisingEdge(dut.clk_i)
+        if dut.rsp_valid_o.value == 1 and dut.rsp_ready_i.value == 1:
+            txn = queue.popleft()
+            txn.x = dut.rsp_x_o.value.to_signed()
+            txn.y = dut.rsp_y_o.value.to_signed()
+            results.append(txn)
+\end{pycode}
+
+\begin{gotcha}{\code{.value} is unsigned}
+\code{int(dut.rsp\_x\_o.value)} on the result $-16384$ gives $49152$. The
+test \code{test\_value\_semantics} in \cref{lst:case:cocotb} exists purely to
+print all four spellings side by side so that you never have to rediscover
+this. In cocotb 2.x the signed conversion is \code{.to\_signed()}; in 1.x it
+was \code{.signed\_integer}. The equivalent 1.x spellings for the rest are
+\code{units=} rather than \code{unit=} on \code{Clock}, and \code{.binstr}
+rather than \code{str(v)}.
+\end{gotcha}
+
+The headline is the Makefile. Two variables choose the language and the
+backend; nothing else in the flow moves:
+
+\begin{makecode}
+ifeq ($(SV),1)
+  SIM             := verilator
+  TOPLEVEL_LANG   := verilog
+  VERILOG_SOURCES := $(ROOT)/sv/cordic_pkg.sv $(ROOT)/sv/cordic_rot.sv
+else
+  SIM             := questa
+  TOPLEVEL_LANG   := vhdl
+  VHDL_SOURCES    := $(ROOT)/vhdl/cordic_pkg.vhd $(ROOT)/vhdl/cordic_rot.vhd
+  COMPILE_ARGS    += -2008
+endif
+\end{makecode}
+
+One Python file, two languages, two backends, no change to the test.
+\code{SIM = questa} reaches the VHDL through the FLI, the C interface
+\tool{QuestaSim} exposes for exactly this purpose; \code{SIM = verilator}
+reaches the \SV{} through VPI. \code{COMPILE\_ARGS} is passed to the analysis
+step, which is where a language-revision switch belongs. Put it in
+\code{SIM\_ARGS} instead and it goes to the run, which does not understand it.
+
+cocotb prints its own summary table, and it prints it identically whichever
+backend ran underneath:
+
+\begin{txtcode}
+$ make cocotb
+*******************************************************************
+** TEST                             STATUS  SIM TIME (ns)  RATIO  **
+*******************************************************************
+** test_cordic.test_directed          PASS        1820.00  121098 **
+** test_cordic.test_random            PASS       16070.00  128429 **
+** test_cordic.test_sweep             PASS       29030.00  128453 **
+** test_cordic.test_value_semantics   PASS         230.00   98399 **
+*******************************************************************
+** TESTS=4 PASS=4 FAIL=0 SKIP=0                  47150.00  127368 **
+*******************************************************************
+\end{txtcode}
+
+Four tests, four passes, and the third of them is a 181-point sweep of the
+full circle checked bit for bit against \file{cordic\_model.py}.
+
+Two honest limitations, both confirmed on the machine this book was built on:
+
+\begin{itemize}
+  \item \textbf{The \SV{} run needs a newer \tool{Verilator}.} cocotb 2.1.0
+        refuses anything before 5.036: \code{cocotb requires Verilator 5.036
+        or later, but using 5.020. Stop.} The check is on the \tool{Verilator}
+        backend only, and it is a version check rather than a missing feature:
+        upgrade and the same test runs.
+  \item \textbf{\tool{Icarus Verilog} cannot compile the package at all},
+        because of the constant-function ROM. That is not a cocotb problem,
+        and \file{cordic\_atan\_rom.svh} is the way around it.
+\end{itemize}
+
+\clearpage
+\pyfile{code/cordic/python/gen_vectors.py}{\file{gen\_vectors.py} --- vectors,
+a C++ header, an \SV{} include and the ROM, from one model.}{lst:case:gen}
+
+\clearpage
+\pyfile{code/cordic/python/test_cordic.py}{\file{test\_cordic.py} --- the
+cocotb testbench. The same file drives the VHDL and the
+SystemVerilog.}{lst:case:cocotb}
+
+\clearpage
+\section{Build and Run}
+\label{sec:case:build}
+
+\Cref{lst:case:make} is the whole build. Six ways of exercising one design,
+and \code{make all} runs the five that need only free tools. The two \VHDL{}
+targets, \code{make vhdl} and \code{make cocotb}, are separate because they
+need a \VHDL{} simulator; the command lines in the Makefile are
+\tool{QuestaSim}'s.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{What checks what. ``The VHDL flow'' is \code{vcom}/\code{vsim} on
+  a commercial simulator, as \cref{sec:case:vhdltb} sets it out. The last two
+  rows are what tie the two implementations together.}
+  \label{tab:case:checks}
+  \begin{tabular}{@{}lllll@{}}
+    \toprule
+    Testbench & Lang. & Simulator & Reference & Check\\
+    \midrule
+    \file{tb\_cordic\_rot.vhd} & VHDL   & the VHDL flow & \code{ieee.math\_real} & tolerance\\
+    \file{tb\_cordic\_top.sv}  & SV     & Verilator & \code{\$sin}/\code{\$cos} & tolerance\\
+    \file{tb\_cordic.cpp}      & C++    & Verilator & \code{<cmath>}          & tolerance\\
+    \file{main\_uvmlike.cpp}   & C++    & Verilator & \code{<cmath>}          & tolerance\\
+    \file{tb\_vectors.cpp}     & C++    & Verilator & \code{cordic\_model.py} & bit-exact\\
+    \file{test\_cordic.py}     & Python & the VHDL flow & \code{cordic\_model.py} & bit-exact\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The verification argument is worth stating explicitly, because it is the
+reason for the last two rows:
+
+\begin{enumerate}
+  \item The \SV{} implementation is bit-exact against the Python model:
+        \code{make bitexact}, 315 vectors, 0 mismatches.
+  \item The \VHDL{} implementation is bit-exact against the \emph{same} Python
+        model: \code{make cocotb}, four tests, 0 mismatches, including a
+        181-point sweep of the full circle.
+  \item Therefore the two implementations agree with each other, bit for bit,
+        on every vector either of them has seen.
+\end{enumerate}
+
+That is a stronger statement than ``both testbenches pass'', and it costs one
+extra script. Note also what the argument does \emph{not} depend on. Neither
+step appeals to a particular simulator: step~1 needs some tool that runs the
+\SV{}, step~2 needs some tool that runs the \VHDL{}, and the transitive
+conclusion follows from the two comparisons against the one model. Change
+either backend and the chain still closes.
+
+There is one more target, and it produces something to look at rather than a
+pass or a fail. \code{make waves} rebuilds the \SV{} testbench with tracing
+enabled and runs a short twenty-transaction stimulus, leaving
+\file{tb\_cordic.vcd} behind. A VCD is a file, not a viewer: open it in
+\tool{GTKWave} or in \tool{Surfer}, or read it into a commercial simulator's
+own wave window. \Refsimulationbook covers tracing properly, including why
+you should name the scope you dump rather than dumping the whole hierarchy.
+
+\begin{tipbox}{Lint first, every time}
+\code{make lint} is \code{verilator --lint-only -Wall} over the synthesisable
+sources, and it fails the build. In \VHDL{} the analyser does this job for
+free. In \SV{} it is a target you have to write and a habit you have to
+acquire, and it is the single highest-value line in the Makefile.
+\end{tipbox}
+
+\clearpage
+\makefile{code/cordic/Makefile}{The build. \code{make all} runs lint, the
+SystemVerilog class testbench, both C++ testbenches and the bit-exact check;
+\code{make vhdl} and \code{make cocotb} are separate because they need a
+\VHDL{} simulator.}{lst:case:make}
+
+\section{What Is Not Verified}
+\label{sec:case:gaps}
+
+Six testbenches and a green regression are not the same thing as a verified
+design. What has been established is that the \RTL{} computes the right
+arithmetic on the vectors it has seen. Here is what has not, roughly in the
+order a real project would address it.
+
+\begin{enumerate}
+  \item \textbf{Coverage is not closed.} The covergroups do not run under
+        \tool{Verilator}, so the only coverage number in this chapter is the
+        hand-rolled one in the C++ environment, and it reports a hole. Nobody
+        has measured which states, which transitions or which angle ranges the
+        300 random transactions actually exercised. Run the \SV{} testbench
+        under a simulator with covergroups and close the holes; that is the
+        first thing to do.
+
+  \item \textbf{The saturating output is barely tested.} Two directed vectors
+        reach it. There is no test that walks the input magnitude across the
+        saturation boundary, and none at all for the negative limit, where an
+        off-by-one is most likely.
+
+  \item \textbf{Reset is tested once.} Reset is asserted at time zero and
+        released. There is no test that asserts it mid-transaction, none that
+        checks recovery, and none that varies its release relative to the
+        clock edge.
+
+  \item \textbf{The protocol is under-checked.} One concurrent assertion
+        covers request stability. Nothing checks that \code{rsp\_valid\_o}
+        stays asserted until \code{rsp\_ready\_i}, that the response payload
+        is stable while stalled, or that no response appears without a
+        request. Those are three more \code{assert property} statements and
+        they belong in a \code{bind}-attached checker.
+
+  \item \textbf{No gate-level simulation.} The design has not been
+        synthesised. \tool{Verilator} is two-state, so a reset bug that
+        depends on \code{X} propagation would not show up here at all --- see
+        the \code{--x-assign} discussion in \refsimulationbook.
+
+  \item \textbf{No formal.} The handshake properties are exactly the kind of
+        thing a bounded model checker proves in seconds. \code{assume} the
+        input protocol, \code{assert} the output protocol, and you get a
+        proof rather than 308 samples.
+
+  \item \textbf{One parameterisation.} Everything was run at
+        \code{ITER = 14}. The parameter exists; nothing sweeps it.
+\end{enumerate}
+
+\begin{ruleofthumb}
+A regression that passes tells you what you tested. Write down what you did
+not.
+\end{ruleofthumb}
+
+\section{Exercises}
+\label{sec:case:exercises}
+
+\begin{enumerate}
+  \item \textbf{Sweep \code{ITER}.} Run the testbench at \code{ITER} = 8, 10,
+        12, 14 and 16 and plot the worst error. Explain the floor.
+        \emph{Teaches: where the error budget actually comes from.}
+
+  \item \textbf{Break it on purpose.} Change \code{>>>} to \code{>>} in
+        \file{cordic\_rot.sv} and run every testbench. Which ones fail, how
+        loudly, and how long does each take to point you at the line?
+        \emph{Teaches: what a scoreboard is for.}
+
+  \item \textbf{Make it build under Icarus.} Add a \code{`ifdef} to
+        \file{cordic\_pkg.sv} that uses the generated
+        \file{cordic\_atan\_rom.svh} instead of the constant function, and
+        get \code{iverilog -g2012} to compile the design.
+        \emph{Teaches: generated source, and why portability costs something.}
+
+  \item \textbf{Add the missing protocol checks.} Write the three assertions
+        listed in \cref{sec:case:gaps} in a separate checker module and attach
+        it with \code{bind}, without editing \file{cordic\_rot.sv}.
+        \emph{Teaches: \code{bind}, and assertion-based verification of code
+        you do not own.}
+
+  \item \textbf{Close the coverage.} Add a covergroup that crosses the angle
+        quadrant with the sign of $y_0$ and with whether the output
+        saturated, and add stimulus until it closes.
+        \emph{Teaches: the coverage-driven loop.}
+
+  \item \textbf{Vectoring mode.} Change the sign decision from
+        $d_i = \operatorname{sign}(z_i)$ to
+        $d_i = -\operatorname{sign}(y_i)$ and the block computes
+        $\sqrt{x^2+y^2}$ and $\arctan(y/x)$ instead. Update the model first,
+        then the \RTL{}.
+        \emph{Teaches: that the golden model is the specification.}
+
+  \item \textbf{Pipeline it.} Unroll the loop into $N$ stages so the block
+        accepts a transaction every cycle. Work out what happens to
+        \code{req\_ready\_o} and to \code{rsp\_valid\_o}, and what the monitor
+        has to do differently.
+        \emph{Teaches: that the interesting part of a pipeline is the
+        handshake, not the datapath.}
+
+  \item \textbf{Rewrite the testbench in UVM.} Take
+        \file{tb\_cordic\_pkg.sv} and map each class onto its UVM base, using
+        the table in \refverificationbook. Count the lines before and after.
+        \emph{Teaches: exactly what UVM adds, and what it costs.}
+\end{enumerate}
+
+\section{Checklist}
+\label{sec:case:checklist}
+
+\begin{itemize}
+  \item Write the number format down before the \RTL{}, and put it in the
+        package. \SV{} will not check it for you.
+  \item Write the golden model before the \RTL{}, from the specification, and
+        never by reading the \RTL{}.
+  \item Make the model bit-exact if the design is fixed-point. A tolerance
+        check and a bit-exact check catch different bugs; run both.
+  \item Compute constant tables at elaboration where the tools allow it, and
+        generate them from a script where they do not. Put a
+        \code{GENERATED} banner in the first line of anything generated.
+  \item Put \code{make lint} first in the build and make it fail the build.
+        It is the replacement for \VHDL{}'s analyser.
+  \item Use \code{>>>} on signed values. Check every shift in the design
+        before you check anything else.
+  \item Reach the DUT through a clocking block. Where a tool cannot, say so
+        in a comment at the top of the file and keep one set of sources.
+  \item End the test by draining and timing out, never by waiting a fixed
+        number of cycles.
+  \item Send the corners you can name; use coverage for the ones you cannot.
+  \item Run two simulators if you can. The bugs that cost a day are the ones
+        one tool implements silently wrong.
+  \item Write down what you did not verify, in the same commit as the
+        testbench that passes.
+\end{itemize}

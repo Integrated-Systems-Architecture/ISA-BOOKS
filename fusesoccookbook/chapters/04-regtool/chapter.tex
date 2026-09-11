@@ -1,0 +1,250 @@
+\chapter{The Register Interface and Regtool}
+\label{ch:regtool}
+
+\chapabstract{The CSR half of an accelerator: the \code{register\_interface}
+bus that carries control/status/configuration, and \tool{regtool}
+(``reggen''), which turns one \file{.hjson} description into the RTL and the
+C header for it. \code{make regs} is the Makefile target; this chapter is
+what it actually does.}
+
+\section{Two buses, one job each}
+
+\file{cordic\_accel.sv} (\cref{ch:fusesoc}) has two interfaces, and they are
+not interchangeable: an \textbf{OBI} port moves the angles and results (the
+data), and a \textbf{register interface} port moves configuration -- write
+\code{SRC}, \code{DST}, \code{N}, write \code{CTRL.START}, poll
+\code{STATUS.DONE}. Splitting them is deliberate: the CPU only ever touches
+a handful of small registers, and the accelerator moves the bulk data
+itself over OBI, which is where the actual speedup comes from.
+
+\code{register\_interface} (pulp-platform, vendored the same way as
+\cref{ch:vendoring} describes) defines that second bus: a request struct
+(address, write, write data, byte strobes) and a response struct (read
+data, error), typedef'd for one specific address/data width with the same
+kind of macro \cref{ch:fusesoc} showed for OBI:
+
+\begin{svcode}[caption={rtl/cordic\_accel\_types\_pkg.sv -- the reg bus types}]
+typedef logic [31:0] reg_addr_t;
+typedef logic [31:0] reg_data_t;
+typedef logic [ 3:0] reg_strb_t;
+
+`REG_BUS_TYPEDEF_ALL(cordic_reg, reg_addr_t, reg_data_t, reg_strb_t)
+\end{svcode}
+
+\begin{ruleofthumb}
+You will not hand-write anything that speaks this protocol directly. You
+describe your registers in \file{.hjson}, \tool{regtool} generates a block
+that speaks \code{reg\_req}/\code{reg\_rsp} on one side, and your own
+design only ever touches plain struct fields on the other.
+\end{ruleofthumb}
+
+\section{Anatomy of the .hjson register description}
+
+\begin{corecode}[caption={data/cordic\_accel.hjson (trimmed to two registers)},label={lst:regtool:hjson}]
+{ name: "cordic_accel"
+  clock_primary: "clk_i"
+  reset_primary: "rst_ni"
+  bus_interfaces: [
+    { protocol: "reg_iface", direction: "device" }
+  ]
+  regwidth: 32
+  registers: [
+
+    { name:     "CTRL"
+      desc:     "Control register. Write START=1 to launch a run."
+      swaccess: "wo"
+      hwaccess: "hro"
+      hwqe:     "true"
+      fields: [
+        { bits: "0", name: "START"
+          desc: "Write 1 to start processing N angles."
+        }
+      ]
+    }
+
+    { name:     "STATUS"
+      desc:     "Status register, driven by hardware."
+      swaccess: "ro"
+      hwaccess: "hwo"
+      hwext:    "true"
+      fields: [
+        { bits: "0", name: "DONE" desc: "Set when results are ready." }
+        { bits: "1", name: "BUSY" desc: "Set while the port is owned." }
+      ]
+    }
+  ]
+}
+\end{corecode}
+
+The header names the block and its clock/reset, and \kw{regwidth} fixes
+every register at the same width (32, here). Offsets are not written down
+anywhere: \tool{regtool} assigns them in declaration order, word aligned --
+\code{CTRL} at \code{0x00}, \code{STATUS} at \code{0x04}, and so on. Each
+register then has:
+
+\begin{itemize}
+  \item \kw{swaccess}: what \emph{software} may do -- \code{wo}
+        (write-only), \code{ro} (read-only) or \code{rw}.
+  \item \kw{hwaccess}: what \emph{hardware} may do -- \code{hro} (hardware
+        reads the value, never writes it: the normal case for a
+        configuration register like \code{CTRL} or \code{N}) or \code{hwo}
+        (hardware writes it, software only reads: the normal case for a
+        status register). Consult \tool{regtool}'s own documentation for
+        the remaining combinations; these two cover everything in this
+        example.
+  \item \kw{resval}: the reset value, when the register needs one other
+        than zero (\cref{lst:regtool:hjson} omits it here, but
+        \code{SEED\_X} in the full file resets to the CORDIC gain constant).
+  \item \kw{fields}: one or more named bit ranges inside the register,
+        each with its own \kw{bits} and \kw{desc}.
+\end{itemize}
+
+\begin{gotcha}{\code{hwqe} and \code{hwext} look similar and do opposite jobs}
+\kw{hwqe: true} adds a one-cycle write-strobe your hardware can see
+(\code{reg2hw.ctrl.qe}), on top of the stored value (\code{reg2hw.ctrl.q}).
+Use it when hardware needs to know \emph{that a write just happened}, not
+only the value -- \cref{sec:regtool:wiring} shows exactly this, detecting a
+write of \code{START=1}.
+
+\kw{hwext: true} removes the register's own storage: a software read
+returns whatever \code{hw2reg} is driving \emph{this cycle}, combinationally,
+instead of a value latched on some earlier cycle. \code{STATUS} needs this
+because, without it, software that writes \code{START} and immediately
+reads \code{STATUS} would see the flopped value from before the write --
+the previous run's \code{DONE} -- and wrongly conclude the new run had
+already finished.
+\end{gotcha}
+
+\section{What make regs actually runs}
+
+\begin{shcode}
+python3 vendor/pulp_platform/register_interface/vendor/lowrisc_opentitan/util/regtool.py \
+  -r -t rtl data/cordic_accel.hjson
+python3 .../regtool.py -D -o sw/cordic_accel_regs.h data/cordic_accel.hjson
+\end{shcode}
+
+\tool{regtool} (``reggen'') is OpenTitan's register-generation tool. It
+ships vendored inside \code{register\_interface} (\cref{ch:vendoring}
+fetched it along with everything else in that IP), so it is present the
+moment \code{make vendor} has run; nothing extra to install. Two runs, two
+outputs:
+
+\begin{itemize}
+  \item \code{-r -t rtl}: writes \file{rtl/cordic\_accel\_reg\_pkg.sv} (the
+        struct \emph{types}) and \file{rtl/cordic\_accel\_reg\_top.sv} (the
+        module that speaks the bus and exposes those structs).
+  \item \code{-D -o <file>}: writes a C header of offsets, bit positions and
+        masks -- one \code{\#define} block per register, generated straight
+        from the same \kw{desc} strings, so the comments in
+        \file{cordic\_accel\_regs.h} and in the \file{.hjson} match by
+        construction.
+\end{itemize}
+
+The lab Makefile wraps both calls as \code{make regs}
+(\cref{ch:makefiles}); re-run it whenever \file{data/cordic\_accel.hjson}
+changes, the same way you re-run \code{make vectors} after changing the
+golden model.
+
+\begin{gotcha}{The generated files are not yours to edit}
+\file{cordic\_accel\_reg\_pkg.sv}, \file{cordic\_accel\_reg\_top.sv} and
+\file{cordic\_accel\_regs.h} all say ``auto-generated'' at the top. Editing
+them by hand works until the next \code{make regs} silently overwrites your
+change. Edit \file{data/cordic\_accel.hjson} and regenerate instead.
+\end{gotcha}
+
+\section{Reading the generated types}
+
+\tool{regtool} turns every register into a small packed struct, and groups
+them into one \code{reg2hw\_t} (hardware reads this) and one
+\code{hw2reg\_t} (hardware drives this):
+
+\begin{svcode}[caption={rtl/cordic\_accel\_reg\_pkg.sv (generated, excerpt)}]
+typedef struct packed {
+  logic q;   // the stored value
+  logic qe;  // one-cycle pulse: software wrote this cycle
+} cordic_accel_reg2hw_ctrl_reg_t;
+
+typedef struct packed {
+  struct packed { logic d; } done;  // hardware drives this bit
+  struct packed { logic d; } busy;
+} cordic_accel_hw2reg_status_reg_t;
+\end{svcode}
+
+The naming is consistent everywhere this pattern is used, in every X-HEEP
+peripheral and not only this one: a \kw{reg2hw} field ends in \code{.q}
+(the value) and, if \kw{hwqe} was set, \code{.qe} (the write pulse); a
+\kw{hw2reg} field ends in \code{.d} (the value your hardware should drive).
+Once you can read this struct, you can read the CSR block of any peripheral
+built the same way.
+
+\section{Wiring it into your design}
+\label{sec:regtool:wiring}
+
+\file{cordic\_accel.sv} instantiates the generated \code{reg\_top} once and
+never touches the bus signals again:
+
+\begin{svcode}[caption={rtl/cordic\_accel.sv -- instantiating the CSR block}]
+cordic_accel_reg2hw_t reg2hw;
+cordic_accel_hw2reg_t hw2reg;
+
+cordic_accel_reg_top #(
+  .reg_req_t (reg_req_t),
+  .reg_rsp_t (reg_rsp_t)
+) u_reg_top (
+  .clk_i, .rst_ni,
+  .reg_req_i,
+  .reg_rsp_o,
+  .reg2hw,
+  .hw2reg,
+  .devmode_i (1'b1)
+);
+
+// Software wrote START=1 this cycle -> launch a run.
+assign start = reg2hw.ctrl.qe & reg2hw.ctrl.q;
+...
+// Drive STATUS back to software.
+assign hw2reg.status.done.d = done_q & ~run_start;
+assign hw2reg.status.busy.d = busy_q  | run_start;
+\end{svcode}
+
+From here on the rest of the module is ordinary SystemVerilog: an FSM reads
+\code{reg2hw.n.q}, \code{reg2hw.src.q}, \code{reg2hw.dst.q} to know what to
+fetch and where to write it, and drives \code{hw2reg.status} combinationally
+so a read of \code{STATUS} is never stale. Nothing downstream of
+\code{u\_reg\_top} knows or cares that a register bus exists at all.
+
+\section{The C side}
+
+The generated header gives software plain integer offsets and bitfield
+helpers, nothing more:
+
+\begin{cppcode}[caption={sw/cordic\_accel\_regs.h (generated, excerpt)}]
+#define CORDIC_ACCEL_CTRL_REG_OFFSET 0x0
+#define CORDIC_ACCEL_CTRL_START_BIT 0
+
+#define CORDIC_ACCEL_STATUS_REG_OFFSET 0x4
+#define CORDIC_ACCEL_STATUS_DONE_BIT 0
+#define CORDIC_ACCEL_STATUS_BUSY_BIT 1
+\end{cppcode}
+
+Writing an actual driver around these offsets is a Lab 3 problem (the
+accelerator has to be mapped into X-HEEP's address space first); this
+booklet stops at ``where these numbers come from''.
+
+\section{Checklist}
+\label{sec:regtool:checklist}
+
+\begin{itemize}
+  \item The register interface carries configuration; OBI (or whichever
+        data bus a design uses) carries data. Do not mix the two.
+  \item One \file{.hjson} per block; \kw{swaccess}/\kw{hwaccess} say who
+        may read or write each register, \kw{hwqe} adds a write-pulse,
+        \kw{hwext} removes the register's own storage.
+  \item \code{make regs} runs \tool{regtool} twice: once for the RTL
+        (\code{reg\_pkg.sv} + \code{reg\_top.sv}), once for the C header.
+  \item \kw{reg2hw.<reg>.q}/\code{.qe} is what hardware reads;
+        \kw{hw2reg.<reg>.d} is what hardware drives. Every peripheral built
+        this way uses the same two suffixes.
+  \item Never hand-edit a generated file; edit the \file{.hjson} and
+        re-run \code{make regs}.
+\end{itemize}

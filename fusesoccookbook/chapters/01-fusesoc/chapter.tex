@@ -1,0 +1,254 @@
+\chapter{FuseSoC and the .core File}
+\label{ch:fusesoc}
+
+\chapabstract{What \FuseSoC actually does, how a \file{.core} file describes
+a design, and how to read one of the lab's \file{.core} files end to end.
+Ends with a checklist for writing your own.}
+
+\section{What FuseSoC is}
+
+\FuseSoC is a package manager and build tool for hardware sources. It solves
+one problem: a design is rarely a pile of files handed straight to a
+simulator. It depends on other designs (IPs), it needs a different file list
+for simulation than for synthesis, and each tool (\tool{Verilator},
+\tool{QuestaSim}, \tool{Design Compiler}, \dots) wants its options passed
+differently. \FuseSoC lets you describe all of that once, declaratively, in a
+\file{.core} file, and then resolves it: given a target (``simulate'',
+``lint'', ``synthesise''), it works out which files are needed, in which
+order, pulls in whatever those files themselves depend on, and calls the
+right tool with the right flags.
+
+Every design and every dependency, however small, is a \textbf{core}: a
+\file{.core} file plus the sources it points at. A lab accelerator is a core.
+\file{common\_cells} is a core. X-HEEP itself is a core. \FuseSoC does not
+care how big a core is, only that it has a name and a \file{.core} file
+describing it.
+
+\begin{ruleofthumb}
+A \file{.core} file does not contain RTL. It only says which files exist,
+what they depend on, and how to run them under each target. Read it as a
+table of contents plus a recipe, never as an implementation.
+\end{ruleofthumb}
+
+\section{Anatomy of a .core file}
+
+Every \file{.core} file in these labs has the same four kinds of section, in
+the same order: a header, a name and description, one or more
+\kw{filesets}, and one or more \kw{targets}. Here is the whole of
+\file{cordic\_accel.core} from Lab 1, the smallest real example in the
+series.
+
+\begin{corecode}[caption={cordic\_accel.core -- lab1/cordic\_accel.core (trimmed)},label={lst:fusesoc:core}]
+CAPI=2:
+name: isa:lab1:cordic_accel:0.1.0
+description: CORDIC accelerator with an OBI data port and a reggen CSR interface
+
+filesets:
+  rtl:
+    files:
+      - rtl/cordic_pkg.sv
+      - rtl/cordic_accel.sv
+    file_type: systemVerilogSource
+    depend:
+      - pulp-platform.org::obi
+      - pulp-platform.org::register_interface
+      - pulp-platform.org::common_cells
+
+  tb:
+    files:
+      - tb/tb_cordic_accel.sv
+    file_type: systemVerilogSource
+    depend:
+      - pulp-platform.org::obi_test
+      - pulp-platform.org::reg_test
+
+targets:
+  default: &default
+    filesets: [rtl]
+
+  sim:
+    <<: *default
+    default_tool: verilator
+    filesets: [rtl, tb]
+    toplevel: tb_cordic_accel
+    tools:
+      verilator:
+        mode: binary
+        verilator_options: [--timing, --trace-fst]
+
+  lint:
+    <<: *default
+    default_tool: verilator
+    toplevel: cordic_accel
+    tools:
+      verilator:
+        mode: lint-only
+\end{corecode}
+
+\subsection{The header and the name}
+
+\code{CAPI=2:} is not a comment: it is the first line \FuseSoC's parser
+looks for, and it says ``this file uses Core API version 2''. Every
+\file{.core} file in these labs starts with it.
+
+The \kw{name} is a colon-separated identifier, conventionally
+\code{<vendor>:<library>:<core>:<version>}: \code{isa:lab1:cordic\_accel:0.1.0}
+reads as ``the ISA lab group's \code{lab1} library, core
+\code{cordic\_accel}, version 0.1.0''. This is exactly what another
+\file{.core} file names in its own \kw{depend} list to pull this core in;
+\cref{ch:vendoring} shows the vendored IPs' names the same way
+(\code{pulp-platform.org::obi} and similar).
+
+\subsection{Filesets}
+
+A \kw{fileset} is a named group of files that belong together for one
+purpose: \code{rtl} for the synthesisable design, \code{tb} for the
+testbench, and so on -- the names themselves are not special to \FuseSoC,
+only convention. Each fileset lists:
+
+\begin{itemize}
+  \item \kw{files}: paths relative to the \file{.core} file itself, in
+        compile order where the tool cares (packages before the modules that
+        use them).
+  \item \kw{file\_type}: how the tool should treat them --
+        \code{systemVerilogSource}, \code{vhdlSource}, \code{cSource}, and
+        so on.
+  \item \kw{depend}: other cores' names. \FuseSoC resolves these recursively
+        and adds their own filesets to the build, so you never list a
+        dependency's files by hand.
+\end{itemize}
+
+\begin{gotcha}{A fileset is not a target}
+Declaring \code{rtl:} and \code{tb:} does not build anything by itself.
+Nothing runs until a \emph{target} lists which filesets it needs. It is
+entirely normal for a \file{.core} file to declare a fileset that only one
+target ever uses (\cref{lst:fusesoc:core}'s hypothetical synthesis-only
+technology cells, for instance).
+\end{gotcha}
+
+\section{Targets: the same sources, run differently}
+
+A \kw{target} is a named recipe: which filesets to pull in, which tool to
+run, which module is the top of the design, and any tool-specific options.
+The real \file{cordic\_accel.core} (\cref{ch:vendoring} onwards use the
+un-trimmed file) has five: \code{default}, \code{sim} (Verilator),
+\code{sim\_questa} (QuestaSim, same testbench), \code{synth} (Design
+Compiler) and \code{lint} (Verilator, lint-only). They all draw from the same
+two or three filesets; only the combination and the tool options change.
+
+\begin{notebox}{The \code{\&default} / \code{<<: *default} trick}
+\code{\&default} and \code{<<: *default} are plain YAML anchors and merge
+keys, not \FuseSoC syntax: \code{\&default} names the \code{default:} block,
+and \code{<<: *default} copies its keys into another block before
+overriding some of them. It exists purely so you do not repeat
+\code{filesets: [rtl]} in every target.
+\end{notebox}
+
+\kw{toplevel} names the module the tool should elaborate from; it can differ
+between targets in the same file (\cref{lst:fusesoc:core}'s \code{sim}
+target elaborates the testbench, \code{lint} elaborates the accelerator
+itself, since there is no testbench to lint). The \kw{tools} block holds
+one sub-block per tool named in \kw{default\_tool}, with whatever options
+that specific tool understands -- \code{verilator\_options} for
+\tool{Verilator}, \code{vlog\_options} for \tool{QuestaSim}'s compiler, and
+so on. \FuseSoC does not validate these against the tool; a typo here fails
+at the tool invocation, not at parse time.
+
+\section{Running it}
+
+\begin{shcode}
+fusesoc --cores-root . --cores-root vendor run --target sim isa:lab1:cordic_accel
+\end{shcode}
+
+Reading left to right: \code{--cores-root <dir>} tells \FuseSoC where to
+look for \file{.core} files, and it needs both the lab directory itself
+(for \file{cordic\_accel.core}) and \file{vendor/} (for the \file{.core}
+files describing the vendored IPs it depends on) -- omit either and
+resolution fails with ``core not found''. \code{run --target sim} picks the
+target block by name. The last argument is the core's \kw{name}. \FuseSoC
+then resolves the dependency tree, writes a file list into a
+\file{build/<core>/} directory, and invokes the target's \code{default\_tool}
+on it.
+
+\begin{tipbox}{Let the Makefile remember the flags}
+Nobody types the \code{--cores-root} flags by hand every time; that is
+exactly what the lab Makefiles are for. \Cref{ch:makefiles} shows the
+wrapper.
+\end{tipbox}
+
+\section{Where the build goes}
+\label{sec:fusesoc:builddir}
+
+Every run writes into \file{build/<core-name>/<target>-<tool>/}, with colons
+in the core's \kw{name} turned into underscores -- \file{isa:lab1:cordic\_accel:0.1.0}
+and target \code{sim} become \file{build/isa\_lab1\_cordic\_accel\_0.1.0/sim-verilator/}.
+Inside that folder: the file list \FuseSoC derived (\file{*.eda.yml}), a
+generated \file{Makefile} that actually drives the tool, and every
+intermediate and output file the tool produces -- for \tool{Verilator},
+that includes the compiled simulation binary and, once you run it, the
+waveform dump. None of it is meant to be edited or committed; delete the
+whole \file{build/} tree whenever a run looks confused and re-run
+\code{fusesoc} to start clean.
+
+\begin{shcode}
+fusesoc --cores-root . --cores-root vendor core-info isa:lab1:cordic_accel
+fusesoc --cores-root . --cores-root vendor list-cores
+\end{shcode}
+
+\code{core-info} prints the resolved \file{.core} file -- filesets, targets
+and all -- exactly as \FuseSoC parsed it, which is the fastest way to catch
+a YAML typo or a missing \kw{depend} before running anything. \code{list-cores}
+lists every core \FuseSoC can currently see across the given
+\code{--cores-root} directories; if your own core is missing from it, the
+directory holding its \file{.core} file was never passed in.
+
+\begin{gotcha}{\code{-Wno-fatal} is not ``skip linting''}
+\Cref{lst:fusesoc:core}'s real counterpart adds \code{-Wno-fatal} to the
+\code{sim} target's \tool{Verilator} options, with a comment worth reading
+literally: \emph{``The vendored IPs are lint-clean for their own flow, not
+for ours.''} \tool{Verilator} still reports every warning; \code{-Wno-fatal}
+only stops a warning from \emph{aborting} the build, so warnings in
+\file{vendor/} code (built against a different lint configuration upstream)
+do not block a simulation of your own module. It does not silence output
+and it is not a licence to ignore warnings in the RTL you wrote yourself --
+\code{lint} runs without it for exactly that reason.
+\end{gotcha}
+
+\section{Writing your own .core file}
+
+Copying \file{cordic\_accel.core} and editing it is the right way to start;
+these are the pieces to change, in order.
+
+\begin{enumerate}
+  \item \textbf{Name it.} Pick \code{<yourvendor>:<lab>:<core>:<version>}.
+        This is the string every dependant, and every \code{fusesoc run},
+        will use to refer to it.
+  \item \textbf{List your sources in a fileset.} Compile order matters for
+        SystemVerilog packages: a \code{\_pkg.sv} file goes before anything
+        that imports it.
+  \item \textbf{Declare dependencies by name}, not by copying their files
+        into your fileset. If a dependency is not already vendored,
+        \cref{ch:vendoring} is the next stop, not this file.
+  \item \textbf{Add a target for the tool you actually run.} Start from the
+        smallest working target (usually \code{lint}, since it needs no
+        testbench) and add \code{sim} once the design elaborates cleanly.
+  \item \textbf{Set \kw{toplevel}} to whatever module that target should
+        elaborate -- the design for \code{lint}, the testbench for
+        \code{sim}.
+\end{enumerate}
+
+\section{Checklist}
+\label{sec:fusesoc:checklist}
+
+\begin{itemize}
+  \item A \file{.core} file describes files and how to run them; it never
+        contains RTL itself.
+  \item A fileset groups files with a type and a dependency list; a target
+        picks filesets, a tool, and a toplevel.
+  \item \kw{depend} names another core; \FuseSoC resolves it, you do not
+        list its files.
+  \item \code{fusesoc run} always needs every \code{--cores-root} that holds
+        a \file{.core} file the build touches, your own directory included.
+  \item When something does not build, read the target block first: wrong
+        filesets or the wrong toplevel accounts for most first mistakes.
+\end{itemize}

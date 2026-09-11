@@ -1,0 +1,148 @@
+% ---------------------------------------------------------------------------
+% appendix-quickref.tex -- design-side quick reference.
+% Split off from the original SystemVerilog cookbook's appendix-cheatsheet.tex
+% when the book was divided into companion booklets; the command-line
+% reference moved to the Simulation Cookbook (see backmatter/appendix-commands.tex
+% there).
+% ---------------------------------------------------------------------------
+\chapter{Quick Reference}
+\label{app:designref}
+
+\chapabstract{The VHDL/SystemVerilog language mapping, compressed onto a few
+pages to keep next to the keyboard. Everything here is explained properly
+somewhere in the preceding chapters; this is the version you use once you
+already understand it.}
+
+\section{The ten things that will bite you first}
+
+\begin{enumerate}
+  \item \textbf{Widths do not have to match.} \code{a + b} with different
+        widths compiles. The result is truncated or extended silently. Lint
+        for it.
+  \item \textbf{One unsigned operand makes the whole expression unsigned.}
+        Mixing \code{logic signed} and \code{logic} in one expression
+        produces an unsigned result, and your negative numbers become very
+        large positive ones.
+  \item \textbf{\code{>>} is not \code{>>>}.} On a signed value you almost
+        always want \code{>>>}. VHDL's \code{shift\_right} on a
+        \code{signed} is arithmetic by definition and never wrong.
+  \item \textbf{\code{<=} in an \code{always\_comb} block, or \code{=} in an
+        \code{always\_ff} block}, will simulate and may even synthesise. It
+        is still wrong. Non-blocking for sequential, blocking for
+        combinational.
+  \item \textbf{A function is static by default.} Declare
+        \code{function automatic} unless you know why you want otherwise.
+        The same applies to tasks and to variables inside forked blocks.
+  \item \textbf{An undeclared identifier becomes a one-bit wire.} Put
+        \code{`default\_nettype none} at the top of every file and
+        \code{`default\_nettype wire} at the bottom.
+  \item \textbf{\code{`timescale} is positional and inherited.} A module
+        with no preceding directive picks up whatever the last compiled file
+        set. Put one in every file, or set it on the command line.
+  \item \textbf{A class handle is a reference.} \code{b = a} makes two names
+        for one object. Use \code{copy()} or a \code{new} plus field copy.
+  \item \textbf{\code{randomize()} returns a status you must check.} An
+        unsatisfiable constraint set silently leaves the old values in place
+        if you ignore it.
+  \item \textbf{An unsized literal is 32 bits.} \code{'1} is all ones at the
+        context width; \code{1} is a 32-bit signed one. They are not the
+        same thing in a concatenation.
+\end{enumerate}
+
+\section{Construct map}
+
+\begin{longtable}{@{}p{0.32\textwidth}p{0.34\textwidth}p{0.28\textwidth}@{}}
+\toprule
+\textbf{VHDL} & \textbf{SystemVerilog} & \textbf{Note}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{VHDL} & \textbf{SystemVerilog} & \textbf{Note}\\
+\midrule
+\endhead
+\code{entity} + \code{architecture} & \code{module} \ldots\ \code{endmodule}
+  & one unit, not two\\
+\code{library}/\code{use} & \code{import pkg::*} & plus \code{`include}\\
+\code{generic} & \code{parameter} & \code{localparam} if not overridable\\
+\code{std\_ulogic} & \code{logic} & 4-state, unresolved\\
+\code{std\_logic} & \code{wire} & resolved; use \code{logic} unless there are two drivers\\
+\code{std\_logic\_vector(7 downto 0)} & \code{logic [7:0]} & \\
+\code{unsigned}/\code{signed} & \code{logic [N-1:0]} /
+  \code{logic signed [N-1:0]} & no separate type\\
+\code{(others => '0')} & \code{'0} & context-width fill\\
+\code{a \& b} & \code{\{a, b\}} & concatenation\\
+--- & \code{\{N\{a\}\}} & replication\\
+\code{process (all)} & \code{always\_comb} & \code{always\_comb} also runs at
+  time~0\\
+\code{process (clk)} + \code{rising\_edge} & \code{always\_ff @(posedge clk)}
+  & \\
+\code{variable} in a process & blocking \code{=} & lifetime differs\\
+\code{signal} assignment & non-blocking \code{<=} & \\
+\code{wait for 10 ns} & \code{\#10ns} & bare \code{\#10} takes its unit from \code{`timescale}\\
+\code{wait until cond} & \code{wait(cond)} or \code{@(...)} & \\
+\code{for \ldots generate} & \code{for (genvar \ldots)} & \code{generate}
+  optional\\
+\code{if \ldots generate} & \code{if (\ldots) begin : name} & name the block\\
+\code{port map (a => x)} & \code{.a(x)} & \code{.*} exists, use sparingly\\
+\code{function} & \code{function automatic} & \\
+\code{procedure} & \code{task} or \code{void function} & \\
+\code{to\_integer(unsigned(v))} & \code{int'(v)} & implicit in most contexts\\
+\code{resize(v, N)} & assignment or cast & implicit and silent\\
+\code{shift\_right(s, n)} & \code{s >>> n} & signed operand required\\
+\code{'length}, \code{'range} & \code{\$bits}, \code{\$size} & no
+  \code{'range} equivalent\\
+\code{'event}, \code{'stable} & \code{\$rose}, \code{\$fell},
+  \code{\$stable} & sampled semantics\\
+\code{assert \ldots severity error} & \code{assert (\ldots) else \$error(...)}
+  & \\
+\code{report} & \code{\$display} & \\
+\code{integer'image(x)} & \code{\%0d} in a format string & \\
+\code{std.textio} & \code{\$fopen}/\code{\$fscanf}/\code{\$fdisplay} & \\
+\code{record} & \code{struct packed} & packed struct is a bit vector\\
+\code{type \ldots is (A, B)} & \code{typedef enum logic [1:0] \{A, B\}} &
+  encoding is explicit\\
+\code{protected type} & \code{class} & class is not synthesisable\\
+\code{configuration} & \code{bind} / factory override & no direct equivalent\\
+--- & \code{interface} / \code{modport} & no VHDL-2008 equivalent\\
+--- & \code{covergroup}, \code{constraint}, \code{class} & verification only\\
+\code{ieee.fixed\_pkg} & --- & track the binary point yourself\\
+\bottomrule
+\end{longtable}
+
+\section{Format string cheat sheet}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Specifier} & \textbf{Meaning} & \textbf{Specifier} & \textbf{Meaning}\\
+\midrule
+\code{\%d} & decimal, padded      & \code{\%0d} & decimal, minimum width\\
+\code{\%h} & hexadecimal          & \code{\%0h} & hexadecimal, no padding\\
+\code{\%b} & binary               & \code{\%o}  & octal\\
+\code{\%s} & string               & \code{\%c}  & character\\
+\code{\%f} & real, fixed          & \code{\%e}  & real, exponential\\
+\code{\%g} & real, shorter of the two & \code{\%t} & time, per
+  \code{\$timeformat}\\
+\code{\%p} & any aggregate, pretty & \code{\%m} & hierarchical name\\
+\code{\%v} & net strength         & \code{\%\%} & a literal per cent sign\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Severity and what it does}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{VHDL} & \textbf{SystemVerilog} & \textbf{Effect}\\
+\midrule
+\code{severity note}    & \code{\$info}    & message only\\
+\code{severity warning} & \code{\$warning} & message only\\
+\code{severity error}   & \code{\$error}   & message, counts as a failure\\
+\code{severity failure} & \code{\$fatal(n)} & message, ends the simulation
+  with status \code{n}\\
+\bottomrule
+\end{tabular}
+\end{center}

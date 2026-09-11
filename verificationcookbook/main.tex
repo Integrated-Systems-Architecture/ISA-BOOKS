@@ -1,0 +1,62 @@
+% ===========================================================================
+%  SystemVerilog for VHDL Designers -- The Verification Cookbook
+%
+%  Build:   latexmk -pdf main.tex          (recommended)
+%  or:      pdflatex main && makeindex main && pdflatex main && pdflatex main
+%
+%  One of four companion booklets (Design, Verification -- this one,
+%  Simulation, Example) split out of the original SystemVerilog cookbook.
+%  Cross-references to material now living in a sibling booklet are named
+%  rather than numbered (\refdesignbook and friends, in preamble/macros.tex).
+% ===========================================================================
+\documentclass[11pt,a4paper,twoside,openright]{book}
+
+\input{../_shared/preamble/packages}
+\input{../_shared/preamble/listings}
+\input{../_shared/preamble/macros}
+
+\makeindex
+
+\graphicspath{%
+  {figures/}%
+  {chapters/05-toolkit/figures/}%
+  {chapters/06-testbench/figures/}%
+  {chapters/07-uvm/figures/}%
+}
+
+\hypersetup{
+  pdftitle  = {SystemVerilog for VHDL Designers: The Verification Cookbook},
+  pdfauthor = {Luigi Giuffrida},
+  pdfsubject= {Functional verification in SystemVerilog and UVM},
+  pdfkeywords = {SystemVerilog, UVM, verification, functional coverage},
+  colorlinks = true,
+  linkcolor  = codekey,
+  citecolor  = accent,
+  urlcolor   = accentalt,
+}
+
+\begin{document}
+
+\frontmatter
+\input{frontmatter/titlepage}
+\input{frontmatter/preface}
+\input{frontmatter/howtoread}
+
+\cleardoublepage
+\tableofcontents
+\cleardoublepage
+
+\mainmatter
+
+\subimport{chapters/05-toolkit/}{chapter.tex}
+\subimport{chapters/06-testbench/}{chapter.tex}
+\subimport{chapters/07-uvm/}{chapter.tex}
+
+\backmatter
+\input{backmatter/bibliography}
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Index}
+\printindex
+
+\end{document}

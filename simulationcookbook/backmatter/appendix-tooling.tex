@@ -1,0 +1,170 @@
+% ---------------------------------------------------------------------------
+% appendix-tooling.tex
+% ---------------------------------------------------------------------------
+\chapter{Setting Up a Toolchain}
+\label{app:tooling}
+
+\chapabstract{What to install on your own machine so that nothing in this book
+requires a licence, and what changes when you do have one.}
+
+\section{The free toolchain}
+
+Everything in \cref{ch:verilator}, \cref{ch:python} and most of
+\refexamplebook runs on the following, all of which install from a package
+manager on any recent Linux distribution and work under WSL2 on Windows.
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{0.42\textwidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{What it is} & \textbf{Why you want it}\\
+\midrule
+\tool{Verilator} & \SV{} to C++ compiler & fast simulation, and the best
+  free linter for \SV{} by a wide margin\\
+\tool{Icarus Verilog} & event-driven Verilog simulator & four-state,
+  event-driven semantics closest to a commercial simulator; partial \SV{}\\
+\tool{GTKWave} or \tool{Surfer} & waveform viewer & reads VCD, FST and GHW\\
+\tool{cocotb}    & Python testbench framework & drives any of the above from
+  Python\\
+\tool{Python 3} with \tool{numpy} & golden models & \\
+\tool{GNU Make}, \tool{g++} & build & Verilator needs a C++17 compiler\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Debian, Ubuntu, WSL2}
+
+\begin{shcode}
+sudo apt update
+sudo apt install -y verilator iverilog gtkwave \
+                    build-essential python3 python3-pip python3-numpy
+pip3 install --user cocotb cocotb-bus pytest
+\end{shcode}
+
+Check the versions. Distribution packages lag: \tool{Verilator} in particular
+gained a great deal between 4.x and 5.x, and this book assumes 5.x throughout.
+
+\begin{shcode}
+verilator --version    # 5.0 or later
+iverilog -V | head -1
+cocotb-config --version
+\end{shcode}
+
+\begin{tipbox}{Build Verilator from source if the packaged version is old}
+Verilator builds in a few minutes and is worth building. Clone the repository,
+check out a release tag, then \code{autoconf \&\& ./configure \&\& make -j
+\&\& sudo make install}. The 4.x series does not support \code{--binary},
+\code{--timing}, classes or virtual interfaces, so half of
+\cref{ch:verilator} will not work on it.
+\end{tipbox}
+
+\subsection{macOS}
+
+\begin{shcode}
+brew install verilator icarus-verilog gtkwave
+pip3 install cocotb
+\end{shcode}
+
+\subsection{Windows}
+
+Use WSL2 with an Ubuntu image and follow the Debian instructions. Native
+Windows builds of these tools exist, but the surrounding flow -- make, shell
+scripts, cocotb -- is much less painful under WSL.
+
+\section{The commercial toolchain}
+
+\subsection{QuestaSim / ModelSim}
+
+Your department almost certainly has a licence, and Intel distributes a free
+ModelSim edition with a size limit that is generous enough for anything in this
+book. The one thing to check is that your version supports the \SV{} and UVM
+features you need: UVM 1.2 support has been standard since roughly 10.x, and
+IEEE 1800.2 since 2020.x.
+
+\begin{shcode}
+which vlog vsim vlib
+vlog -version
+\end{shcode}
+
+\subsection{Getting UVM}
+
+Three options, in decreasing order of convenience.
+
+\begin{enumerate}
+  \item Use the simulator's built-in copy: \code{vlog -sv +define+UVM\_NO\_DPI}
+        is not needed if you compile with \code{-uvm} or set
+        \code{-uvmhome} to the vendor's bundled tree.
+  \item Download the Accellera reference implementation, set
+        \code{UVM\_HOME}, and compile \file{\$UVM\_HOME/src/uvm\_pkg.sv} with
+        \code{+incdir+\$UVM\_HOME/src}. Add the DPI library if you want
+        regular expression matching in the config database.
+  \item \tool{pyuvm}, if you would rather write UVM in Python. See
+        \cref{ch:python}.
+\end{enumerate}
+
+\section{A project layout that works}
+
+The layout used by the accompanying sources, and a reasonable default for a
+thesis or a lab project. It is organised by \emph{language}, because the same
+design exists here in two of them, and every chapter of this book that names a
+file names it with one of these prefixes.
+
+\begin{txtcode}
+code/cordic/
+  sv/                     synthesisable SystemVerilog, the interface,
+                          the class testbench
+    cordic_pkg.sv  cordic_rot.sv  cordic_if.sv
+    tb_cordic_pkg.sv  tb_cordic_top.sv
+    cordic_atan_rom.svh  cordic_vectors.svh   (generated)
+  vhdl/                   synthesisable VHDL and the VHDL testbench
+    cordic_pkg.vhd  cordic_rot.vhd  tb_cordic_rot.vhd
+  verilator/              C++ testbenches and the svtlm.h mini-framework
+    tb_cordic.cpp  tb_vectors.cpp  main_uvmlike.cpp
+    cordic_env.h  svtlm.h  cordic_vectors.h     (generated)
+  python/                 golden model, vector generator, cocotb tests
+    cordic_model.py  gen_vectors.py  test_cordic.py
+    Makefile.cocotb
+  vectors/                generated, safe to delete
+    cordic_vectors.txt
+  build/                  build outputs, not committed
+  Makefile
+\end{txtcode}
+
+Two things are worth copying. Generated files sit next to the files that
+consume them and carry a \code{GENERATED} banner in their first line, so nobody
+edits one by hand. Everything under \file{vectors/} and \file{build/} can be
+deleted at any moment and rebuilt with \code{make vectors}.
+
+If you prefer to split by role rather than by language, the usual alternative
+is \file{rtl/} for synthesisable sources and \file{tb/} for everything else.
+Either works. What does not work is mixing them, so decide on the first day.
+
+\section{Continuous integration}
+
+The single most useful thing you can add to a student project, and it takes
+ten lines.
+
+\begin{txtcode}
+name: rtl
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y verilator iverilog
+      - run: pip install cocotb
+      - run: make lint
+      - run: make sim
+\end{txtcode}
+
+The \code{lint} target should be \code{verilator --lint-only -Wall} over every
+synthesisable file, and it should fail the build. Treat a lint warning the way
+you treat a VHDL analysis error, because in this language that is what it is.
+
+\section{Editor support}
+
+\tool{Verible} provides a formatter and a language server for \SV{}; \tool{rust\_hdl}
+does the same for VHDL. Both integrate with any editor that speaks LSP. A
+formatter matters more in \SV{} than in VHDL because the language gives you
+so much more freedom to lay code out badly.

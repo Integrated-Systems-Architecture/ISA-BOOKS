@@ -1,0 +1,68 @@
+% ---------------------------------------------------------------------------
+% howtoread.tex
+% ---------------------------------------------------------------------------
+\chapter*{How to Read This Booklet}
+\addcontentsline{toc}{chapter}{How to Read This Booklet}
+\markboth{How to Read This Booklet}{How to Read This Booklet}
+
+\section*{Typographic conventions}
+
+\begin{itemize}
+  \item \code{Monospaced text} is code: an identifier, a keyword, a file name
+        or a command.
+  \item \kw{Coloured monospaced text} marks a language keyword under
+        discussion.
+  \item \file{Green monospaced text} is a file in the accompanying source
+        tree.
+  \item \tool{Sans-serif} names are tools: \tool{QuestaSim}, \tool{Verilator},
+        \tool{cocotb}, \tool{GTKWave}.
+\end{itemize}
+
+\section*{The three kinds of box}
+
+\begin{gotcha}{What a trap looks like}
+A trap marks a mistake you are statistically likely to make.
+\end{gotcha}
+
+\begin{tipbox}{What a recipe looks like}
+A recipe is a pattern to copy. When the text says ``write it like this'',
+this is the box it is in.
+\end{tipbox}
+
+\begin{notebox}{What a note looks like}
+A note supplies background: where a construct came from, what the standard
+actually says, why a tool behaves the way it does. Skip these on a first
+reading and come back when something surprises you.
+\end{notebox}
+
+\begin{ruleofthumb}
+A rule of thumb is one line you should be able to recite from memory.
+\end{ruleofthumb}
+
+\section*{If your simulator is Verilator, or you have no licence at all}
+
+Read \cref{ch:verilator} from the start; \cref{app:tooling} lists exactly
+what to install first. Everything in it works with free tools on your own
+machine.
+
+\section*{If your golden model is already written in Python}
+
+Go straight to \cref{ch:python} and use \tool{cocotb}. Every technique in
+\refverificationbook's layered testbench works in any IEEE 1800 simulator,
+including \tool{Verilator}; this booklet only adds Python as the language
+driving it.
+
+\section*{A word on tools}
+
+This booklet assumes you have access to a commercial simulator, most likely
+\tool{QuestaSim}, because that is what a university lab has and what an
+employer will hand you. It also assumes you would rather not depend on one.
+\Cref{app:tooling} lists what to install and how; \cref{app:simcommands}
+gathers every command line used in the booklet onto one page.
+
+\section*{The companion booklets}
+
+This is the \textbf{Simulation Cookbook}. \refdesignbook and
+\refverificationbook cover the language this booklet's testbenches are
+written in. \refexamplebook runs every tool discussed here against one
+complete design.

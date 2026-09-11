@@ -1,0 +1,77 @@
+% ---------------------------------------------------------------------------
+% titlepage.tex
+% ---------------------------------------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\begin{center}
+
+\vspace*{1.5cm}
+
+{\sffamily\Large\color{codenumber} AN INTRODUCTION TO SYSTEMVERILOG}
+
+\vspace{1.2cm}
+
+{\sffamily\fontsize{34}{40}\selectfont\bfseries\color{codekey}
+ SystemVerilog\\[4pt] for VHDL Designers}
+
+\vspace{0.4cm}
+
+{\sffamily\Large\color{accentalt} The Verification Cookbook}
+
+\vspace{0.8cm}
+
+{\color{codeframe}\rule{0.8\textwidth}{1.4pt}}
+
+\vspace{0.8cm}
+
+{\sffamily\large
+ Classes $\cdot$ Constrained Random $\cdot$ Coverage $\cdot$ UVM}
+
+\vspace{2.2cm}
+
+% --- a small decorative figure: the layered testbench ----------------------
+\begin{tikzpicture}[font=\sffamily\small,
+    box/.style={draw=codekey,fill=svbg,line width=1pt,rounded corners=3pt,
+                minimum width=3.0cm,minimum height=1.1cm,align=center}]
+  \node[box] (dut) {\bfseries DUT};
+  \node[box,draw=accentalt,above=1.0cm of dut] (drv) {Driver};
+  \node[box,draw=accentalt,right=1.4cm of drv] (mon) {Monitor};
+  \node[box,draw=accent,above=0.9cm of drv,xshift=1.7cm] (scb) {Scoreboard};
+  \draw[-{Latex[length=3mm]},line width=1.1pt,accentalt] (drv) -- (dut);
+  \draw[-{Latex[length=3mm]},line width=1.1pt,accentalt] (dut) -- (mon);
+  \draw[-{Latex[length=3mm]},line width=1.1pt,accent] (drv) -- (scb);
+  \draw[-{Latex[length=3mm]},line width=1.1pt,accent] (mon) -- (scb);
+\end{tikzpicture}
+
+\vfill
+
+{\sffamily\large Luigi Giuffrida, Alessandra Dolmeta}
+
+\vspace{4pt}
+
+{\sffamily\small Department of Electronics and Telecommunications\\
+ Politecnico di Torino}
+
+\vspace{1.0cm}
+
+{\sffamily\footnotesize\color{codenumber}
+ Draft --- \today}
+
+\end{center}
+\end{titlepage}
+
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+\begin{minipage}{0.78\textwidth}
+\small\itshape
+This booklet is one of four companions: Design, Verification (this one),
+Simulation, and a complete worked Example. It covers the verification-only
+half of SystemVerilog: classes, dynamic types, constrained randomisation,
+functional coverage, assertions, and UVM, none of which has a VHDL
+counterpart.
+\end{minipage}
+\end{center}
+\vspace*{\fill}
+\cleardoublepage

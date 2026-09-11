@@ -1,0 +1,41 @@
+% ---------------------------------------------------------------------------
+% howtoread.tex
+% ---------------------------------------------------------------------------
+\chapter*{How to Read This Booklet}
+\addcontentsline{toc}{chapter}{How to Read This Booklet}
+\markboth{How to Read This Booklet}{How to Read This Booklet}
+
+\section*{Typographic conventions}
+
+\begin{itemize}
+  \item \code{Monospaced text} is code: an identifier, a keyword, a file name
+        or a command.
+  \item \file{Green monospaced text} is a file in the accompanying source
+        tree.
+  \item \tool{Sans-serif} names are tools: \tool{QuestaSim}, \tool{Verilator},
+        \tool{cocotb}, \tool{GTKWave}.
+\end{itemize}
+
+Listings that carry line numbers are complete, reproduced in full from
+\file{code/cordic/}; nothing here is excerpted.
+
+\section*{How to read this one}
+
+Read it with the sources open in an editor, not on their own. \Cref{ch:case}
+is written as one continuous build: specification, fixed-point format, the
+VHDL implementation, the SystemVerilog implementation, then testbench after
+testbench. It assumes you already have the vocabulary from
+\refdesignbook, \refverificationbook and \refsimulationbook; where a
+construct is used here without re-explanation, that is where it was
+introduced.
+
+If you only want to see one testbench style, the chapter is written so that
+each testbench section is self-contained once the design itself is
+understood: you do not have to read all six to follow one.
+
+\section*{The companion booklets}
+
+This is the \textbf{Example Cookbook}. \refdesignbook and
+\refverificationbook cover the language used here; \refsimulationbook covers
+the tools (\tool{Verilator}, \tool{QuestaSim}, \tool{cocotb}) that run the
+testbenches built here.

@@ -1,0 +1,2393 @@
+\chapter{Verilator}
+\label{ch:verilator}
+
+\chapabstract{Verilator is not a simulator in the sense you learned with
+\tool{QuestaSim}: it is a compiler that turns synthesisable \SV{} into C++,
+which you then build into your own program. This chapter explains what that
+changes, what it buys you and what it costs you; it takes you from a
+forty-line \code{main()} to a complete UVM-shaped verification environment
+written in C++, with coverage, assertions and lint; and it says honestly which
+parts of \SV{} the tool does not implement. Every command, every listing and
+every block of output in this chapter was executed on Verilator 5.020.}
+
+\section{What Verilator Is}
+\label{sec:verilator:what}
+
+\index{Verilator}Every simulator you have used so far reads your \VHDL{},
+elaborates it into an internal data structure, and then runs an
+\emph{event-driven kernel} over that structure: a queue of pending events, a
+notion of delta cycles, a resolution function on every signal. \tool{ModelSim}
+and \tool{QuestaSim} both work this way, whichever language you feed them.
+You interact with the kernel through a prompt (\code{vsim}), a waveform window
+and a Tcl interpreter.
+
+Verilator does none of this. It reads synthesisable \SV{} and \emph{writes C++
+source code} that computes the same function. That C++ is then compiled by
+\tool{g++} or \tool{clang++} and linked into a program that you wrote. The
+design becomes a C++ class; its ports become public data members; advancing
+the simulation means calling a method.
+
+\index{Verilator!name}The name is a contraction of \emph{Verilog} and
+\emph{translator}, which is exactly what the tool does. It was written by
+Wilson Snyder and has been developed in the open since 1994; it is dual
+licensed under the \emph{LGPL version 3} and the \emph{Artistic License 2.0},
+so you may use it on proprietary designs and link the generated code into
+proprietary programs without any licence obligation on your \RTL{}. There is
+no licence server, no seat count and no annual renewal. For a student that is
+not a small detail: it is the difference between verifying at home and
+verifying only in the laboratory.
+
+\begin{notebox}{``Verilator is a compiler'' is the whole chapter}
+If you remember one sentence, remember this one. Almost every surprise in
+this chapter follows from it. There is no interactive prompt, because there is
+no kernel to talk to. There is no \code{\$time} unless your program maintains
+one. There is no ``restart'' command, because restarting means running your
+executable again. And a syntax error is a \emph{compile} error, reported
+before anything runs at all.
+\end{notebox}
+
+The flow has three stages, shown in \cref{fig:verilator:flow}. First Verilator
+itself (\code{verilator}) reads the \SV{} and emits C++ into a directory
+called \file{obj\_dir} by default. Then \tool{make} compiles that C++ together
+with your own \file{main.cpp} and with the small Verilator runtime library
+into an ordinary executable. Finally you run the executable, which may write a
+waveform file in VCD or FST format.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      node distance=6mm,
+      box/.style   ={draw=codeframe,fill=codebg,rounded corners=2pt,
+                     minimum height=8mm,inner xsep=5pt,font=\small\sffamily},
+      tool/.style  ={draw=codekey,fill=notebg,rounded corners=2pt,
+                     minimum height=8mm,inner xsep=5pt,
+                     font=\small\sffamily\bfseries,text=codekey},
+      outb/.style  ={draw=accent,fill=tipbg,rounded corners=2pt,
+                     minimum height=8mm,inner xsep=5pt,font=\small\sffamily},
+      ar/.style    ={-{Latex[length=2mm]},draw=codenumber,thick}]
+
+    \node[box]                        (sv)   {\file{cordic\_rot.sv}};
+    \node[box,below=2mm of sv]        (pkg)  {\file{cordic\_pkg.sv}};
+    \node[tool,right=10mm of sv]      (vl)   {\texttt{verilator -{}-cc}};
+    \node[box,right=10mm of vl]       (cpp)  {\file{obj\_dir/Vcordic\_rot.cpp}};
+    \node[box,below=2mm of cpp]       (hdr)  {\file{obj\_dir/Vcordic\_rot.h}};
+
+    \node[box,below=16mm of pkg]      (main) {\file{main.cpp} (yours)};
+    \node[tool,right=10mm of main]    (mk)   {\texttt{make}};
+    \node[outb,right=10mm of mk]       (exe)  {\file{obj\_dir/Vcordic\_rot}};
+    \node[outb,below=8mm of exe]       (vcd)  {\file{dump.vcd} / \file{.fst}};
+
+    \draw[ar] (sv.east)   -- (vl.west);
+    \draw[ar] (pkg.east)  -- (vl.west);
+    \draw[ar] (vl.east)   -- (cpp.west);
+    \draw[ar] (vl.east)   -- (hdr.west);
+    \draw[ar] (cpp.south) |- ($(mk.north)+(0,4mm)$) -- (mk.north);
+    \draw[ar] (main.east) -- (mk.west);
+    \draw[ar] (mk.east)   -- (exe.west);
+    \draw[ar] (exe.south) -- (vcd.north) node[midway,right,font=\scriptsize\sffamily]{run};
+
+    \node[font=\scriptsize\itshape,below=1mm of mk] {g++, plus the Verilated runtime};
+  \end{tikzpicture}
+  \caption{The Verilator flow. The middle stage is an ordinary C++ build; the
+  last stage is an ordinary program.}
+  \label{fig:verilator:flow}
+\end{figure}
+
+\section{Verilator and QuestaSim Are Different Machines}
+\label{sec:verilator:vs-questa}
+
+This section is the one to read slowly. Everything that goes wrong later goes
+wrong because a habit formed against an event-driven four-state simulator was
+carried unchanged into a compiled two-state one.
+
+\subsection{Event-driven versus statically scheduled}
+\label{sec:verilator:sched}
+
+\index{event queue}\index{scheduling!static}A \VHDL{} simulator holds, at
+every point in time, a queue of pending signal updates and a set of processes
+waiting on events. When a signal changes, the kernel looks up its sensitivity
+list, wakes the processes that care, runs them, collects the new transactions,
+and repeats until no more delta cycles are pending. That machinery is what
+lets you write \code{wait for 3 ns}, model a transport delay, resolve two
+drivers on a bus, and stop the simulation at an arbitrary instant to inspect
+it. It also costs: every signal is an object, every update is an event,
+and every event goes through the queue.
+
+Verilator throws the queue away. At compile time it analyses the whole design
+and produces a \emph{static schedule}: a straight-line C++ function that
+evaluates every piece of combinational logic exactly once, in an order that
+respects the data dependencies, and then commits the sequential updates. The
+transformations that make this possible are the same ones a synthesis tool
+performs:
+
+\begin{itemize}
+  \item \textbf{Hierarchy flattening.} Module instances are inlined. In the
+        generated code the CORDIC's internal signals live in one flat
+        structure named \code{Vcordic\_rot\_\_\_024root}; the module boundary
+        has ceased to exist.
+  \item \textbf{Constant propagation.} \code{ATAN\_ROM} is computed once by
+        Verilator, at elaboration, and appears in the C++ as literals.
+  \item \textbf{Dead-logic elimination.} Anything that cannot affect an output
+        or a traced signal is deleted.
+  \item \textbf{Bit blasting and re-packing.} Narrow signals are packed into
+        machine words; a 20-bit \code{idata\_t} becomes a \code{uint32\_t}.
+  \item \textbf{Activity regions.} The generated \code{eval()} is split into
+        blocks guarded by ``did anything in this cone change?'' flags, so a
+        quiet part of the design costs a comparison and nothing more.
+\end{itemize}
+
+The consequence for you is simple and unforgiving: \emph{the intermediate
+states that an event-driven simulator would show you may not exist at all}. If
+two \code{always\_comb} blocks would, in Questa, briefly disagree during a
+delta cycle, Verilator has already reordered them so that the disagreement
+never occurs. That is usually what you want, because a synthesised netlist
+would not show the glitch either, but it means Verilator is a poor tool for
+studying race conditions.
+
+\begin{gotcha}{Verilator will not reproduce a delta-cycle race}
+If your \SV{} has a genuine race -- a testbench that drives a signal with a
+blocking assignment in the same time step in which the \DUT{} samples it --
+Questa may show it and Verilator may not, or the other way round. Verilator
+detects some of these statically and reports \code{UNOPTFLAT} or
+\code{MULTIDRIVEN}; it cannot detect all of them. Race hunting belongs in an
+event-driven simulator. Use clocking blocks (\refverificationbook) so that the race
+cannot exist in the first place.
+\end{gotcha}
+
+\subsection{Two states, not four}
+\label{sec:verilator:twostate}
+
+\index{four-state logic}\index{X propagation}This is the single most important
+warning in the chapter, so it gets a demonstration rather than an assertion.
+
+\VHDL{}'s \code{std\_logic} has nine values; \SV{}'s \code{logic} has four:
+\code{0}, \code{1}, \code{X} and \code{Z}. Verilator's internal model has
+\emph{two}. Every signal is a plain C integer; there is no room for an unknown.
+Consider a design with a classic reset bug -- an accumulator that is used but
+never reset:
+
+\begin{svcode}[caption={A register that is used but never reset},label={lst:verilator:resetbug}]
+module resetbug (
+  input  logic       clk_i,
+  input  logic       rst_ni,
+  input  logic [7:0] d_i,
+  output logic [7:0] sum_o
+);
+  logic [7:0] acc;
+  logic       en;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) en <= 1'b0;      // en is reset ...
+    else         en <= 1'b1;
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (en) acc <= acc + d_i;     // ... acc is not
+  end
+
+  assign sum_o = acc;
+endmodule
+\end{svcode}
+
+A four-state simulator propagates the unknown initial value of \code{acc}
+through the adder and out of the module, and the testbench sees \code{X}. Here
+is the same testbench run under \tool{Icarus Verilog} 12.0, which is
+event-driven and four-state, and then under Verilator 5.020:
+
+\begin{txtcode}
+$ iverilog -g2012 -s tb_resetbug -o rb.vvp resetbug.sv && vvp rb.vvp
+sum_o after reset + 4 clocks = xxxxxxxx (x)
+VERDICT: X detected -- the reset bug is visible
+
+$ verilator --binary --timing --top-module tb_resetbug resetbug.sv -o rb
+$ ./obj_dir/rb
+sum_o after reset + 4 clocks = 00000011 (3)
+VERDICT: sum_o is a clean number -- bug invisible
+\end{txtcode}
+
+Verilator gives you a clean, plausible, entirely wrong number. Nothing in the
+run suggests that anything is missing. A scoreboard comparing against a golden
+model that also starts from zero would happily report \emph{pass}.
+
+\begin{gotcha}{A reset bug that Questa catches can hide in Verilator}
+Verilator is \emph{X-optimistic}: an unknown becomes a definite value, usually
+zero, and the missing reset disappears. Four-state simulators are
+\emph{X-pessimistic} in the opposite direction: an \code{X} on the select of a
+multiplexer poisons the output even when both inputs are equal, which produces
+false failures. Neither model is the silicon. The practical rule is: run reset
+and initialisation checks in a four-state simulator, and run bulk regression in
+Verilator.
+\end{gotcha}
+
+Verilator offers three switches that soften the problem. They are worth
+knowing precisely, because their names are similar and their effects are not.
+
+\begin{itemize}
+  \item \code{-{}-x-assign 0|1|unique|fast} controls what an \emph{explicit}
+        \code{'x} in your source becomes. The default is \code{fast}, which
+        lets the optimiser choose whatever is cheapest.
+  \item \code{-{}-x-initial 0|unique|fast} controls the initial value of a
+        variable that has no reset. The default is \code{unique}.
+  \item At \emph{run} time, \code{+verilator+rand+reset+0|1|2} overrides the
+        \code{unique} choice with all-zeros, all-ones or random, and
+        \code{+verilator+seed+N} picks the random seed.
+\end{itemize}
+
+Measured on the counter of \cref{lst:verilator:resetbug}:
+
+\begin{txtcode}
+$ ./obj_dir/rb                                             # default
+sum_o after reset + 4 clocks = 00000011 (3)
+$ ./obj_dir/rb +verilator+rand+reset+2 +verilator+seed+1
+sum_o after reset + 4 clocks = 00000011 (3)
+$ ./obj_dir/rb +verilator+rand+reset+2 +verilator+seed+2
+sum_o after reset + 4 clocks = 00000010 (2)
+$ ./obj_dir/rb +verilator+rand+reset+2 +verilator+seed+99
+sum_o after reset + 4 clocks = 11111111 (255)
+\end{txtcode}
+
+The result now depends on the seed, and \emph{that} is the signal you can
+automate against.
+
+\begin{tipbox}{Catch missing resets without four-state simulation}
+Run every regression twice with \code{+verilator+rand+reset+2} and two
+different \code{+verilator+seed+} values, and require the two runs to produce
+byte-identical output. Any dependence on the seed is, by construction, a
+dependence on an uninitialised value. This costs one extra run and finds most
+of what X-propagation would have found.
+\end{tipbox}
+
+\index{high impedance}The other missing state is \code{Z}. Verilator supports
+tri-state modelling only in limited forms and will usually report
+\code{UNSUPPORTED} or convert the net to a plain wire. Bidirectional pads and
+open-drain buses are not its territory.
+
+\subsection{No timing, unless you ask for it}
+\label{sec:verilator:timing}
+
+\index{delay!\#}In \VHDL{} you write \code{wait for 5 ns}; in \SV{} you write
+\code{\#5}. Verilator's default mode has no notion of time passing inside the
+model at all. Give it a delay without saying what to do about it and it
+refuses to proceed:
+
+\begin{txtcode}
+$ verilator --cc --main --exe --build --top-module delay delay.sv
+%Error-NEEDTIMINGOPT: delay.sv:4:5: Use --timing or --no-timing to specify
+                                    how delays should be handled
+    4 |     #10 a = 1'b1;
+      |     ^
+%Error: Exiting due to 1 error(s)
+\end{txtcode}
+
+With \code{-{}-no-timing} the delay is silently dropped, and Verilator tells
+you so:
+
+\begin{txtcode}
+%Warning-STMTDLY: delay.sv:4:5: Ignoring delay on this statement due to
+                                --no-timing
+\end{txtcode}
+
+With \code{-{}-timing}, Verilator compiles delays, \code{wait} statements and
+event controls into C++20 coroutines and the program does the right thing:
+
+\begin{txtcode}
+$ verilator --binary --timing --top-module delay delay.sv -o dl
+$ ./obj_dir/dl
+a = 1 at 10
+- delay.sv:6: Verilog $finish
+\end{txtcode}
+
+\begin{notebox}{\code{-{}-binary} implies \code{-{}-timing}}
+In 5.020, \code{-{}-binary} is shorthand for
+\code{-{}-main -{}-exe -{}-build -{}-timing}: it generates a \code{main()} for
+you and produces an executable in one step. You can see the coroutine support
+in the compiler command line it generates, which carries \code{-fcoroutines}
+and links \file{verilated\_timing.o}.
+\end{notebox}
+
+\index{SDF}\index{gate-level simulation}What this means for gate-level work is
+blunt: Verilator does not do it. A \code{specify} block is parsed and
+\emph{silently ignored}; there is no SDF back-annotation, no pin-to-pin delay,
+no timing check, no \code{\$setuphold}. Post-layout timing simulation stays in
+the commercial tool. Verilator's answer to gate-level verification is a
+different one: verify the \RTL{} exhaustively and fast, and trust static timing
+analysis for the rest -- which is, in practice, what industry does anyway.
+
+\subsection{How much of SystemVerilog does 5.020 actually implement?}
+\label{sec:verilator:coverage}
+
+Verilator started as a synthesis-subset tool and has been growing a
+verification subset for years. The claims below were each checked on this
+machine with a small test file; the error and warning text is quoted verbatim.
+
+\paragraph{Classes, mailboxes, semaphores, fork/join: yes.} The following file
+compiles and runs under \code{-{}-binary -{}-timing}:
+
+\begin{svcode}[caption={Class, mailbox, semaphore and fork/join under Verilator 5.020},label={lst:verilator:feat}]
+module feat;
+  class packet;
+    rand bit [7:0] addr;
+    rand bit [7:0] data;
+    constraint c_addr { addr inside {[16:31]}; }
+    function string show();
+      return $sformatf("addr=%0d data=%0d", addr, data);
+    endfunction
+  endclass
+
+  mailbox #(packet) mbx = new(4);
+  semaphore         sem = new(1);
+
+  task automatic producer();
+    repeat (3) begin
+      packet p = new();
+      void'(p.randomize());
+      mbx.put(p);
+      #10;
+    end
+  endtask
+
+  task automatic consumer();
+    repeat (3) begin
+      packet p;
+      mbx.get(p);
+      sem.get(1);
+      $display("[%0t] consumed %s", $time, p.show());
+      sem.put(1);
+    end
+  endtask
+
+  initial begin
+    fork producer(); consumer(); join
+    $display("fork/join completed at %0t", $time);
+    $finish;
+  end
+endmodule
+\end{svcode}
+
+\paragraph{Constrained random: no.} The first attempt to build
+\cref{lst:verilator:feat} fails, and the message is the important part:
+
+\begin{txtcode}
+%Warning-CONSTRAINTIGN: feat.sv:5:16: Constraint ignored (unsupported)
+                                    : ... note: In instance 'feat'
+    5 |     constraint c_addr { addr inside {[16:31]}; }
+      |                ^~~~~~
+                     ... For warning description see
+                         https://verilator.org/warn/CONSTRAINTIGN?v=5.020
+%Error: Exiting due to 1 warning(s)
+\end{txtcode}
+
+Add \code{-Wno-CONSTRAINTIGN} and it builds; \code{randomize()} then returns
+values that ignore the constraint completely:
+
+\begin{txtcode}
+$ ./obj_dir/feat
+[0] consumed addr=196 data=156
+[10] consumed addr=156 data=2
+[20] consumed addr=2 data=228
+fork/join completed at 30
+- feat.sv:37: Verilog $finish
+\end{txtcode}
+
+\code{addr} was constrained to $[16,31]$ and came out as 196. There is no
+constraint solver in 5.020: \code{randomize()} is a fancy way of calling
+\code{\$urandom} on every \kw{rand} field.
+
+\begin{gotcha}{\code{randomize()} succeeds and lies}
+It returns 1. It does not warn at run time. If your testbench relies on
+constraints for correctness -- an address that must be aligned, an opcode that
+must be legal -- Verilator will feed the \DUT{} illegal stimulus and your
+scoreboard will report failures that are not design bugs. Guard the class with
+\code{`ifdef VERILATOR} and provide a hand-written randomiser, exactly as
+\file{tb\_cordic\_pkg.sv} does with its \code{randomize\_fallback()}.
+\end{gotcha}
+
+\paragraph{Covergroups: no.} Not partially, not with warnings -- the parser
+rejects them:
+
+\begin{txtcode}
+%Error-UNSUPPORTED: cov.sv:3:3: Unsupported: covergroup
+    3 |   covergroup cg;
+      |   ^~~~~~~~~~
+%Error-UNSUPPORTED: cov.sv:4:36: Unsupported: cover bin specification
+%Error-UNSUPPORTED: cov.sv:4:12: Unsupported: cover point
+\end{txtcode}
+
+Functional coverage in Verilator is done with \code{cover property}, which
+\emph{is} supported (\cref{sec:verilator:cov}), or by counting in C++.
+
+\paragraph{Virtual interfaces: yes, but not with clocking blocks.} A plain
+virtual interface works:
+
+\begin{svcode}[caption={A virtual interface driven from a class},label={lst:verilator:vif}]
+interface simple_if(input logic clk);
+  logic [7:0] d;
+endinterface
+
+class drv;
+  virtual simple_if vif;
+  function new(virtual simple_if v); vif = v; endfunction
+  task automatic run();
+    for (int i = 1; i <= 3; i++) begin
+      @(posedge vif.clk);
+      vif.d <= 8'(i);
+    end
+  endtask
+endclass
+\end{svcode}
+
+\begin{txtcode}
+$ ./obj_dir/vif2
+virtual interface OK: d=3 at 35
+\end{txtcode}
+
+Add a clocking block and hand it out through a modport, as
+\file{cordic\_if.sv} does, and 5.020 stops:
+
+\begin{txtcode}
+%Error-UNSUPPORTED: cordic_if.sv:70:16: Unsupported: Modport clocking
+   70 |   modport drv (clocking drv_cb, output rst_n, input clk);
+      |                ^~~~~~~~
+\end{txtcode}
+
+Remove the modport and wait directly on the clocking block through the virtual
+interface, and you hit an internal error rather than a clean message:
+
+\begin{txtcode}
+%Error: Internal Error: vif.sv:13:13: ../V3Width.cpp:2751:
+        MemberSel of non-variable
+\end{txtcode}
+
+\begin{gotcha}{Clocking blocks do not survive a virtual interface}
+The idiom \code{@(vif.drv\_cb); vif.drv\_cb.sig <= x;} is the backbone of a
+modern \SV{} testbench and of UVM drivers. In 5.020 it does not work through a
+\kw{virtual} interface. You must either drive the raw signals with non-blocking
+assignments at \code{@(posedge vif.clk)}, or move the driver into C++ where the
+same discipline is enforced by the structure of the evaluation loop. Both
+routes are shown later in this chapter.
+\end{gotcha}
+
+\paragraph{UVM: no.} UVM needs the constraint solver, covergroups,
+\code{uvm\_config\_db} built on parameterised static class members, deep
+\code{\$cast}, and a working \code{uvm\_factory}. Several of those are absent.
+There is no supported way to run UVM on Verilator 5.020, and you should treat
+any claim otherwise with suspicion. \cref{sec:verilator:cppuvm} builds the
+missing structure in C++ instead.
+
+\paragraph{Assertions: a useful subset.} Immediate assertions work.
+Concurrent assertions with \code{|->}, \code{|=>}, \code{disable iff},
+\code{\$stable}, \code{\$past}, \code{\$rose} and \code{\$fell} work. Sequence
+operators do not:
+
+\begin{txtcode}
+%Error-UNSUPPORTED: cordic_checker.sv:13:56: Unsupported:
+        ## () cycle delay range expression
+%Error-UNSUPPORTED: cordic_checker.sv:13:58: Unsupported:
+        ## (in sequence expression)
+\end{txtcode}
+
+\paragraph{A parsing trap worth knowing.} Two constructs in the book's own
+\file{tb\_cordic\_pkg.sv} stop the Verilator front end, and both are surprises:
+
+\begin{txtcode}
+%Error: tb_cordic_pkg.sv:81:5: Unknown verilator comment:
+        '/*verilator does not implement the constraint solver, so the same
+        class*/'
+%Error: tb_cordic_pkg.sv:283:18: syntax error, unexpected STRING,
+        expecting ')' or ','
+\end{txtcode}
+
+The first is a \emph{comment}. Any comment whose first word is
+\code{verilator} is treated as a metacomment, so a sentence that happens to
+begin ``Verilator does not implement\ldots'' becomes a syntax error. The second
+is C-style adjacent string literal concatenation inside \code{\$error(\ldots)}.
+Here Verilator is right and the source was wrong: 1800-2017 has no rule that
+joins two adjacent string literals, and no conforming tool accepts it. The
+\SV{} spelling is the concatenation operator, \code{\{"a", "b"\}}, and that is
+what \file{tb\_cordic\_pkg.sv} now uses.
+
+\begin{gotcha}{Never begin a comment with the word ``Verilator''}
+\code{// Verilator does not support X} is a pragma, not a comment. Write
+\code{// This tool does not support X}, or put the word anywhere but first.
+\end{gotcha}
+
+\subsection{The comparison, item by item}
+\label{sec:verilator:table}
+
+\cref{tab:verilator:vs} summarises. Read the right-hand column as a statement
+about Verilator 5.020 specifically; the project moves quickly and several rows
+have changed in the last three releases.
+
+\begin{table}[htbp]
+  \centering
+  \caption{\tool{QuestaSim} and \tool{Verilator} compared. The Verilator column
+  reflects version 5.020 as installed and tested for this chapter.}
+  \label{tab:verilator:vs}
+  \small
+  \begin{tabular}{@{}lp{4.4cm}p{5.6cm}@{}}
+    \toprule
+    \textbf{Aspect} & \textbf{QuestaSim} & \textbf{Verilator 5.020} \\
+    \midrule
+    Licence and cost   & Commercial, node-locked or floating, per seat
+                       & LGPLv3 or Artistic 2.0, free, no server \\
+    Execution model    & Event-driven kernel with delta cycles
+                       & Static schedule compiled to C++ \\
+    \VHDL{} support    & Full IEEE 1076-2008
+                       & None; \SV{} and Verilog only \\
+    Mixed language     & \VHDL{} and \SV{} in one elaboration
+                       & Not possible \\
+    Value system       & Four-state (and nine-state for \code{std\_logic})
+                       & Two-state; \code{X} becomes 0, 1 or random \\
+    Timing and delays  & Full, including transport and inertial
+                       & Only with \code{-{}-timing}; ignored otherwise \\
+    Gate level and SDF & Full back-annotation and timing checks
+                       & Not supported; \code{specify} silently ignored \\
+    SVA                & Complete, including sequences and local variables
+                       & Useful subset; no \code{\#\#} sequence delay \\
+    Covergroups        & Complete
+                       & Rejected as \code{UNSUPPORTED} \\
+    Constrained random & Full solver with \code{dist}, \code{solve\ldots before}
+                       & No solver; \code{CONSTRAINTIGN}, values unconstrained \\
+    UVM                & Supported and shipped
+                       & Not usable \\
+    Classes, mailboxes & Complete
+                       & Supported, including \code{fork}/\code{join*} \\
+    Virtual interfaces & Complete
+                       & Yes, but not with clocking blocks \\
+    DPI-C              & Complete
+                       & Supported, import and export \\
+    VPI                & Complete
+                       & Partial; enough for cocotb (\cref{ch:python}) \\
+    Waveforms          & WLF, VCD, FSDB
+                       & VCD and FST \\
+    Interactive debug  & \code{vsim} prompt, breakpoints, force, GUI
+                       & None; use \code{gdb} on your own executable \\
+    Compile time       & Seconds; incremental per file
+                       & Verilation fast, C++ build dominates \\
+    Run time           & Baseline
+                       & Typically one to two orders of magnitude faster \\
+    Memory             & Large per-signal structures
+                       & Compact; packed C integers \\
+    Multithreading     & Limited
+                       & \code{-{}-threads N} partitions the schedule \\
+    Coverage           & Line, branch, expression, toggle, functional, GUI
+                       & Line, toggle, user; text and annotation only \\
+    Continuous integration & Needs a licence server in the runner
+                       & A container and a \code{make} target \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Why it is fast, and where it is not}
+\label{sec:verilator:perf}
+
+\index{Verilator!performance}The speed comes from removing indirection, not
+from cleverness at run time:
+
+\begin{enumerate}
+  \item There is no event queue, so a signal update is a store to a struct
+        member, not an allocation and an insertion into a priority structure.
+  \item There is no per-signal sensitivity lookup, because the order of
+        evaluation was decided at compile time.
+  \item The generated code is compiled by an optimising C++ compiler, which
+        inlines, vectorises and keeps hot values in registers.
+  \item Activity flags mean that quiet regions cost one branch.
+  \item Two-state values pack into machine words, so a 20-bit datapath is one
+        \code{uint32\_t} operation rather than an array of four-state cells.
+\end{enumerate}
+
+Numbers, measured for this chapter on a two-core Intel Xeon at 2.80\,GHz with
+7\,GiB of RAM, Verilator 5.020, \tool{g++} 13.3, generated code compiled at
+\code{-O2}. Treat them as an order of magnitude, not as a benchmark: the CORDIC
+is a tiny design and your mileage will differ by a large factor in both
+directions.
+
+\begin{txtcode}
+verilation only (verilator --cc --exe --trace, 3 runs)   0.08 s each
+C++ build of the model + testbench (make -j2, -O2)       5.50 s
+C++ testbench, 200 000 transactions = 3 200 006 cycles   0.47 s
+                                                    ->  6.7 Mcycle/s
+SystemVerilog testbench, --binary --timing, same load    6.20 s
+                                                    ->  0.54 Mcycle/s
+\end{txtcode}
+
+Three lessons are hidden in those five lines.
+
+First, \emph{verilation is not the slow part}. Eighty milliseconds to read the
+CORDIC and write the C++; five and a half seconds for \tool{g++} to compile it.
+On a large design the ratio stays similar, which is why \code{-j} on the
+\code{-{}-build} step matters and why people cache \file{obj\_dir}.
+
+Second, \emph{compile time dominates for small work}. If your regression runs
+for two seconds, a five-second build makes Verilator slower end to end than
+starting \code{vsim} on an already-compiled library. Verilator wins when the
+simulation is long: a processor booting Linux, a DSP chain processing a million
+samples, a week-long random regression.
+
+Third, \emph{\code{-{}-timing} costs about an order of magnitude}. The same
+\DUT{}, the same number of cycles, driven from a \SV{} class-based testbench
+with coroutines rather than from C++, ran at 0.54 instead of 6.7 million cycles
+per second. Coroutine suspension and resumption is cheap compared with an event
+queue and expensive compared with a function call.
+
+Waveform tracing has a cost of its own. Twenty thousand transactions, about
+320\,000 cycles, with every signal traced:
+
+\begin{txtcode}
+no tracing                    0.17 s
+VCD  (--trace)                0.23 s   106 MB
+FST  (--trace-fst)            0.90 s    13 MB
+\end{txtcode}
+
+\begin{ruleofthumb}
+Trace nothing by default. Add a command-line flag that switches tracing on, and
+use FST when the run is long enough that 100\,MB of VCD is a problem.
+\end{ruleofthumb}
+
+\section{The Flow, Hands On}
+\label{sec:verilator:flow}
+
+\subsection{The switches you will actually type}
+
+\index{Verilator!command line}Three output modes matter.
+
+\begin{itemize}
+  \item \code{-{}-cc} emits C++ and nothing else. You supply \code{main()}.
+        This is the mode for a C++ testbench and the one this chapter uses
+        most.
+  \item \code{-{}-binary} emits C++, generates a \code{main()}, enables
+        \code{-{}-timing} and builds an executable. This is the mode for
+        running a \SV{} testbench.
+  \item \code{-{}-sc} emits a SystemC module: the ports become
+        \code{sc\_in<>} and \code{sc\_out<>} and the class derives from
+        \code{sc\_module}. Useful when the \DUT{} must sit inside an existing
+        SystemC virtual platform.
+\end{itemize}
+
+Around them:
+
+\begin{itemize}
+  \item \code{-{}-top-module <name>} names the top. Verilator can usually
+        infer it, but says so noisily when there is more than one candidate;
+        always pass it.
+  \item \code{-{}-exe file.cpp} says ``this C++ file is part of the program'',
+        and makes the generated makefile link an executable.
+  \item \code{-Mdir <dir>} changes the output directory from \file{obj\_dir}.
+        Use it when you build several variants of the same design, as the
+        chapter Makefile does.
+  \item \code{-{}-build} runs \tool{make} for you; \code{-j N} parallelises it.
+  \item \code{-CFLAGS "\ldots"} and \code{-LDFLAGS "\ldots"} are passed to the
+        C++ compiler and linker.
+  \item \code{-o <name>} names the executable.
+\end{itemize}
+
+\subsection{Verilating the CORDIC}
+
+Assume the sources of \refexamplebook have been copied into \file{rtl/}. The
+first command produces C++ only:
+
+\begin{shcode}
+$ verilator --cc --top-module cordic_rot rtl/cordic_pkg.sv rtl/cordic_rot.sv
+$ ls obj_dir/
+Vcordic_rot.cpp    Vcordic_rot__Syms.cpp   Vcordic_rot___024root.h
+Vcordic_rot.h      Vcordic_rot__Syms.h     Vcordic_rot___024root__Slow.cpp
+Vcordic_rot.mk     Vcordic_rot__pch.h      Vcordic_rot_cordic_pkg.h
+Vcordic_rot_classes.mk                     Vcordic_rot_cordic_pkg__Slow.cpp
+\end{shcode}
+
+The naming is regular and worth decoding once.
+\file{V<top>.h} and \file{V<top>.cpp} are the public wrapper: the class you
+instantiate. \file{V<top>\_\_\_024root} is the flattened design; \code{\_\_024}
+is the escaped form of \code{\$}, because Verilator names the root scope
+\code{\$root}. Files ending in \code{\_\_Slow} contain code that runs once
+(construction, reset of internal state, coverage dump) and are compiled with
+\code{-Os} rather than \code{-O2}; \code{DepSet} in a file name marks a group
+of statements that share a dependency set. \file{V<top>.mk} is the makefile
+that \code{-{}-build} invokes.
+
+\subsection{A forty-line testbench}
+
+\cref{lst:verilator:first} is the smallest program that does something useful:
+it releases reset, presents one request to the CORDIC, waits for the response
+and prints it. Read \code{tick()}-free code once, so that the structure of the
+loop is visible before it is abstracted away.
+
+\begin{cppcode}[caption={\file{main\_first.cpp}: the smallest useful Verilator testbench},label={lst:verilator:first}]
+#include "Vcordic_rot.h"
+#include "verilated.h"
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    VerilatedContext ctx;
+    ctx.commandArgs(argc, argv);
+    Vcordic_rot dut{&ctx};
+
+    dut.clk_i = 0;
+    dut.rst_ni = 0;
+    dut.req_valid_i = 0;
+    dut.rsp_ready_i = 1;
+    dut.req_x_i = 9949;      // X0_UNIT: seed for cos/sin
+    dut.req_y_i = 0;
+    dut.req_theta_i = 8579;  // ~pi/3 rad in Q2.13
+
+    for (int cyc = 0; cyc < 200; ++cyc) {
+        if (cyc == 4) dut.rst_ni = 1;      // release reset
+        if (cyc == 6) dut.req_valid_i = 1; // present one request
+
+        dut.clk_i = 0;                     // low phase: settle the logic
+        dut.eval();
+        ctx.timeInc(5000);                 // 5 ns, in 1 ps precision units
+
+        bool req_hs = dut.req_valid_i && dut.req_ready_o;
+        bool rsp_hs = dut.rsp_valid_o && dut.rsp_ready_i;
+        int16_t x = (int16_t)dut.rsp_x_o, y = (int16_t)dut.rsp_y_o;
+
+        dut.clk_i = 1;                     // rising edge
+        dut.eval();
+        ctx.timeInc(5000);
+
+        if (req_hs) dut.req_valid_i = 0;
+        if (rsp_hs) {
+            printf("t=%3lu cyc=%d  rsp_x=%6d  rsp_y=%6d\n",
+                   (unsigned long)ctx.time(), cyc, x, y);
+            break;
+        }
+    }
+    dut.final();
+    return 0;
+}
+\end{cppcode}
+
+\begin{shcode}
+$ verilator --cc --exe --build -j 2 --top-module cordic_rot \
+      rtl/cordic_pkg.sv rtl/cordic_rot.sv tb/main_first.cpp
+$ ./obj_dir/Vcordic_rot
+t=220000 cyc=21  rsp_x=  8190  rsp_y= 14190
+\end{shcode}
+
+The time stamp is in picoseconds, because \code{timeInc()} counts
+\code{timeprecision} units and \file{cordic\_rot.sv} declares
+\code{`timescale 1ns/1ps}; 220000\,ps is 220\,ns, that is 22 half periods of
+5\,ns.
+
+Seeded with $x_0 = \mathrm{X0\_UNIT} = 9949$ and $y_0 = 0$, the CORDIC returns
+$K \cdot 9949 \cdot (\cos\theta, \sin\theta)$, which is
+$(\cos\theta, \sin\theta)$ scaled by very nearly $2^{14}$, because
+$\mathrm{X0\_UNIT}$ was chosen as $\mathrm{round}(2^{14}/K)$. For $\theta =
+8579/2^{13} = 1.0472$\,rad the exact values are $K \cdot 9949 \cdot \cos\theta
+= 8191.2$ and $K \cdot 9949 \cdot \sin\theta = 14189.0$. The design is right to
+within two LSB, and it took twenty-one clock cycles: four of reset, two idle,
+one to accept, fourteen micro-rotations.
+
+\section{The Generated C++ API}
+\label{sec:verilator:api}
+
+\subsection{Context, model, ports}
+
+\index{VerilatedContext}\code{VerilatedContext} holds everything that a
+simulator kernel would normally own: the current time, the command-line
+arguments, the random seed, the coverage database, the ``tracing was ever
+enabled'' flag. You may create several, one per model, which is how you run two
+independent designs in one process.
+
+\begin{cppcode}
+VerilatedContext ctx;
+ctx.commandArgs(argc, argv);     // parses +verilator+... plusargs
+ctx.traceEverOn(true);           // must precede any trace() call
+ctx.timeInc(5000);               // advance time by 5000 precision units
+uint64_t now = ctx.time();
+Vcordic_rot dut{&ctx};           // the model, bound to this context
+\end{cppcode}
+
+If you omit the context, the model attaches to a global default one. That is
+fine for a single model and a nuisance for anything else; pass it explicitly.
+
+\index{CData}\index{SData}\index{IData}\index{QData}\index{WData}Ports become
+public data members whose C type is chosen by width. The rule is fixed and
+worth memorising, because it is the first thing you get wrong:
+
+\begin{table}[htbp]
+  \centering
+  \caption{Verilator's C types for packed signals.}
+  \label{tab:verilator:ctypes}
+  \small
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    \textbf{Width} & \textbf{Verilator type} & \textbf{C type} &
+    \textbf{Declared as} \\
+    \midrule
+    1 to 8    & \code{CData} & \code{uint8\_t}  & \code{VL\_IN8}  \\
+    9 to 16   & \code{SData} & \code{uint16\_t} & \code{VL\_IN16} \\
+    17 to 32  & \code{IData} & \code{uint32\_t} & \code{VL\_IN}   \\
+    33 to 64  & \code{QData} & \code{uint64\_t} & \code{VL\_IN64} \\
+    65 and up & \code{WData} & array of \code{uint32\_t} & \code{VL\_INW} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+A module with ports of every width generates exactly this:
+
+\begin{txtcode}
+    VL_IN8(&a1,0,0);
+    VL_IN8(&a8,7,0);
+    VL_IN16(&a16,15,0);
+    VL_IN(&a32,31,0);
+    VL_INW(&a100,99,0,4);
+    VL_OUTW(&y128,127,0,4);
+    VL_IN64(&a64,63,0);
+\end{txtcode}
+
+\begin{gotcha}{Every port is unsigned, whatever the \SV{} said}
+\code{rsp\_x\_o} is declared \code{data\_t}, that is \code{logic signed
+[15:0]}. In C++ it is an \code{SData}, that is \code{uint16\_t}. Reading it
+without a cast gives you the two's complement bit pattern reinterpreted as a
+positive number:
+\begin{txtcode}
+rsp_y_o as SData  : 51347
+rsp_y_o as int16_t: -14189
+\end{txtcode}
+Always cast a signed output to the matching signed C type, and always mask a
+signed input to its width when you write it. The \SV{} sign information does
+not cross the boundary.
+\end{gotcha}
+
+For a width that is not a multiple of eight, the unused upper bits of the C
+type are zero on outputs, and Verilator requires them to be zero on inputs. A
+20-bit input written as \code{0xFFFFFFFF} is undefined behaviour, not a
+truncation.
+
+\subsection{The evaluation model}
+
+\index{eval()@\code{eval()}}This is where a \VHDL{} intuition fails hardest, so
+it gets a numbered recipe.
+
+\code{eval()} does one thing: it brings the model to a settled state,
+consistent with the current values of the input members. It is not ``advance
+one cycle''. It is not ``advance one delta''. There is no clock inside the
+model. \emph{You} are the clock: you write \code{dut.clk\_i = 1} and then call
+\code{eval()}, and the fact that \code{clk\_i} went from 0 to 1 between two
+calls is what makes the \code{always\_ff} blocks fire.
+
+\begin{enumerate}
+  \item Write every input member that should change this cycle.
+  \item Call \code{eval()}. Combinational outputs are now valid for the
+        \emph{current} values of the state registers.
+  \item Read whatever you need to sample \emph{before} the edge. This is the
+        C++ equivalent of a clocking block's \code{default input \#1step}.
+  \item Set \code{clk\_i = 1}.
+  \item Call \code{eval()} again. This is the rising edge: the
+        \code{always\_ff} blocks run and the state registers take their new
+        values.
+  \item Advance the context clock with \code{timeInc()} and, if tracing,
+        call \code{dump()} at each of the two time points.
+\end{enumerate}
+
+\cref{fig:verilator:eval} draws one cycle of this.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[x=1.55cm,y=1cm]
+    % clock waveform
+    \draw[thick,draw=codekey]
+      (0,0) -- (1,0) -- (1,0.6) -- (2.6,0.6) -- (2.6,0) -- (4,0);
+    \node[left=2mm of {(0,0.3)},font=\small\sffamily,anchor=east]
+      at (-0.05,0.3) {\code{clk\_i}};
+
+    % time axis
+    \draw[-{Latex[length=2mm]},draw=codenumber] (-0.05,-2.6) -- (4.1,-2.6)
+      node[right,font=\scriptsize\sffamily]{time};
+
+    % markers
+    \foreach \x/\lbl in {0.15/1, 0.55/2, 0.8/3, 1.0/4, 1.25/5}{
+      \draw[dashed,draw=codenumber!70] (\x,0.9) -- (\x,-2.5);
+    }
+
+    \node[font=\scriptsize\sffamily,anchor=west,align=left]
+      at (0.18,-0.5)  {\textbf{1} write inputs};
+    \node[font=\scriptsize\sffamily,anchor=west,align=left]
+      at (0.58,-1.0)  {\textbf{2} \code{eval()} settles combinational logic};
+    \node[font=\scriptsize\sffamily,anchor=west,align=left]
+      at (0.83,-1.5)  {\textbf{3} sample outputs (= clocking block input)};
+    \node[font=\scriptsize\sffamily,anchor=west,align=left]
+      at (1.03,-2.0)  {\textbf{4} \code{clk\_i=1}\quad\textbf{5}
+                       \code{eval()}: the edge};
+
+    \node[font=\scriptsize\sffamily,anchor=west]
+      at (2.7,-0.5) {\textbf{6} \code{timeInc()}, then the next cycle};
+
+    \node[draw=warnframe,fill=warnbg,rounded corners=2pt,
+          font=\scriptsize\sffamily,align=center,inner sep=4pt]
+      at (2.05,0.6+1.05)
+      {values read \emph{after} step 5 are the \emph{new} register values};
+  \end{tikzpicture}
+  \caption{One clock cycle in a Verilator C++ testbench. There is no kernel:
+  the six steps are six statements you write.}
+  \label{fig:verilator:eval}
+\end{figure}
+
+\begin{gotcha}{\code{eval()} is not ``advance the clock''}
+The commonest beginner's bug is a loop that toggles the clock but calls
+\code{eval()} only once per period, or that reads an output after the rising
+edge and treats it as the value that existed before it. In \VHDL{} the
+distinction is made for you by \code{wait until rising\_edge(clk)} and by the
+postponed update of signals. Here it is made by \emph{where in your C++ you put
+the read}. Read handshake signals between steps 2 and 4; read registered data
+either there or after step 5, but be deliberate about which.
+\end{gotcha}
+
+\begin{gotcha}{\code{timeInc()} counts in timeprecision units}
+\file{cordic\_rot.sv} declares \code{`timescale 1ns/1ps}. A half period of
+5\,ns is therefore \code{ctx.timeInc(5000)}, not \code{ctx.timeInc(5)}. Get it
+wrong and everything still runs, but every message the model prints is stamped
+with the wrong time. With \code{timeInc(5)} the \DUT{}'s own assertion reports
+\begin{txtcode}
+[0] %Error: cordic_rot.sv:227: Assertion failed in TOP.cordic_rot:
+    cordic_rot: |theta| > pi (theta = 30000)
+\end{txtcode}
+and with \code{timeInc(5000)} the same failure reports \code{[65000]}, which is
+65\,ns. The VCD timestamps are wrong in the same way.
+
+Every C++ testbench in this chapter therefore advances time in picoseconds,
+\code{timeInc(5000)} per half period, and every simulated time printed here is
+in picoseconds. If you see \code{timeInc(5)} in a testbench that a colleague
+wrote, the design still simulates correctly; only the time stamps lie.
+\end{gotcha}
+
+The other methods are quickly described. \code{eval\_step()} and
+\code{eval\_end\_step()} split \code{eval()} in two, which matters only when
+several Verilated models are stepped together in one time slot: you call
+\code{eval\_step()} on all of them, then \code{eval\_end\_step()} on all of
+them. \code{final()} runs the \SV{} \kw{final} blocks and flushes internal
+state; call it once before the program exits, or coverage and \code{\$display}
+output can be lost. \code{eventsPending()} and \code{nextTimeSlot()} exist only
+in \code{-{}-timing} builds and let you write your own main loop for a design
+that has delays in it.
+
+\subsection{Tracing}
+
+\index{VCD}\index{FST}Tracing must be enabled at verilation time
+(\code{-{}-trace} for VCD, \code{-{}-trace-fst} for FST) \emph{and} at run
+time. Forgetting the first gives a link error rather than a message about
+tracing, which is confusing the first time:
+
+\begin{txtcode}
+undefined reference to `VerilatedVcd::close()'
+undefined reference to `VerilatedTrace<VerilatedVcd,
+                        VerilatedVcdBuffer>::dump(unsigned long)'
+\end{txtcode}
+
+The run-time sequence is fixed: \code{traceEverOn(true)} before anything else,
+then construct the trace object, then \code{dut.trace(tfp, levels)}, then
+\code{tfp->open(name)}. After that, call \code{tfp->dump(time)} at every point
+you want a sample -- typically twice per cycle, once for each clock phase --
+and \code{tfp->close()} at the end.
+
+\begin{cppcode}
+#if VM_TRACE_FST
+# include "verilated_fst_c.h"
+using TraceC = VerilatedFstC;
+static const char* TRACE_FILE = "cordic.fst";
+#else
+# include "verilated_vcd_c.h"
+using TraceC = VerilatedVcdC;
+static const char* TRACE_FILE = "cordic.vcd";
+#endif
+\end{cppcode}
+
+\code{VM\_TRACE}, \code{VM\_TRACE\_FST} and \code{VM\_COVERAGE} are defined by
+the generated makefile, so one source file can serve both builds.
+
+\begin{tipbox}{Trace only what you need}
+\code{dut.trace(tfp, 99)} traces the whole hierarchy, including every
+\kw{localparam} in \file{cordic\_pkg.sv} -- the VCD header for this tiny design
+already lists \code{ATAN\_ROM[0..13]} and every format constant. Reduce the
+depth, or mark the interesting signals with \code{/* verilator public\_flat */}
+and trace a shallow level.
+\end{tipbox}
+
+\subsection{The dump file is not the viewer}
+\label{sec:verilator:viewers}
+
+\index{GTKWave}\index{Surfer}\index{waveform viewer}Nothing above draws a
+waveform. \tool{Verilator} writes a \emph{dump file}, and you open that file in
+a separate program. This is the one place where the free flow is visibly
+different from the commercial one: \tool{QuestaSim} logs signals into its own
+\file{.wlf} database and shows them in its own wave window, so the simulator
+and the viewer are the same application. With \tool{Verilator} they are not,
+and you choose both halves.
+
+There are two dump formats.
+
+\textbf{VCD} is the value-change dump defined by IEEE 1364. It is plain text,
+every tool on earth reads it, and it is enormous: a header listing every traced
+signal, then one line for every value change. A few thousand cycles of a small
+design is a few megabytes; a million cycles of a real one is a file you cannot
+open. Use it for short runs, for interoperability, and for anything you want to
+read with a script.
+
+\textbf{FST} is the compressed binary format that came out of the \tool{GTKWave}
+project. It is typically an order of magnitude smaller than the equivalent VCD
+and it opens in a fraction of the time, because a viewer can seek into it
+instead of parsing the whole thing. Use it for anything longer than a few
+thousand cycles. The measurements earlier in this chapter show the trade in the
+other direction: writing FST costs a little more simulation time than writing
+VCD, because the compression happens as you go.
+
+Both formats open in the same two viewers.
+
+\begin{itemize}
+  \item \tool{GTKWave} is the long-standing one. It reads VCD, FST and several
+        other formats, it is in every distribution's package manager, and its
+        interface is dated but complete: grouping, radix changes, saved signal
+        lists in a \file{.gtkw} file, and a Tcl interface for scripting.
+  \item \tool{Surfer} is the newer one. It reads VCD and FST, the interface is
+        modern, it starts quickly on large files, and there is a browser build
+        as well as a native one, which is genuinely useful when you want to
+        send somebody a waveform rather than a screenshot.
+\end{itemize}
+
+\begin{shcode}
+gtkwave cordic.fst          # or: gtkwave cordic.vcd
+surfer   cordic.fst
+
+# QuestaSim, for comparison: the log and the viewer are the same tool
+vsim -view vsim.wlf
+\end{shcode}
+
+\begin{tipbox}{Save the signal list, not the screenshot}
+Both viewers can save the set of signals you have added, their order, their
+grouping and their radixes, and reload it against a new dump. Do that once, and
+debugging the same block a week later starts from the picture you built rather
+than from an empty pane. In \tool{GTKWave} it is \file{File\,>\,Write Save
+File}; the \file{.gtkw} belongs in the repository next to the testbench.
+\end{tipbox}
+
+\begin{gotcha}{A gigabyte of waveform is not a debugging aid}
+\code{\$dumpvars(0, top)} in \SV{}, or \code{dut.trace(tfp, 99)} in C++, dumps
+every signal in every instance below that scope, at every change. On the CORDIC
+it produces a file you can read; on anything with a memory in it, it produces
+tens of gigabytes and a viewer that will not open. Name the scope you care
+about --- \code{\$dumpvars(1, u\_dut)} --- or dump for a window of time by
+calling \code{\$dumpoff} and \code{\$dumpon} around the interesting cycles.
+The equivalent discipline in \tool{QuestaSim} is to \code{log} a subtree
+rather than \code{log -r /*}.
+\end{gotcha}
+
+\section{Writing a C++ Testbench Properly}
+\label{sec:verilator:cpptb}
+
+The forty-line version has all the ideas and none of the discipline. A usable
+testbench adds six things: a \code{tick()} helper so the clock protocol is
+written once, a reset sequence, a handshake driver that respects
+\code{ready}, a golden model, an error counter that becomes the process exit
+status, and tracing behind a command-line flag.
+
+\begin{cppcode}[caption={The core of \file{tb\_cordic.cpp}},label={lst:verilator:tb}]
+class CordicTb {
+  public:
+    VerilatedContext ctx;
+    Vcordic_rot*     dut;
+    TraceC*          tfp = nullptr;
+    uint64_t         cycles = 0;
+    unsigned         checked = 0, failed = 0;
+    double           worst = 0.0;
+
+    void openTrace(const char* name) {
+        ctx.traceEverOn(true);
+        tfp = new TraceC;
+        dut->trace(tfp, 99);
+        tfp->open(name);
+    }
+
+    // One clock period.  Inputs written before the call are seen by the
+    // rising edge; outputs read after the call are the post-edge values.
+    void tick() {
+        dut->clk_i = 0; dut->eval();
+        if (tfp) tfp->dump(ctx.time());
+        ctx.timeInc(5000);            // 5 ns at 1 ps precision
+
+        dut->clk_i = 1; dut->eval();
+        if (tfp) tfp->dump(ctx.time());
+        ctx.timeInc(5000);
+        ++cycles;
+    }
+    // The combinational outputs of the current cycle, before the edge.
+    void settle() { dut->clk_i = 0; dut->eval(); }
+
+    void reset(int n = 5) {
+        dut->rst_ni = 0;
+        for (int i = 0; i < n; ++i) tick();
+        dut->rst_ni = 1;
+        tick();
+    }
+
+    void check(const Txn& t) {
+        double th = double(t.theta) / (1 << QA);
+        double xr = double(t.x0)    / (1 << QF);
+        double yr = double(t.y0)    / (1 << QF);
+        double rx = K_GAIN * (xr * std::cos(th) - yr * std::sin(th));
+        double ry = K_GAIN * (xr * std::sin(th) + yr * std::cos(th));
+        double ex = std::fabs(double(t.x) - rx * (1 << QF));
+        double ey = std::fabs(double(t.y) - ry * (1 << QF));
+        if (ex > worst) worst = ex;
+        if (ey > worst) worst = ey;
+        ++checked;
+        if (ex > TOL_LSB || ey > TOL_LSB) {
+            ++failed;
+            printf("MISMATCH x0=%d y0=%d th=%d : got (%d,%d) "
+                   "want (%.1f,%.1f) err %.2f/%.2f LSB\n",
+                   t.x0, t.y0, t.theta, t.x, t.y,
+                   rx * (1 << QF), ry * (1 << QF), ex, ey);
+        }
+    }
+};
+\end{cppcode}
+
+The golden model is deliberately written in real arithmetic, at the level of
+the specification, exactly as the \SV{} scoreboard of \refverificationbook is. A model
+that reimplements the micro-rotations would reproduce the design's bugs.
+
+The handshake is the part that repays care. \code{req\_ready\_o} must be
+sampled \emph{before} the edge that consumes the request, which is why
+\code{settle()} exists:
+
+\begin{cppcode}
+tb.dut->req_valid_i = 1;
+tb.dut->req_x_i     = uint16_t(t.x0);
+tb.dut->req_y_i     = uint16_t(t.y0);
+tb.dut->req_theta_i = uint16_t(t.theta);
+bool accepted;
+do {
+    tb.settle();                       // ready is now this cycle's value
+    accepted = tb.dut->req_ready_o;
+    tb.tick();                         // the edge that transfers it
+} while (!accepted);
+tb.dut->req_valid_i = 0;
+\end{cppcode}
+
+\begin{gotcha}{Do not test \code{ready} after the edge}
+Writing \code{tick(); if (dut->req\_ready\_o) \ldots} tests the value that
+\code{ready} takes \emph{after} the transfer, which for this \DUT{} is 0
+because it has moved to \code{ST\_ROTATE}. The handshake then never appears to
+complete, \code{req\_valid\_i} stays high, and the \DUT{} accepts the same
+request again the next time it is idle. The symptom is a testbench that hangs
+or that silently sends every transaction twice.
+\end{gotcha}
+
+Running it:
+
+\begin{txtcode}
+$ verilator --cc --exe --build -j 2 --trace -CFLAGS -O2 \
+      --top-module cordic_rot -Mdir obj_tb \
+      rtl/cordic_pkg.sv rtl/cordic_rot.sv tb/tb_cordic.cpp -o tb_cordic
+$ ./obj_tb/tb_cordic +n=200
+----------------------------------------------
+ 200 transactions, 0 failures, worst error 2.68 LSB
+ 3206 clock cycles simulated
+ *** TEST PASSED ***
+$ echo $?
+0
+\end{txtcode}
+
+\begin{ruleofthumb}
+The exit status is the interface to continuous integration. Return non-zero
+when anything failed, and never print ``PASSED'' from a run whose exit status
+is not zero.
+\end{ruleofthumb}
+
+\section{Running a SystemVerilog Testbench: \code{-{}-binary} and \code{-{}-timing}}
+\label{sec:verilator:binary}
+
+You do not have to abandon \SV{} for the testbench. With \code{-{}-binary
+-{}-timing}, Verilator compiles \kw{initial} blocks, \code{\#} delays,
+\code{fork}/\code{join*}, mailboxes and classes into coroutines and generates
+its own \code{main()}. The class-based testbench of \refverificationbook is close to
+running as it stands. Close, but not quite.
+
+\subsection{What has to change}
+
+The book's \file{tb\_cordic\_pkg.sv} and \file{cordic\_if.sv} need four edits
+before 5.020 accepts them, and each one teaches something:
+
+\begin{enumerate}
+  \item \textbf{The modport that hands out a clocking block must go}
+        (\code{Unsupported: Modport clocking}), and with it every
+        \code{@(vif.drv\_cb)} and \code{vif.drv\_cb.sig <= x}. Replace the
+        interface with one that carries plain signals, wait on
+        \code{@(posedge vif.clk)} and drive with \code{<=}. You lose the
+        race-freedom guarantee that the clocking block gave you, so the
+        non-blocking assignment now matters: it is what keeps the driver's
+        writes in the NBA region, behind the \DUT{}'s sampling.
+  \item \textbf{The comment beginning with the word ``Verilator'' must be
+        reworded}, because it is parsed as a metacomment.
+  \item \textbf{Adjacent string literals in \code{\$error} must be joined}
+        into one string.
+  \item \textbf{\code{repeat (expr) @(\ldots)} inside a
+        \code{fork \ldots join\_none} must become an explicit loop}, because
+        of a lifetime restriction on the compiler-generated counter:
+\begin{txtcode}
+%Error-LIFETIME: tb_vlt_pkg.sv:62:13: Invalid reference:
+        Process might outlive variable `__Vrepeat1'.
+\end{txtcode}
+        The fix is three lines:
+\begin{svcode}
+int unsigned stall = $urandom_range(3) + 1;
+vif.rsp_ready <= 1'b0;
+for (int unsigned k = 0; k < stall; k++) @(posedge vif.clk);
+\end{svcode}
+\end{enumerate}
+
+The parts that need no change at all are worth listing too, because they are
+the parts a \VHDL{} designer would expect to be hardest: the classes, the
+inheritance, the \code{mailbox \#(cordic\_txn)} between generator and driver,
+the queue in the monitor, the \code{fork \ldots join\_none} that starts four
+concurrent tasks, the real-valued golden model with \code{\$cos} and
+\code{\$sin}, and \code{\$value\$plusargs}. All of that runs.
+
+\subsection{Guarding with \code{`ifdef VERILATOR}}
+
+\index{`ifdef VERILATOR@\code{`ifdef VERILATOR}}Verilator predefines the macro
+\code{VERILATOR}, so one source can serve both tools. The book's testbench
+already uses this for the two features that do not exist:
+
+\begin{svcode}
+`ifndef VERILATOR
+  constraint c_theta { theta inside {[-PI_EXT : PI_EXT]}; }
+`endif
+
+function void do_randomize();
+`ifdef VERILATOR
+  randomize_fallback();
+`else
+  if (!this.randomize()) $fatal(1, "randomization failed");
+`endif
+endfunction
+\end{svcode}
+
+The same pattern wraps the covergroup. Keep the guarded regions small and put
+the fallback next to the thing it replaces, so that the two cannot drift apart.
+
+\begin{tipbox}{Make the fallback the same distribution, not just legal}
+A hand-written fallback that picks $\theta$ uniformly in $[-\pi, \pi]$ is not
+the same stimulus as a \code{dist} that puts weight on the quadrant
+boundaries. If the constrained version is what you verify with, and the
+Verilator version is what you run nightly, write the corner cases into the
+fallback explicitly as directed transactions.
+\end{tipbox}
+
+\subsection{Running it}
+
+\begin{txtcode}
+$ verilator --binary --timing -j 2 -CFLAGS -O2 --top-module tb_vlt_top \
+      rtl/cordic_pkg.sv svtb/cordic_vif.sv rtl/cordic_rot.sv \
+      svtb/tb_vlt_pkg.sv svtb/tb_vlt_top.sv -o tb_svtb
+$ ./obj_svtb/tb_svtb +n=200
+ scoreboard: 200 checked, 0 failed
+ worst error: 2.82 LSB (tolerance 12 LSB)
+ *** TEST PASSED ***
+ simulated time: 33525000
+- svtb/tb_vlt_top.sv:33: Verilog $finish
+\end{txtcode}
+
+The whole layered testbench -- generator, driver with random back-pressure,
+passive monitor, scoreboard with a trigonometric reference model -- runs
+unmodified in structure on a free tool. That is a genuinely useful result, and
+it is worth weighing against the two things you gave up: constrained random
+and functional coverage.
+
+\begin{notebox}{When to choose the \SV{} testbench over the C++ one}
+Choose \SV{} when the testbench must also run in \tool{QuestaSim} (one source,
+two tools), when the protocol is complex enough that blocking tasks are much
+clearer than state machines, or when the people who will maintain it are \RTL{}
+engineers. Choose C++ when the run is long and speed matters, when the golden
+model already exists in C or C++, or when you want to link the \DUT{} into a
+larger software system.
+\end{notebox}
+
+\section{A UVM-Shaped Verification Environment in C++}
+\label{sec:verilator:cppuvm}
+
+UVM is not available. That does not mean the \emph{ideas} in UVM are
+unavailable: they are ordinary object-oriented design, and C++ expresses them
+with less ceremony than \SV{} does. This section builds a small, complete,
+header-only framework and runs it against the CORDIC. It is about 200 lines.
+
+\subsection{What UVM is actually for}
+
+Strip away the macros and the phasing and UVM does four things (\refverificationbook):
+
+\begin{enumerate}
+  \item It gives components a \textbf{name and a place in a tree}, and calls
+        \code{build\_phase}, \code{connect\_phase} and \code{run\_phase} on
+        every one of them in a defined order.
+  \item It provides \textbf{TLM ports} so a monitor can publish transactions
+        without knowing who consumes them.
+  \item It provides a \textbf{factory}, so a test can substitute a different
+        implementation of a component without editing the environment.
+  \item It provides a \textbf{configuration database}, so a test can change a
+        parameter deep in the hierarchy without editing anything.
+\end{enumerate}
+
+Points 3 and 4 are the reason UVM exists. Everything else is convenience.
+\cref{fig:verilator:env} shows the hierarchy we will build, deliberately drawn
+the same way as the UVM hierarchy in \refverificationbook.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      every node/.style={font=\small\sffamily},
+      comp/.style={draw=codeframe,fill=codebg,rounded corners=2pt,
+                   minimum height=7mm,minimum width=22mm,inner xsep=4pt},
+      envb/.style={draw=codekey,fill=notebg,rounded corners=2pt,
+                   minimum height=7mm,minimum width=22mm},
+      agt/.style={draw=accentalt,fill=warnbg,rounded corners=2pt,
+                  minimum height=7mm,minimum width=22mm},
+      ar/.style={-{Latex[length=1.8mm]},draw=codenumber},
+      tlm/.style={-{Latex[length=1.8mm]},draw=accent,thick,dashed}]
+
+    \node[envb] (test) at (0,0) {\code{CordicTest}};
+    \node[envb] (env)  at (0,-1.2) {\code{CordicEnv}};
+    \node[agt]  (agt)  at (-2.6,-2.6) {\code{CordicAgent}};
+    \node[comp] (sb)   at (2.2,-2.6) {\code{CordicSb}};
+    \node[comp] (cov)  at (2.2,-3.8) {\code{CordicCov}};
+
+    \node[comp] (seq)  at (-5.0,-4.2) {\code{CordicSeq}};
+    \node[comp] (drv)  at (-2.6,-4.2) {\code{CordicDrv}};
+    \node[comp] (mon)  at (-0.2,-4.2) {\code{CordicMon}};
+
+    \node[draw=accent,fill=tipbg,rounded corners=2pt,minimum height=7mm]
+         (dut) at (-1.4,-5.8) {\code{Vcordic\_rot} (the model)};
+
+    \draw[ar] (test) -- (env);
+    \draw[ar] (env)  -- (agt);
+    \draw[ar] (env)  -- (sb);
+    \draw[ar] (env)  -- (cov);
+    \draw[ar] (agt)  -- (seq);
+    \draw[ar] (agt)  -- (drv);
+    \draw[ar] (agt)  -- (mon);
+
+    \draw[ar,densely dotted] (seq) -- node[below,font=\tiny]{queue} (drv);
+    \draw[ar] (drv.south) -- (dut.north west);
+    \draw[ar] (dut.north east) -- (mon.south);
+
+    \draw[tlm] (mon.east) .. controls (1.2,-4.2) and (1.2,-2.9) .. (sb.south west);
+    \draw[tlm] (mon.east) .. controls (1.4,-4.4) and (1.4,-3.9) .. (cov.west);
+    \node[font=\tiny\sffamily,text=accent] at (1.35,-3.25)
+      {\code{AnalysisPort<CordicTxn>}};
+  \end{tikzpicture}
+  \caption{The C++ verification environment. Solid arrows are ownership,
+  dashed green arrows are TLM connections. Compare with the UVM hierarchy in
+  \refverificationbook: the boxes are the same.}
+  \label{fig:verilator:env}
+\end{figure}
+
+\subsection{The framework}
+
+\index{TLM}\index{factory}The whole framework is one header. The component base
+class carries a name, a parent, a list of children, and four virtual phase
+methods.
+
+\begin{cppcode}[caption={\file{svtlm.h}: the component base class},label={lst:verilator:comp}]
+class Component {
+  public:
+    Component(std::string name, Component* parent)
+        : name_(std::move(name)), parent_(parent) {
+        if (parent_) parent_->children_.push_back(this);
+    }
+    virtual ~Component() = default;
+
+    std::string fullName() const {
+        return parent_ ? parent_->fullName() + "." + name_ : name_;
+    }
+
+    // ---- the phases, overridden by the user -------------------------
+    virtual void build()   {}
+    virtual void connect() {}
+    virtual void tick()    {}
+    virtual void report()  {}
+
+    // ---- the phase walkers, called by the test ----------------------
+    void buildAll() {
+        build();
+        // build() may have created children, so index by hand.
+        for (size_t i = 0; i < children_.size(); ++i) children_[i]->buildAll();
+    }
+    void connectAll() {                    // bottom-up, like UVM
+        for (auto* c : children_) c->connectAll();
+        connect();
+    }
+    void tickAll() {
+        tick();
+        for (auto* c : children_) c->tickAll();
+    }
+    void reportAll() {
+        for (auto* c : children_) c->reportAll();
+        report();
+    }
+    void info(const char* fmt, ...) const;   // prints "[full.name] ..."
+    int  cfgInt(const std::string& field, int dflt) const;
+
+  protected:
+    std::vector<Component*> children_;
+  private:
+    std::string name_;
+    Component*  parent_;
+};
+\end{cppcode}
+
+The analysis port is nine lines, because C++ already has first-class callables.
+In UVM you would declare an \code{uvm\_analysis\_imp} with a macro so that
+several subscribers could each have a distinct \code{write} method; here a
+lambda does it.
+
+\begin{cppcode}[caption={The TLM analysis port},label={lst:verilator:ap}]
+template <typename T>
+class AnalysisPort {
+  public:
+    using Sub = std::function<void(const T&)>;
+    void connect(Sub s) { subs_.push_back(std::move(s)); }
+    void write(const T& t) const { for (const auto& s : subs_) s(t); }
+  private:
+    std::vector<Sub> subs_;
+};
+\end{cppcode}
+
+The factory maps a type \emph{name} to a constructor, plus a table of
+overrides. Registration is one line in each component, hidden behind a macro
+that is the direct analogue of \code{`uvm\_component\_utils}.
+
+\begin{cppcode}[caption={Factory and registration},label={lst:verilator:factory}]
+class Factory {
+  public:
+    using Ctor = std::function<Component*(const std::string&, Component*)>;
+    static Factory& get() { static Factory f; return f; }
+
+    void reg(const std::string& type, Ctor c) { ctors_[type] = std::move(c); }
+    void setTypeOverride(const std::string& orig, const std::string& repl) {
+        overrides_[orig] = repl;
+    }
+    Component* create(const std::string& type, const std::string& name,
+                      Component* parent) {
+        std::string t = type;
+        auto ov = overrides_.find(t);
+        if (ov != overrides_.end()) t = ov->second;
+        auto it = ctors_.find(t);
+        if (it == ctors_.end()) { printf("FATAL: no type '%s'\n", t.c_str());
+                                  abort(); }
+        return it->second(name, parent);
+    }
+    template <typename T>
+    T* createAs(const std::string& type, const std::string& name,
+                Component* parent) {
+        return static_cast<T*>(create(type, name, parent));
+    }
+  private:
+    std::map<std::string, Ctor>        ctors_;
+    std::map<std::string, std::string> overrides_;
+};
+
+template <typename T>
+struct Registrar {
+    explicit Registrar(const std::string& type) {
+        Factory::get().reg(type, [](const std::string& n, Component* p) {
+            return static_cast<Component*>(new T(n, p));
+        });
+    }
+};
+
+#define SVTLM_REGISTER(TYPE)                                     \
+    std::string typeName() const override { return #TYPE; }      \
+    static inline svtlm::Registrar<TYPE> svtlm_reg_{#TYPE}
+\end{cppcode}
+
+The configuration store is a pair of \code{std::map}s keyed by
+\code{"<component path>.<field>"}, with \code{"*"} as a wildcard path. A
+component reads it during \code{build()} through \code{cfgInt()}, which is
+where UVM reads \code{uvm\_config\_db} too.
+
+\subsection{The hard part: blocking tasks versus callbacks}
+
+\index{coroutine}Here is the real difficulty, and it deserves to be stated
+plainly rather than designed around silently.
+
+A \SV{} driver is a \emph{blocking task}. It says ``drive these pins, then wait
+until \code{ready}, then wait one more cycle, then drop \code{valid}''. The
+program counter of that task \emph{is} the state of the protocol. Nothing else
+has to remember where the driver had got to.
+
+A C++ method is not blocking. \code{tick()} is called, it returns, and every
+piece of state that must survive until the next call has to be stored in a
+member variable. There are two ways out.
+
+\paragraph{(a) The tick model.} Every component owns an explicit state machine
+and a \code{tick()} that advances it by one clock. This is portable to any C++
+compiler, needs no library, and debugs well because the state is a named
+variable you can print. It costs you readability: the protocol is no longer a
+straight line of code.
+
+\begin{cppcode}[caption={The driver as an explicit state machine},label={lst:verilator:drv}]
+class CordicDrv : public Component {
+  public:
+    SVTLM_REGISTER(CordicDrv);
+    CordicDrv(const std::string& n, Component* p) : Component(n, p) {}
+
+    CordicVif*            vif = nullptr;
+    std::deque<CordicTxn> q;
+    unsigned              stall_pct = 0, n_driven = 0;
+
+    void build() override {
+        stall_pct = cfgInt("stall_pct", 0);
+        rng_.seed(cfgInt("seed", 2));
+    }
+    void tick() override {
+        Vcordic_rot* d = vif->dut;
+
+        // --- request channel -----------------------------------------
+        if (st_ == IDLE) {
+            if (!q.empty()) {
+                const CordicTxn& t = q.front();
+                d->req_valid_i = 1;
+                d->req_x_i     = uint16_t(t.x0);
+                d->req_y_i     = uint16_t(t.y0);
+                d->req_theta_i = uint16_t(t.theta);
+                st_ = DRIVING;
+            } else {
+                d->req_valid_i = 0;
+            }
+        } else if (d->req_ready_o) {   // handshake completes on this edge
+            q.pop_front();
+            ++n_driven;
+            d->req_valid_i = 0;
+            st_ = IDLE;
+        }
+
+        // --- response channel: random back-pressure -------------------
+        d->rsp_ready_i = (stall_pct == 0)
+                       || (int(rng_() % 100) >= int(stall_pct));
+    }
+    void report() override { info("drove %u transactions", n_driven); }
+
+  private:
+    enum State { IDLE, DRIVING } st_ = IDLE;
+    std::mt19937 rng_{2};
+};
+\end{cppcode}
+
+The monitor is written the same way and is where the analysis port lives:
+
+\begin{cppcode}[caption={The monitor publishes on the analysis port},label={lst:verilator:mon}]
+void tick() override {
+    Vcordic_rot* d = vif->dut;
+    if (!d->rst_ni) { pending_.clear(); return; }
+
+    if (d->req_valid_i && d->req_ready_o) {
+        CordicTxn t;
+        t.x0 = int16_t(d->req_x_i);
+        t.y0 = int16_t(d->req_y_i);
+        t.theta = int16_t(d->req_theta_i);
+        t.id = n_seen++;
+        pending_.push_back(t);
+    }
+    if (d->rsp_valid_o && d->rsp_ready_i) {
+        if (pending_.empty()) { info("ERROR response with no request"); return; }
+        CordicTxn t = pending_.front();
+        pending_.pop_front();
+        t.x = int16_t(d->rsp_x_o);
+        t.y = int16_t(d->rsp_y_o);
+        ap.write(t);                       // TLM broadcast
+    }
+}
+\end{cppcode}
+
+The environment does the wiring, and this is where the TLM idea earns its
+keep: the monitor knows nothing about the scoreboard or the coverage
+collector.
+
+\begin{cppcode}
+void connect() override {
+    CordicSb*  s = sb;
+    CordicCov* c = cov;
+    agt->mon->ap.connect([s](const CordicTxn& t) { s->write(t); });
+    agt->mon->ap.connect([c](const CordicTxn& t) { c->write(t); });
+}
+\end{cppcode}
+
+The clock loop is the only place that knows about both the model and the
+components. Note where \code{tickAll()} sits: after the settling
+\code{eval()} and before the rising edge, so every component sees exactly the
+pre-edge values, which is the semantics of a clocking block with
+\code{default input \#1step}.
+
+\begin{cppcode}[caption={The clock loop, in the test},label={lst:verilator:run}]
+void run(VerilatedContext& ctx, unsigned max_cycles) {
+    Vcordic_rot* d = vif.dut;
+    d->clk_i = 0; d->rst_ni = 0;
+    d->req_valid_i = 0; d->rsp_ready_i = 0;
+    d->req_x_i = d->req_y_i = d->req_theta_i = 0;
+
+    for (unsigned c = 0; c < max_cycles; ++c) {
+        d->clk_i = 0;
+        d->eval();                 // settle: pre-edge values are now valid
+        if (c == 5) d->rst_ni = 1;
+        if (c > 5) tickAll();      // every component sees this cycle
+        ctx.timeInc(5000);         // 5 ns, in 1 ps precision units
+        d->clk_i = 1;
+        d->eval();                 // the rising edge
+        ctx.timeInc(5000);
+        if (finished()) break;
+    }
+}
+\end{cppcode}
+
+\begin{gotcha}{A \code{tick()} that writes an input cannot then read its effect}
+Inside \code{tick()} you write \code{req\_valid\_i} and read
+\code{req\_ready\_o} in the same breath. The value you read was computed by the
+\code{eval()} that ran \emph{before} \code{tickAll()}, so it does not include
+your write. For a well-formed valid/ready interface that is correct and
+desirable: it is exactly what a clocking block gives you. For a combinational
+handshake where \code{ready} depends on \code{valid}, it is wrong, and you must
+either call \code{eval()} again inside the tick or split the driver into two
+phases. Know which kind of interface you have.
+\end{gotcha}
+
+\paragraph{(b) C++20 coroutines.} The blocking style can be recovered. A
+coroutine suspends at \code{co\_await} and resumes where it left off, which is
+precisely what a \SV{} task does at \code{@(posedge clk)}. Verilator itself
+uses this mechanism internally for \code{-{}-timing}, and \tool{g++} 13 on this
+machine supports it with \code{-std=c++20 -fcoroutines}. A scheduler is three
+lines:
+
+\begin{cppcode}[caption={A three-line cooperative scheduler},label={lst:verilator:coro}]
+static std::vector<std::coroutine_handle<>> g_waiting;
+
+struct AwaitClock {                    // == SystemVerilog's @(posedge clk)
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<> h) const {
+        g_waiting.push_back(h);
+    }
+    void await_resume() const noexcept {}
+};
+
+struct Task {                          // == a SystemVerilog task
+    struct promise_type {
+        Task get_return_object() noexcept { return {}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() { std::terminate(); }
+    };
+};
+
+static void resumeAll() {              // one clock edge for every process
+    std::vector<std::coroutine_handle<>> ready;
+    ready.swap(g_waiting);
+    for (auto h : ready) h.resume();
+}
+\end{cppcode}
+
+The driver then reads almost exactly like the \SV{} task it replaces:
+
+\begin{cppcode}[caption={The same driver, in blocking style},label={lst:verilator:codrv}]
+Task driver(Vcordic_rot* d) {          // == task automatic run();
+    for (;;) {
+        while (g_queue.empty()) co_await AwaitClock{};
+        const Txn& t = g_queue.front();
+        d->req_valid_i = 1;
+        d->req_x_i     = uint16_t(t.x0);
+        d->req_y_i     = uint16_t(t.y0);
+        d->req_theta_i = uint16_t(t.theta);
+        // req_ready_o for THIS cycle is already visible: wait until it is
+        // high, then let one more edge pass -- that edge is the transfer.
+        while (!d->req_ready_o) co_await AwaitClock{};
+        co_await AwaitClock{};
+        d->req_valid_i = 0;
+        g_queue.pop_front();
+    }
+}
+\end{cppcode}
+
+Starting three such processes is the C++ spelling of
+\code{fork \ldots join\_none}:
+
+\begin{cppcode}
+driver(&d);
+monitor(&d);
+sequence(n);
+for (; cyc < limit && g_checked < n; ++cyc) {
+    d.clk_i = 0; d.eval();
+    if (cyc == 5) d.rst_ni = 1;
+    if (cyc > 5) resumeAll();          // every process gets its clock edge
+    ctx.timeInc(5000);
+    d.clk_i = 1; d.eval();
+    ctx.timeInc(5000);
+}
+\end{cppcode}
+
+It compiles and it runs, and it produces the same numbers as the tick version:
+
+\begin{txtcode}
+$ verilator --cc --exe --build -j 2 -CFLAGS "-std=c++20 -fcoroutines -O2" \
+      --top-module cordic_rot -Mdir obj_coro \
+      rtl/cordic_pkg.sv rtl/cordic_rot.sv coro/main_coro.cpp -o tb_coro
+$ ./obj_coro/tb_coro +n=200
+coroutine TB: 200 checked, 0 failed, worst 2.68 LSB, 3206 cycles
+*** TEST PASSED ***
+\end{txtcode}
+
+Be honest about the cost. The forty lines above are the easy part; a real
+framework needs \code{join\_any}, \code{join\_none} with a handle you can kill,
+\code{wait} on an arbitrary condition, timeouts, and a way to propagate an
+exception out of a suspended coroutine. Lifetime is the sharp edge: a coroutine
+frame is heap-allocated and outlives the function that created it, so a
+reference captured before a \code{co\_await} may dangle after it, and the
+compiler will not tell you. Measured on the same 200\,000-transaction load, the
+coroutine version ran in 0.66\,s against 0.47\,s for the tick version -- about
+40\% slower, still an order of magnitude faster than \code{-{}-binary
+-{}-timing}.
+
+\begin{ruleofthumb}
+Write the tick model first. Reach for coroutines only when a protocol has so
+many states that the state machine has stopped being readable.
+\end{ruleofthumb}
+
+\subsection{The factory and the config store in use}
+
+The test configures before it builds, exactly as a UVM test does in
+\code{new()} or in an early phase:
+
+\begin{cppcode}
+ConfigDb& cfg = ConfigDb::get();
+cfg.setInt("*",           "n_txn",    n);
+cfg.setInt("*",           "stall_pct", stall);
+cfg.setInt("test.env.sb", "tol_lsb",  12);
+
+if (strict) Factory::get().setTypeOverride("CordicSb", "CordicSbStrict");
+
+Vcordic_rot dut{&ctx};
+CordicTest  test("test", nullptr);
+test.vif.dut = &dut;
+test.buildAll();
+test.connectAll();
+test.printTree();
+\end{cppcode}
+
+Running with default settings:
+
+\begin{txtcode}
+$ ./obj_uvm/tb_uvm +n=200 +stall=25
+[test.env.agt.seq      ] will generate 200 transactions
+--- component tree ---
+test (CordicTest)
+  env (CordicEnv)
+    agt (CordicAgent)
+      seq (CordicSeq)
+      drv (CordicDrv)
+      mon (CordicMon)
+    sb (CordicSb)
+    cov (CordicCov)
+--- run ---
+--- report ---
+[test.env.agt.drv      ] drove 200 transactions
+[test.env.sb           ] 200 checked, 0 failed, worst 2.68 LSB (tol 12)
+[test.env.cov          ] theta bins hit 4/5  [62 47 0 46 45]
+*** TEST PASSED ***
+\end{txtcode}
+
+Now the same binary with \code{+strict}, which registers a type override so
+that the factory builds a \code{CordicSbStrict} -- a subclass with a tolerance
+of 2 LSB -- wherever the environment asked for a \code{CordicSb}. Not one line
+of \code{CordicEnv} changes:
+
+\begin{txtcode}
+$ ./obj_uvm/tb_uvm +n=200 +strict
+--- component tree ---
+test (CordicTest)
+  env (CordicEnv)
+    agt (CordicAgent)
+      seq (CordicSeq)
+      drv (CordicDrv)
+      mon (CordicMon)
+    sb (CordicSbStrict)
+    cov (CordicCov)
+--- run ---
+[test.env.sb  ] MISMATCH id=33 theta=1276 got(-8109,-9602)
+                                          want(-8107.0,-9602.8)
+--- report ---
+[test.env.agt.drv      ] drove 200 transactions
+[test.env.sb           ] STRICT mode: 200 checked, 4 failed,
+                         worst 2.68 LSB (tol 2)
+*** TEST FAILED ***
+$ echo $?
+1
+\end{txtcode}
+
+That is the whole point of a factory, demonstrated in eleven lines of framework
+code. The coverage collector reports \code{theta bins hit 4/5}: the bin for
+$\theta = 0$ exactly was never hit, which is the kind of thing functional
+coverage exists to tell you.
+
+\subsection{An honest comparison}
+
+\begin{table}[htbp]
+  \centering
+  \caption{The C++ framework of this chapter against UVM.}
+  \label{tab:verilator:vsuvm}
+  \small
+  \begin{tabular}{@{}lp{4.2cm}p{5.4cm}@{}}
+    \toprule
+    \textbf{Feature} & \textbf{UVM 1.2 / IEEE 1800.2} & \textbf{This framework} \\
+    \midrule
+    Size to learn   & About 400 classes and 200 macros
+                    & 4 classes, 1 macro, 200 lines \\
+    Phasing         & 9 common phases plus 12 run-time sub-phases,
+                      with objections
+                    & 4 phases, called explicitly by the test \\
+    Concurrency     & Native blocking tasks
+                    & \code{tick()} state machines, or C++20 coroutines \\
+    TLM             & Ports, exports, imps, FIFOs, analysis
+                    & \code{AnalysisPort<T>} only \\
+    Factory         & Type and instance override, by name and by type
+                    & Type override by name \\
+    Configuration   & \code{uvm\_config\_db\#(T)}, hierarchical wildcards
+                    & Two \code{std::map}s, one wildcard \\
+    Sequences       & Sequence library, layering, arbitration, virtual
+                      sequences
+                    & A component that pushes into a queue \\
+    Constrained random & Full solver
+                    & Whatever \code{<random>} gives you \\
+    Coverage        & Covergroups, cross coverage, database merging
+                    & Counters and \code{cover property} \\
+    Register layer  & \code{uvm\_reg}, adapters, predictors, built-in tests
+                    & Nothing \\
+    Reporting       & Severity, verbosity, ID filtering, catchers
+                    & \code{printf} with the component path \\
+    Reuse across projects & Real, and the industry expects it
+                    & Only what you carry yourself \\
+    Speed           & Baseline
+                    & One to two orders of magnitude faster \\
+    Tool support    & Every commercial simulator
+                    & Any C++17 compiler \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{notebox}{When this is the right choice}
+Use a C++ environment when the reference model is already C or C++ (a DSP
+kernel, an instruction-set simulator, a codec), when the regression is long
+enough that speed dominates, when there is no licence, or when the design is
+small enough that UVM's overhead is larger than the design. Use UVM when the
+project is large, when several teams must reuse each other's agents, when a
+register model would otherwise be written by hand, or when the customer
+requires it. Do not use this framework as a substitute for learning UVM: learn
+UVM, then recognise that you can rebuild its useful 10\% in an afternoon.
+\end{notebox}
+
+\section{Coverage and Assertions}
+\label{sec:verilator:cov}
+
+\subsection{Collecting coverage}
+
+\index{coverage!line}\index{coverage!toggle}Three switches turn coverage on:
+
+\begin{itemize}
+  \item \code{-{}-coverage-line} counts how many times each basic block was
+        entered.
+  \item \code{-{}-coverage-toggle} counts 0-to-1 and 1-to-0 transitions on
+        every bit of every signal.
+  \item \code{-{}-coverage-user} counts \code{cover property} statements that
+        you wrote.
+\end{itemize}
+
+\code{-{}-coverage} is shorthand for all three. In a \code{-{}-cc} build the
+database is not written automatically: your program must ask for it, which is
+one more consequence of ``Verilator is a compiler''.
+
+\begin{cppcode}
+#if VM_COVERAGE
+    Verilated::mkdir("logs");
+    ctx.coveragep()->write("logs/coverage.dat");
+#endif
+\end{cppcode}
+
+The CORDIC has no cover points of its own, so we bind some onto it. A separate
+checker module keeps the \RTL{} clean and is the same technique you would use
+in \tool{QuestaSim}:
+
+\begin{svcode}[caption={Assertions and cover points bound onto the DUT},label={lst:verilator:chk}]
+module cordic_checker (
+  input logic clk_i, rst_ni,
+  input logic req_valid_i, req_ready_o,
+  input logic rsp_valid_o, rsp_ready_i
+);
+  // --- functional cover points (--coverage-user) ------------------------
+  c_req_accept : cover property (@(posedge clk_i) disable iff (!rst_ni)
+                                 req_valid_i && req_ready_o);
+  c_backpressure : cover property (@(posedge clk_i) disable iff (!rst_ni)
+                                   rsp_valid_o && !rsp_ready_i);
+
+  // --- assertions (--assert) --------------------------------------------
+  a_reset_quiet : assert property (@(posedge clk_i) (!rst_ni) |-> !rsp_valid_o)
+    else $error("rsp_valid_o high during reset");
+  a_no_ready_drop : assert property (@(posedge clk_i) disable iff (!rst_ni)
+                                     (rsp_valid_o && !rsp_ready_i) |=> rsp_valid_o)
+    else $error("rsp_valid_o dropped before it was accepted");
+endmodule
+
+bind cordic_rot cordic_checker u_chk (.*);
+\end{svcode}
+
+\code{bind} works, and \code{.*} works with it. Build with coverage on, run,
+and annotate:
+
+\begin{txtcode}
+$ verilator --cc --exe --build -j 2 --trace --assert \
+      --coverage-line --coverage-toggle --coverage-user \
+      --top-module cordic_rot -Mdir obj_cov \
+      rtl/cordic_pkg.sv rtl/cordic_rot.sv cov/cordic_checker.sv \
+      tb/tb_cordic.cpp -o tb_cov
+$ ./obj_cov/tb_cov +n=300
+$ verilator_coverage --annotate annotated logs/coverage.dat
+Total coverage (72/118) 61.00%
+See lines with '%00' in annotated
+\end{txtcode}
+
+\index{verilator\_coverage@\code{verilator\_coverage}}\code{verilator\_coverage
+-{}-annotate} writes a copy of every source file with a count in the left
+margin. A line prefixed \code{\%000000} was never executed:
+
+\begin{txtcode}
+        module cordic_checker (
+%000001   input logic clk_i, rst_ni,
++009611  point: comment=clk_i
+-000001  point: comment=rst_ni
+ 000600   input logic req_valid_i, req_ready_o,
++000600  point: comment=req_valid_i
++000601  point: comment=req_ready_o
+        );
+ 000300   c_req_accept : cover property (@(posedge clk_i) disable iff (!rst_ni)
++000300  point: comment=c_req_accept
+%000000   c_backpressure : cover property (@(posedge clk_i) disable iff (!rst_ni)
+-000000  point: comment=c_backpressure
+\end{txtcode}
+
+Read that carefully, because it is coverage doing its job. \code{c\_req\_accept}
+fired 300 times, once per transaction. \code{c\_backpressure} fired zero times:
+the testbench holds \code{rsp\_ready\_i} at 1 forever and has therefore never
+tested what happens when the consumer stalls. Adding four lines of random
+back-pressure to the testbench and re-running:
+
+\begin{txtcode}
+$ ./obj_cov/tb_cov +n=300 +bp
+$ verilator_coverage --annotate annotated logs/coverage.dat
+Total coverage (76/118) 64.00%
+$ grep -A1 c_backpressure annotated/cordic_checker.sv
+ 000120   c_backpressure : cover property (@(posedge clk_i) disable iff (!rst_ni)
+ 000120                                    rsp_valid_o && !rsp_ready_i);
+\end{txtcode}
+
+\begin{gotcha}{Toggle coverage on a reset signal is always 1}
+Look at the annotation above: \code{rst\_ni} shows a count of 1, and it is
+marked \code{-} rather than \code{+}. Reset toggles once per simulation. That
+is not a coverage hole and no amount of stimulus will change it. Learn to
+recognise the points that are structurally unreachable before you start chasing
+a coverage percentage, and waive them in the \file{.vlt} file.
+\end{gotcha}
+
+\subsection{Assertions}
+
+\index{assertion!concurrent}\code{-{}-assert} enables both the assertions you
+bound on and the ones the designer wrote inside the module. Without it they are
+compiled away entirely. \file{cordic\_rot.sv} contains an immediate assertion
+on the input range; here is what happens when the testbench drives
+$\theta = 30000$, which is larger than $\pi \cdot 2^{13} = 25736$:
+
+\begin{txtcode}
+$ ./obj_as/tb_as              # built with --assert
+[65000] %Error: cordic_rot.sv:227: Assertion failed in TOP.cordic_rot:
+        cordic_rot: |theta| > pi (theta = 30000)
+%Error: rtl/cordic_rot.sv:227: Verilog $stop
+Aborting...
+$ echo $?
+134
+
+$ ./obj_na/tb_na              # built without --assert
+$ echo $?
+0
+\end{txtcode}
+
+\begin{tipbox}{Always build the regression with \code{-{}-assert}}
+The cost is small and the benefit is that every assertion the designers wrote
+becomes a test. Note also that a failing assertion calls \code{\$stop}, which
+aborts the process; if you want the run to continue and count failures, use
+\code{\$error} without an enclosing \code{assert}, or catch the abort in your
+build script.
+\end{tipbox}
+
+The supported subset is the practically useful one: implication (\code{|->} and
+\code{|=>}), \code{disable iff}, \code{\$past}, \code{\$stable}, \code{\$rose},
+\code{\$fell}, \code{\$onehot} and immediate assertions inside procedural code.
+The missing piece is sequences: \code{a \#\#1 b} and \code{a \#\#[1:3] b} are
+rejected as \code{UNSUPPORTED} in 5.020, which rules out most multi-cycle
+protocol properties. Where you need one, write it as a small checker \RTL{}
+module with an explicit state machine and an immediate assertion; that also
+works in every other tool.
+
+\section{Linting as a First-Class Use}
+\label{sec:verilator:lint}
+
+\index{lint}\index{Verilator!lint}Many teams that never simulate with Verilator
+use it every day, because \code{verilator -{}-lint-only -Wall} is the best free
+static checker for \SV{} and it takes under a second on a large design.
+
+\refdesignbook argued that \VHDL{}'s value comes largely from its type
+system: \code{std\_logic\_vector} does not silently become an \code{integer},
+ranges are checked, and an unconstrained port is a compile error. \SV{} gives
+almost all of that up. Widths adapt silently, signedness is contagious in ways
+that surprise, an undeclared identifier becomes a one-bit wire, and an
+incomplete \code{case} produces a latch without comment. \emph{Lint is the
+cultural replacement for the \VHDL{} type checker.} A team that writes \SV{}
+without a lint gate in continuous integration has thrown away a safety net and
+put nothing in its place.
+
+\subsection{The warnings a VHDL designer meets first}
+
+The module in \cref{lst:verilator:sloppy} is a catalogue of first-week
+mistakes.
+
+\begin{svcode}[caption={\file{sloppy.sv}: every mistake at once},label={lst:verilator:sloppy}]
+module sloppy (
+  input  logic        clk,
+  input  logic [7:0]  a,
+  input  logic [1:0]  sel,
+  output logic [3:0]  y,
+  output logic [7:0]  q
+);
+  logic [3:0] narrow;
+  logic [9:0] wide;
+
+  assign narrow = a;          // 8 bits into 4
+  assign wide   = a;          // 8 bits into 10
+
+  always_comb begin           // incomplete case
+    case (sel)
+      2'b00: y = 4'd1;
+      2'b01: y = 4'd2;
+      2'b10: y = 4'd3;
+    endcase
+  end
+
+  always_ff @(posedge clk) begin
+    q = a;                    // blocking in a clocked process
+  end
+
+  assign z = a[0];            // implicit net
+
+  logic [3:0] loop;
+  always_comb loop = {loop[2:0], narrow[3]};
+endmodule
+\end{svcode}
+
+\begin{txtcode}
+$ verilator --lint-only -Wall --top-module sloppy sloppy.sv
+%Warning-IMPLICIT: sloppy.sv:32:10: Signal definition not found,
+                   creating implicitly: 'z'
+%Warning-WIDTHTRUNC: sloppy.sv:14:17: Operator ASSIGNW expects 4 bits on
+                     the Assign RHS, but Assign RHS's VARREF 'a'
+                     generates 8 bits.
+%Warning-WIDTHEXPAND: sloppy.sv:15:17: Operator ASSIGNW expects 10 bits on
+                      the Assign RHS, but Assign RHS's VARREF 'a'
+                      generates 8 bits.
+%Warning-ALWCOMBORDER: sloppy.sv:36:15: Always_comb variable driven after
+                       use: 'loop'
+%Warning-UNUSEDSIGNAL: sloppy.sv:10:15: Bits of signal are not used:
+                       'narrow'[2:0]
+%Warning-UNUSEDSIGNAL: sloppy.sv:11:15: Signal is not used: 'wide'
+%Warning-CASEINCOMPLETE: sloppy.sv:19:5: Case values incompletely covered
+                         (example pattern 0x3)
+%Warning-BLKSEQ: sloppy.sv:28:7: Blocking assignment '=' in sequential
+                 logic process
+                 : ... Suggest using delayed assignment '<='
+%Error: Exiting due to 10 warning(s)
+\end{txtcode}
+
+Two more appear only in slightly different code:
+
+\begin{txtcode}
+%Warning-LATCH: sloppy2.sv:4:3: Latch inferred for signal 'sloppy2.lat'
+                (not all control paths of combinational always assign
+                 a value)
+                : ... Suggest use of always_latch for intentional latches
+%Warning-UNOPTFLAT: sloppy2.sv:9:15: Signal unoptimizable: Circular
+                    combinational logic: 'sloppy2.w'
+                    Example path: sloppy2.w
+                    Example path: ASSIGNW
+                    Example path: sloppy2.w
+\end{txtcode}
+
+What each one means to someone coming from \VHDL{}:
+
+\begin{description}
+  \item[\code{WIDTHTRUNC} / \code{WIDTHEXPAND}] The assignment silently
+        changed the width. In \VHDL{} this is an error at analysis time. Treat
+        both as errors and write explicit casts:
+        \code{narrow = a[3:0];} or \code{wide = 10'(a);}.
+  \item[\code{IMPLICIT}] You used an identifier you never declared and Verilog
+        made a one-bit wire out of it. \VHDL{} has no such rule. Put
+        \code{`default\_nettype none} at the top of every file and this class
+        of typo becomes an error.
+  \item[\code{CASEINCOMPLETE}] Not every value of the selector is covered.
+        Combined with an \code{always\_comb} that does not assign a default,
+        this is a latch. In \VHDL{} the \code{others} choice is compulsory in a
+        \code{case}; \SV{} has no such requirement.
+  \item[\code{LATCH}] The inferred latch itself. \code{always\_latch} declares
+        that you meant it.
+  \item[\code{BLKSEQ}] A blocking \code{=} inside \code{always\_ff}. This is
+        the \SV{} form of the \VHDL{} variable-versus-signal confusion, and it
+        creates simulation-synthesis mismatches.
+  \item[\code{UNOPTFLAT}] Verilator found a combinational path from a vector
+        back to itself that it cannot split into independent bits. It is
+        usually a real design smell and always a performance problem, because
+        Verilator must then evaluate that region iteratively.
+  \item[\code{UNUSEDSIGNAL}] Something is declared or driven and never read.
+        Often harmless, often the fingerprint of a copy-paste error or a
+        forgotten connection.
+  \item[\code{ALWCOMBORDER}] Inside one \code{always\_comb} a variable is read
+        before it is written. The block will still settle, but the intent is
+        unclear.
+\end{description}
+
+\subsection{Waiving warnings}
+
+\index{lint\_off@\code{lint\_off}}Two mechanisms, and they have different
+politics. An inline pragma marks one place in one file:
+
+\begin{svcode}
+// verilator lint_off WIDTHTRUNC
+assign y = a;
+// verilator lint_on WIDTHTRUNC
+\end{svcode}
+
+A configuration file, conventionally with the extension \file{.vlt}, keeps the
+waivers out of the \RTL{} entirely and is passed on the command line like a
+source file:
+
+\begin{txtcode}
+// waivers.vlt -- project-wide lint waivers, kept out of the RTL.
+`verilator_config
+lint_off -rule UNUSEDSIGNAL -file "*sloppy2.sv" -match "*'a'*"
+lint_off -rule UNOPTFLAT    -file "*sloppy2.sv" -match "*'sloppy2.w'*"
+\end{txtcode}
+
+\begin{shcode}
+$ verilator --lint-only -Wall --top-module sloppy2 waivers.vlt sloppy2.sv
+%Warning-LATCH: sloppy2.sv:4:3: Latch inferred for signal 'sloppy2.lat'
+\end{shcode}
+
+Both targeted warnings are gone and the latch remains, which is what you want.
+
+\begin{tipbox}{Waive in a file, not in the source}
+Inline \code{lint\_off} is convenient and therefore dangerous: it spreads, it
+is invisible in review, and it is copied along with the code it was written
+for. Put waivers in a \file{.vlt} file with a comment saying why, so that the
+list of things your project has decided to ignore is one file that a reviewer
+can read.
+\end{tipbox}
+
+The CORDIC of \refexamplebook passes cleanly, which is the standard to hold
+yourself to:
+
+\begin{shcode}
+$ verilator --lint-only -Wall --top-module cordic_rot \
+      rtl/cordic_pkg.sv rtl/cordic_rot.sv
+$ echo $?
+0
+\end{shcode}
+
+Note that it does so partly by using two narrowly scoped pragmas in
+\file{cordic\_pkg.sv} -- \code{lint\_off UNUSEDPARAM} around constants that
+only testbenches read, and \code{lint\_off UNUSEDSIGNAL} around the deliberate
+truncation in \code{sat\_narrow}. Both are documented in a comment on the line
+above. That is the right way to use an inline pragma: narrow, explained, and
+immediately turned back on.
+
+\begin{ruleofthumb}
+Make \code{verilator -{}-lint-only -Wall} a gate in continuous integration from
+the first commit. Retrofitting lint onto a 50\,000-line design is a project;
+keeping it clean from the start is free.
+\end{ruleofthumb}
+% ===========================================================================
+\section{Where Verilator Does Not Reach}
+\label{sec:verilator:limits}
+% ===========================================================================
+
+Four things send you back to \tool{QuestaSim}, and it is worth knowing them
+before you build a flow that assumes otherwise.
+
+\textbf{\VHDL{}.} \tool{Verilator} does not read it. A mixed-language
+project --- a \VHDL{} block instantiated inside a \SV{} testbench, or the
+reverse --- needs a simulator that reads both, and that means a commercial
+one. In \tool{QuestaSim} you compile each language with its own compiler,
+\code{vcom -2008} and \code{vlog -sv}, into the same library and elaborate the
+two together; the port types that survive the boundary are the scalar and
+vector logic types, and anything cleverer needs a wrapper.
+
+\textbf{Four-state simulation.} \tool{Verilator} is two-state. A reset bug
+whose symptom is an \code{X} propagating through the design will not appear.
+\Cref{sec:verilator:twostate} says what to do about it; the honest summary is
+that you run the reset tests somewhere else.
+
+\textbf{Covergroups and the constraint solver.} Neither is implemented in
+5.020. A testbench that depends on constrained random stimulus and functional
+coverage --- which is to say, the one \refverificationbook teaches you to write ---
+runs under \tool{Verilator} with both features quietly absent.
+
+\textbf{UVM.} It needs the class library, the DPI back end and language
+features \tool{Verilator} does not have. There is no route.
+
+\begin{ruleofthumb}
+Lint and regress with \tool{Verilator} because it is fast and free; sign off
+with a four-state simulator because your silicon is not two-state.
+\end{ruleofthumb}
+
+
+\section{A Makefile for the Whole Chapter}
+\label{sec:verilator:make}
+
+Everything in this chapter is driven from one file, and every target below was
+executed to produce the output printed above.
+
+\begin{makecode}
+VERILATOR ?= verilator
+JOBS      ?= $(shell nproc)
+
+RTL     := rtl/cordic_pkg.sv rtl/cordic_rot.sv
+CHK     := cov/cordic_checker.sv
+COMMON  := --cc --exe --build -j $(JOBS) --top-module cordic_rot
+CFLAGS_O:= -CFLAGS -O2
+
+.PHONY: all first tb trace cov uvm coro svtb lint bench clean
+
+all: first tb cov uvm coro svtb lint
+
+# --- 1. the 40-line first example ------------------------------------
+first:
+	$(VERILATOR) $(COMMON) -Mdir obj_first $(RTL) tb/main_first.cpp \
+	   -o tb_first
+	./obj_first/tb_first
+
+# --- 2. the self-checking testbench ----------------------------------
+tb:
+	$(VERILATOR) $(COMMON) --trace $(CFLAGS_O) -Mdir obj_tb \
+	   $(RTL) tb/tb_cordic.cpp -o tb_cordic
+	./obj_tb/tb_cordic +n=200
+
+trace:
+	$(VERILATOR) $(COMMON) --trace-fst $(CFLAGS_O) -Mdir obj_fst \
+	   $(RTL) tb/tb_cordic.cpp -o tb_fst
+	./obj_fst/tb_fst +n=200 +trace
+
+# --- 3. coverage and assertions --------------------------------------
+cov:
+	$(VERILATOR) $(COMMON) --trace --assert \
+	   --coverage-line --coverage-toggle --coverage-user \
+	   -Mdir obj_cov $(RTL) $(CHK) tb/tb_cordic.cpp -o tb_cov
+	./obj_cov/tb_cov +n=300 +bp
+	verilator_coverage --annotate annotated logs/coverage.dat
+
+# --- 4. the UVM-shaped C++ environment -------------------------------
+uvm:
+	$(VERILATOR) $(COMMON) -CFLAGS "-O2 -I../uvmlike" -Mdir obj_uvm \
+	   $(RTL) uvmlike/main_uvmlike.cpp -o tb_uvm
+	./obj_uvm/tb_uvm +n=200 +stall=25
+
+# --- 5. the coroutine variant ----------------------------------------
+coro:
+	$(VERILATOR) $(COMMON) -CFLAGS "-std=c++20 -fcoroutines -O2" \
+	   -Mdir obj_coro $(RTL) coro/main_coro.cpp -o tb_coro
+	./obj_coro/tb_coro +n=200
+
+# --- 6. the SystemVerilog testbench under --binary --timing ----------
+svtb:
+	$(VERILATOR) --binary --timing -j $(JOBS) $(CFLAGS_O) \
+	   --top-module tb_vlt_top -Mdir obj_svtb \
+	   rtl/cordic_pkg.sv svtb/cordic_vif.sv rtl/cordic_rot.sv \
+	   svtb/tb_vlt_pkg.sv svtb/tb_vlt_top.sv -o tb_svtb
+	./obj_svtb/tb_svtb +n=200
+
+# --- 7. lint ----------------------------------------------------------
+lint:
+	$(VERILATOR) --lint-only -Wall --top-module cordic_rot $(RTL)
+	@echo "lint clean"
+
+bench:
+	./obj_tb/tb_cordic +n=200000
+
+clean:
+	rm -rf obj_* annotated logs *.vcd *.fst
+\end{makecode}
+
+\begin{tipbox}{Give every variant its own \code{-Mdir}}
+Coverage, tracing and \code{-{}-timing} all change the generated code, so a
+single \file{obj\_dir} would be rebuilt from scratch every time you switch
+targets. Separate directories cost disk and save minutes.
+\end{tipbox}
+
+\section{Checklist}
+\label{sec:verilator:checklist}
+
+\begin{itemize}
+  \item Verilator is a \emph{compiler}. The \DUT{} becomes a C++ class, the
+        testbench is a \code{main()}, and there is no interactive prompt, no
+        event queue for most signals, and no \code{\$time} unless you keep one.
+  \item \textbf{Never trust a Verilator run to catch a missing reset.} It is
+        two-state and X-optimistic. Run reset checks in a four-state simulator
+        (\tool{QuestaSim}, \tool{Icarus}), or run twice with
+        \code{+verilator+rand+reset+2} and different
+        \code{+verilator+seed+} values and require identical output.
+  \item \code{eval()} means ``settle'', not ``advance one cycle''. A clock edge
+        is you writing \code{clk\_i} and calling \code{eval()} again. Sample
+        handshake signals \emph{between} the settling \code{eval()} and the
+        edge.
+  \item \code{ctx.timeInc()} counts \emph{timeprecision} units. Under
+        \code{`timescale 1ns/1ps} a 5\,ns half period is \code{timeInc(5000)}.
+  \item Every port is unsigned in C++. Cast a signed output to \code{int16\_t}
+        or \code{int32\_t} yourself; the \SV{} sign information does not cross
+        the boundary. Widths map \code{CData}/\code{SData}/\code{IData}/
+        \code{QData}/\code{WData} at 8/16/32/64/65+ bits.
+  \item \code{-{}-trace} or \code{-{}-trace-fst} must be given at verilation
+        time as well as switched on at run time; otherwise you get a link
+        error, not a message about tracing. \code{traceEverOn(true)} comes
+        first.
+  \item In a \code{-{}-cc} build nothing writes the coverage database for you:
+        call \code{ctx.coveragep()->write("logs/coverage.dat")} before exit.
+  \item In 5.020: classes, mailboxes, semaphores, \code{fork}/\code{join*},
+        virtual interfaces, \code{bind} and DPI-C all work. Covergroups,
+        constraint solving, clocking blocks through a virtual interface,
+        \code{\#\#} sequence delays, SDF and UVM do not.
+  \item \code{randomize()} returns 1 and ignores your constraints, after one
+        \code{CONSTRAINTIGN} warning at build time. Guard the class with
+        \code{`ifdef VERILATOR} and supply a hand-written randomiser.
+  \item Never start a comment with the word ``Verilator'': it is parsed as a
+        metacomment and becomes a syntax error.
+  \item When you need UVM's structure and cannot have UVM, build the four
+        things it is actually for: a named component tree with phases, an
+        analysis port, a factory with type overrides, and a configuration
+        store. Two hundred lines of C++ is enough.
+  \item Blocking tasks do not exist in C++. Use \code{tick()} state machines
+        first; use C++20 coroutines only when the state machine has become
+        unreadable, and expect to pay about 40\% in speed and much more in
+        lifetime bugs.
+  \item Run \code{verilator -{}-lint-only -Wall} on every commit. It is the
+        cultural replacement for the \VHDL{} type checker
+        (\refdesignbook). Put \code{`default\_nettype none} at the top of
+        every file, treat \code{WIDTHTRUNC}, \code{WIDTHEXPAND},
+        \code{CASEINCOMPLETE}, \code{LATCH} and \code{BLKSEQ} as errors, and
+        keep waivers in a \file{.vlt} file rather than inline.
+  \item Verilator wins on long runs and loses on short ones: verilation of the
+        CORDIC took 0.08\,s and the C++ build 5.5\,s, so a two-second
+        regression is not where the tool pays for itself.
+  \item \textbf{Four things send you back to \tool{QuestaSim}}: \VHDL{} and
+        mixed-language elaboration, four-state semantics, covergroups and the
+        constraint solver, and UVM. \Cref{sec:verilator:limits} says what to do
+        about each.
+\end{itemize}

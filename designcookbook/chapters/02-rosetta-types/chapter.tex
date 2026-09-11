@@ -1,0 +1,2170 @@
+\chapter{The Rosetta Stone: Types and Expressions}
+\label{ch:rosetta}
+
+\chapabstract{The first half of the reference core. For every \VHDL{} type,
+literal, operator and expression rule you have used during your degree, this
+chapter gives the \SV{} form beside it, says what is identical, what is only
+superficially similar, and what has no counterpart at all. The centre of it is
+the width and signedness rules, which are the ones that silently change the
+arithmetic your design performs. The behavioural half, processes and
+statements and everything else that happens over time, is \cref{ch:rosetta2}.}
+
+A translation dictionary is useful only if it also tells you where the two
+languages disagree. Most of \VHDL{} has a direct \SV{} equivalent, and for
+those constructs a side-by-side pane is enough. A small but dangerous
+minority looks equivalent and is not: the width rules of arithmetic, the
+meaning of an unsized literal, the resolution of a multiply driven signal.
+Those get a trap box, and you should read every one of them.
+
+The dictionary is split across two chapters because it divides cleanly in two,
+and because reading four hundred mappings in one sitting is not how anybody
+uses a reference. This chapter is the \emph{static} half: how a design is
+broken into files, what a port and a parameter are, what the types are, what a
+literal means, and what happens to widths and signedness when you write an
+expression. Nothing here depends on time passing. \Cref{ch:rosetta2} is the
+half that does: processes, sequential statements, \code{generate},
+instantiation, subprograms, packages, attributes, reporting and delays. It
+also carries the complete mapping table for both halves, so if you are looking
+for the page to photocopy, it is at the end of the next chapter and not this
+one.
+
+The layout is constant. Each section opens with one or more \emph{rosetta}
+blocks, \VHDL{} on the left, \SV{} on the right. The prose after the block
+answers three questions in order: what is the same, what is different, what is
+missing. Where a construct exists in only one language the missing pane is
+filled with the closest idiom and the text says plainly that it is not a
+translation.
+
+Throughout, \VHDL{} means IEEE 1076-2008 and \SV{} means IEEE 1800-2017. Where
+a \VHDL{}-2019 feature would change the answer, the text says so and warns you
+that tool support is thin.
+
+% ===========================================================================
+\section{Design units, files and the compilation model}
+\label{sec:rosetta:units}
+% ===========================================================================
+
+\VHDL{} has a strict notion of a design unit and an equally strict analysis
+order. \SV{} inherited Verilog's file-oriented, preprocessor-driven model,
+which is looser in every respect. This is the first thing to internalise,
+because it explains a great deal of what follows.
+
+\index{design unit}\index{compilation unit}
+
+\subsection{Entity and architecture versus module}
+
+\begin{rosetta}
+\begin{rleft}
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity counter is
+  generic (W : positive := 8);
+  port (
+    clk : in  std_logic;
+    rst : in  std_logic;
+    en  : in  std_logic;
+    q   : out std_logic_vector(W-1 downto 0)
+  );
+end entity counter;
+
+architecture rtl of counter is
+  signal cnt : unsigned(W-1 downto 0);
+begin
+  process (clk) is
+  begin
+    if rising_edge(clk) then
+      if rst = '1' then
+        cnt <= (others => '0');
+      elsif en = '1' then
+        cnt <= cnt + 1;
+      end if;
+    end if;
+  end process;
+  q <= std_logic_vector(cnt);
+end architecture rtl;
+\end{rleft}
+\begin{rright}
+`default_nettype none
+
+module counter #(
+  parameter int unsigned W = 8
+) (
+  input  wire              clk,
+  input  wire              rst,
+  input  wire              en,
+  output logic [W-1:0]     q
+);
+
+  logic [W-1:0] cnt;
+
+  always_ff @(posedge clk) begin
+    if (rst)      cnt <= '0;
+    else if (en)  cnt <= cnt + 1;
+  end
+
+  assign q = cnt;
+
+endmodule
+
+`default_nettype wire
+\end{rright}
+\end{rosetta}
+
+The two files describe the same hardware, and almost every line has a
+counterpart. The differences that matter are structural.
+
+\VHDL{} splits the black box in two. The \kw{entity} is the interface, the
+\kw{architecture} is one possible implementation of it, and the pair is bound
+either implicitly (last analysed architecture wins) or explicitly by a
+\kw{configuration}. \SV{} has a single \kw{module}\index{module} that carries
+both. There is no separate interface unit to compile, no analysis order
+between them, and no default binding rule to remember.
+
+\SV{} does have a \kw{config} construct, kept from Verilog-2001, that plays
+roughly the role of a \VHDL{} configuration by selecting which library cell
+satisfies which instance. In practice nobody writes them for \RTL{}, tool
+support varies, and the same job is done with library search order on the
+command line. Treat configurations as a \VHDL{} idiom without a practical
+\SV{} equivalent.
+
+\subsection{Several architectures for one entity}
+
+The \VHDL{} habit of writing \code{rtl}, \code{behavioural} and
+\code{structural} architectures for one entity has no direct translation. \SV{}
+gives you three replacements, in decreasing order of preference.
+
+\begin{rosetta}
+\begin{rleft}
+architecture rtl of alu is
+begin
+  -- synthesisable description
+end architecture rtl;
+
+architecture behav of alu is
+begin
+  -- untimed reference model
+end architecture behav;
+
+-- selected by a configuration,
+-- or by analysis order
+\end{rleft}
+\begin{rright}
+module alu #(
+  parameter bit BEHAVIOURAL = 0
+) ( /* ports */ );
+  if (BEHAVIOURAL) begin : g_ref
+    // untimed reference model
+  end else begin : g_rtl
+    // synthesisable description
+  end
+endmodule
+
+// or: two modules, alu_rtl and
+// alu_behav, chosen by the
+// instantiating code
+\end{rright}
+\end{rosetta}
+
+The first replacement, shown above, is a parameter tested inside a
+\code{generate} region. It keeps one module name and one port list, which is
+exactly what a \VHDL{} entity gave you. The second is a preprocessor
+\chTwoTick{ifdef}, which works but hides the choice from the elaborator. The
+third, and the most common in industry, is simply two modules with different
+names and a wrapper that instantiates one of them. \SV{} has no notion of
+``the same interface, different body'', so the interface is repeated.
+
+\begin{notebox}{Why the split existed}
+The entity/architecture split is a 1980s design decision aimed at supporting
+separate compilation and technology retargeting: analyse the entity once,
+supply a gate-level architecture later. Verilog solved the same problem with
+its library and \code{config} mechanism, which nobody used, and in practice with
+file lists. The industry converged on file lists. This is a case where the
+weaker language mechanism won because the tooling around it was simpler.
+\end{notebox}
+
+\subsection{Libraries, use clauses and imports}
+
+\begin{rosetta}
+\begin{rleft}
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+library work;
+use work.cordic_pkg.all;
+use work.cordic_pkg.data_t;
+\end{rleft}
+\begin{rright}
+// no library clause needed:
+// std types are built in
+
+import cordic_pkg::*;
+import cordic_pkg::data_t;
+
+`include "cordic_defs.svh"
+\end{rright}
+\end{rosetta}
+
+\index{library!VHDL}\index{import}
+
+There is no \kw{library} clause in \SV{}. A \VHDL{} library is a named
+container of analysed design units, created by the tool
+(\code{vcom -work mylib}), and referenced by name from the source. \SV{}
+libraries exist in the \LRM{} but the everyday model is: everything you compile
+lands in one namespace, and modules are found by name.
+
+\code{use work.pkg.all} maps to \code{import pkg::*}. The two are close enough
+that the translation is mechanical, but the resolution rules differ, and
+\cref{sec:rosetta:packages} treats them properly. The essential difference:
+\code{use ... all} makes the names visible immediately, while
+\code{import pkg::*} makes them visible \emph{only on reference and only if
+nothing else already declares that name}. A wildcard import that would collide
+is not an error until you actually use the ambiguous name.
+
+The two lines that have no \VHDL{} counterpart at all are the absence of
+\kw{library} and the presence of \chTwoTick{include}. The second is a textual
+file inclusion performed by a preprocessor before the language proper sees the
+text. \VHDL{} has nothing like it, and never needed it, because a package is a
+first-class compiled unit.
+
+\subsection{The compilation unit and \code{\$unit}}
+
+In \VHDL{} every design unit belongs to a library and the analysis order is
+enforced: a package body cannot be analysed before its declaration, an
+architecture cannot be analysed before its entity. Change a package and every
+unit that used it is marked out of date. This is a genuine strength and \SV{}
+has nothing equivalent for the general case.
+
+\SV{} defines a \emph{compilation unit}\index{compilation unit}: the set of
+source files compiled together in one invocation of the tool. Declarations
+made outside any module, package or interface live in the compilation-unit
+scope, addressed as \code{\$unit}.
+
+\begin{svcode}[caption={A compilation-unit-scope declaration. Legal, and a bad idea.},label={lst:rosetta:dollarunit}]
+// file: types.sv -- outside any module or package
+typedef logic [15:0] word_t;      // lands in $unit
+localparam int unsigned NREG = 32;
+
+module regfile (input word_t d, output word_t q);
+  word_t mem [NREG];              // visible here only if compiled together
+endmodule
+\end{svcode}
+
+The trap is that ``compiled together'' is defined by the tool invocation, not by
+the language. \tool{QuestaSim} with two \code{vlog} commands gives you two
+compilation units and \code{word\_t} is invisible in the second.
+\tool{Verilator}, \tool{VCS} and \tool{Xcelium} all have their own defaults and
+their own switches. A design that relies on \code{\$unit} compiles for one
+person and not for the next.
+
+\begin{ruleofthumb}
+Put nothing in \code{\$unit}. Every type, constant and function belongs in a
+package; every macro belongs in an included header.
+\end{ruleofthumb}
+
+\subsection{The preprocessor}
+
+Verilog's preprocessor is a separate, weaker language that runs over the text
+before compilation. It is the only place in \SV{} where the backtick appears.
+
+\begin{rosetta}
+\begin{rleft}
+-- VHDL has no preprocessor.
+-- The nearest equivalents:
+
+constant DEPTH : positive := 16;
+
+-- conditional analysis, VHDL-2019
+-- (thin tool support):
+--   if TOOL_TYPE = "SIMULATION" generate
+\end{rleft}
+\begin{rright}
+`timescale 1ns/1ps
+`define DEPTH 16
+`define MAX(a,b) (((a)>(b))?(a):(b))
+
+`ifdef SYNTHESIS
+  // synthesis-only text
+`elsif FORMAL
+  // formal-only text
+`else
+  // simulation-only text
+`endif
+
+`undef DEPTH
+`include "defs.svh"
+\end{rright}
+\end{rosetta}
+
+\index{preprocessor}\index{macro!Verilog}
+
+Macros are textual, untyped and unscoped. \chTwoTick{DEPTH} is not a constant:
+it is the characters \code{16} pasted in. A macro defined in one file is
+visible in every file compiled after it in the same compilation unit, which
+means macro definitions leak across your whole design in file order. Prefer a
+package \code{localparam} for every value, and reserve macros for the two jobs
+they alone can do: conditional inclusion of text, and generating repetitive
+declarations that the language cannot parameterise.
+
+\chTwoTick{timescale} deserves its own trap and gets one in
+\cref{sec:rosetta:time}.
+
+\begin{tipbox}{Always start an RTL file with \chTwoTick{default\_nettype none}}
+Verilog creates a one-bit wire for any undeclared identifier used in a port
+connection or on the right of a continuous assignment. A misspelt signal name
+therefore compiles cleanly and produces a silently disconnected net. Putting
+\chTwoTick{default\_nettype none} at the top of every file turns that into an
+error. Restore it with \chTwoTick{default\_nettype wire} at the bottom of the
+file so that you do not break code compiled after yours.
+\end{tipbox}
+
+\begin{gotcha}{Implicit nets: the typo that compiles}
+\VHDL{} rejects an undeclared signal. Verilog invents one.
+\begin{svcode}
+module top (input wire a, b, output logic y);
+  wire and_out;
+  assign and_out = a & b;
+  assign y       = and_ou;    // typo. Compiles. y is z forever.
+endmodule
+\end{svcode}
+The name \code{and\_ou} is undeclared, so Verilog creates a new one-bit net that
+nothing drives. Simulation shows \code{z}, synthesis shows a constant or an
+optimised-away output, and there is no message. \chTwoTick{default\_nettype none}
+is the only reliable defence, and it is not the default because thirty years of
+existing code depends on the old behaviour.
+\end{gotcha}
+
+% ===========================================================================
+\section{Ports}
+\label{sec:rosetta:ports}
+% ===========================================================================
+
+\begin{rosetta}
+\begin{rleft}
+entity fifo is
+  port (
+    clk   : in  std_logic;
+    rst_n : in  std_logic;
+    wr_en : in  std_logic;
+    din   : in  std_logic_vector(7 downto 0);
+    rd_en : in  std_logic;
+    dout  : out std_logic_vector(7 downto 0);
+    full  : out std_logic;
+    empty : buffer std_logic;
+    sda   : inout  std_logic
+  );
+end entity fifo;
+\end{rleft}
+\begin{rright}
+module fifo (
+  input  wire        clk,
+  input  wire        rst_n,
+  input  wire        wr_en,
+  input  wire  [7:0] din,
+  input  wire        rd_en,
+  output logic [7:0] dout,
+  output logic       full,
+  output logic       empty,
+  inout  wire        sda
+);
+endmodule
+\end{rright}
+\end{rosetta}
+
+\index{port!direction}
+
+\subsection{Modes and directions}
+
+\cref{tab:rosetta:portmodes} gives the mapping. Of the four modes you will
+actually meet, three translate directly; the fifth entry in the table,
+\code{linkage}, is obsolete in \VHDL{} as well.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Port modes.}
+  \label{tab:rosetta:portmodes}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \VHDL{} mode & \SV{} direction & Notes \\
+    \midrule
+    \code{in}     & \code{input}  & Read only in both. \\
+    \code{out}    & \code{output} & Readable inside the module in \SV{}. \\
+    \code{inout}  & \code{inout}  & Must be a net type in \SV{}. \\
+    \code{buffer} & \code{output} & No equivalent needed; \code{output} already reads back. \\
+    \code{linkage}& ---           & Obsolete in \VHDL{} too. Ignore. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The interesting entry is \code{buffer}. Before \VHDL{}-2008 an \code{out} port
+could not be read inside the architecture, so you either declared an internal
+signal and assigned it to the port, or used mode \code{buffer} and accepted its
+restrictions on how the port could be connected. \VHDL{}-2008 removed the
+restriction: an \code{out} port is now readable. \SV{} never had the
+restriction. An \code{output logic} is an ordinary variable that happens to be
+visible outside, and you read it as freely as any internal signal:
+
+\begin{svcode}[caption={Reading an output port is normal in \SV{}.},label={lst:rosetta:readout}]
+module gray_counter (input wire clk, output logic [3:0] cnt);
+  always_ff @(posedge clk)
+    cnt <= cnt + 1;            // cnt is read and written; no helper signal
+endmodule
+\end{svcode}
+
+The habit of declaring \code{signal cnt\_int} and writing
+\code{cnt <= cnt\_int} at the end of the architecture is a pre-2008 \VHDL{}
+reflex. Do not carry it into \SV{}.
+
+\subsection{Port types: \kw{wire} or \kw{logic}}
+
+A \VHDL{} port has a type and nothing else. A \SV{} port has a direction, a
+\emph{data type}, and separately a \emph{net or variable kind}. The default,
+if you write nothing, is \kw{wire}, which is a four-state net type resolved
+across all its drivers.
+
+The convention used throughout this book, and the one you should adopt, is:
+
+\begin{itemize}
+  \item \code{input wire} for inputs. An input is always driven from outside,
+        so a net is correct, and it also documents that the module does not
+        drive it.
+  \item \code{output logic} for outputs. A variable can be assigned from an
+        \code{always} block or from a continuous assignment, which covers every
+        \RTL{} case.
+  \item \code{inout wire} for true bidirectional pads. A variable cannot be
+        used, because more than one driver is the whole point.
+\end{itemize}
+
+Writing \code{output wire} is legal and forces you to drive the port with a
+continuous \code{assign}; writing \code{input logic} is legal and mostly
+harmless. Consistency matters more than the choice, but \code{output logic} is
+the one that prevents the most mistakes.
+
+\subsection{Default values on ports}
+
+\begin{rosetta}
+\begin{rleft}
+entity dsp is
+  port (
+    clk  : in std_logic;
+    -- default used if the port is
+    -- left unconnected at the
+    -- instantiation:
+    ce   : in std_logic := '1';
+    mode : in std_logic_vector(1 downto 0)
+            := "00"
+  );
+end entity dsp;
+\end{rleft}
+\begin{rright}
+module dsp (
+  input wire       clk,
+  input wire       ce,
+  input wire [1:0] mode
+);
+  // SystemVerilog has no default
+  // port values. An unconnected
+  // input is high impedance, and
+  // reads as x through any logic.
+endmodule
+\end{rright}
+\end{rosetta}
+
+This is a real loss. \VHDL{} lets you add an optional port to an existing
+entity and leave every existing instantiation untouched. \SV{} does not: an
+unconnected input port is undriven, and \code{z} propagating into combinational
+logic gives \code{x}. The two available workarounds are a parameter instead of
+a port, when the value is elaboration-time constant, or an explicit tie-off at
+every instantiation site.
+
+\begin{gotcha}{An unconnected input is not zero}
+Leaving an input off a \SV{} instantiation is legal and silent. The port is
+\code{z}. It does not default to \code{0}, it does not default to the last
+value, and most simulators will not warn you. \tool{Verilator} does warn
+(\code{PINMISSING}) and this is one of the reasons to run it over your code even
+if you simulate elsewhere. Connect every port, every time.
+\end{gotcha}
+
+\subsection{ANSI and non-ANSI port lists}
+
+You will meet legacy code that declares ports twice. Recognise it, and never
+write it.
+
+\begin{rosetta}
+\begin{rleft}
+-- VHDL has only one form.
+entity adder is
+  port (
+    a, b : in  std_logic_vector(7 downto 0);
+    s    : out std_logic_vector(8 downto 0)
+  );
+end entity adder;
+\end{rleft}
+\begin{rright}
+// non-ANSI (Verilog-1995). Legacy.
+module adder (a, b, s);
+  input  [7:0] a;
+  input  [7:0] b;
+  output [8:0] s;
+  reg    [8:0] s;
+  // ...
+endmodule
+\end{rright}
+\end{rosetta}
+
+The non-ANSI form names the ports in the header and gives their direction, size
+and kind in separate declarations in the body. It is verbose, it lets the two
+halves disagree, and it makes parameterised widths awkward. The ANSI form,
+introduced in Verilog-2001 and used everywhere in this book, puts everything in
+the header. Use it exclusively.
+
+% ===========================================================================
+\section{Generics and parameters}
+\label{sec:rosetta:params}
+% ===========================================================================
+
+\begin{rosetta}
+\begin{rleft}
+entity fifo is
+  generic (
+    WIDTH : positive := 8;
+    DEPTH : positive := 16;
+    NAME  : string   := "fifo"
+  );
+  port (...);
+end entity fifo;
+
+architecture rtl of fifo is
+  constant ADDR_W : natural :=
+    integer(ceil(log2(real(DEPTH))));
+  type mem_t is array (0 to DEPTH-1) of
+    std_logic_vector(WIDTH-1 downto 0);
+  signal mem : mem_t;
+begin
+end architecture rtl;
+\end{rleft}
+\begin{rright}
+module fifo #(
+  parameter int unsigned WIDTH = 8,
+  parameter int unsigned DEPTH = 16,
+  parameter string       NAME  = "fifo"
+) (...);
+
+  localparam int unsigned ADDR_W =
+    $clog2(DEPTH);
+
+  logic [WIDTH-1:0] mem [DEPTH];
+
+endmodule
+\end{rright}
+\end{rosetta}
+
+\index{parameter}\index{localparam}\index{generic}
+
+\subsection{The mapping}
+
+A \VHDL{} \kw{generic} is an elaboration-time constant supplied by the
+instantiating code. So is a \SV{} \kw{parameter}. A \VHDL{} \kw{constant}
+declared in the architecture is computed from the generics and cannot be
+overridden. So is a \SV{} \kw{localparam}. The correspondence is exact, and it
+is worth stating the rule as a discipline:
+
+\begin{ruleofthumb}
+\kw{parameter} for anything the instantiator may set, \kw{localparam} for
+anything derived from it. Never leave a derived value as a \kw{parameter}: it
+can then be overridden inconsistently with the value it was derived from.
+\end{ruleofthumb}
+
+\subsection{Types on parameters}
+
+A \VHDL{} generic is always typed. A Verilog parameter historically was not:
+its type came from the type of its default value, which was usually an
+untyped integer. \SV{} allows and encourages an explicit type, and you should
+always write one.
+
+\begin{svcode}[caption={Typed and untyped parameters.},label={lst:rosetta:paramtypes}]
+parameter                WIDTH_A = 8;      // type taken from 8: 32-bit signed int
+parameter int unsigned   WIDTH_B = 8;      // explicit, checked at override
+parameter logic [7:0]    INIT    = 8'hA5;  // explicit vector
+parameter real           FREQ_HZ = 100.0e6;
+parameter string         NAME    = "u_fifo";
+parameter type           payload_t = logic [31:0];   // a type parameter
+\end{svcode}
+
+The last line has no \VHDL{}-2008 equivalent in common use. \SV{} lets a
+parameter be a \emph{type}, so a module can be generic over the type of its
+payload:
+
+\begin{rosetta}
+\begin{rleft}
+-- VHDL-2008 generic types.
+-- Legal, but tool support is thin
+-- and few designers use them.
+entity reg_stage is
+  generic (type payload_t);
+  port (d : in  payload_t;
+        q : out payload_t);
+end entity reg_stage;
+\end{rleft}
+\begin{rright}
+module reg_stage #(
+  parameter type payload_t = logic
+) (
+  input  wire       clk,
+  input  payload_t  d,
+  output payload_t  q
+);
+  always_ff @(posedge clk) q <= d;
+endmodule
+\end{rright}
+\end{rosetta}
+
+\VHDL{}-2008 does have generic types, and generic packages and generic
+subprograms with them. Support in the mainstream simulators is partial and in
+the synthesis tools it is worse, so most \VHDL{} designers have never used
+them. In \SV{} a type parameter is ordinary, well supported, and the standard
+way to write a reusable pipeline register, FIFO or arbiter.
+
+\subsection{Overriding at instantiation}
+
+\begin{rosetta}
+\begin{rleft}
+u_fifo : entity work.fifo
+  generic map (
+    WIDTH => 16,
+    DEPTH => 32
+  )
+  port map (
+    clk => clk,
+    ...
+  );
+
+-- positional generic map, legal
+-- but discouraged:
+u_bad : entity work.fifo
+  generic map (16, 32)
+  port map (...);
+\end{rleft}
+\begin{rright}
+fifo #(
+  .WIDTH (16),
+  .DEPTH (32)
+) u_fifo (
+  .clk (clk),
+  ...
+);
+
+// positional, legal but
+// discouraged:
+fifo #(16, 32) u_bad (...);
+
+// defparam: obsolete, never use
+// defparam u_fifo.WIDTH = 16;
+\end{rright}
+\end{rosetta}
+
+Named association works in both languages and is the only form you should
+write. Note the position of the instance name: \VHDL{} puts the label first,
+\SV{} puts it after the parameter list and before the port list. This trips up
+every \VHDL{} designer for about a week.
+
+\code{defparam}\index{defparam} is a Verilog-1995 mechanism for reaching into a
+hierarchy and changing a parameter of an already-instantiated module from
+outside. It is deprecated in IEEE 1800, it defeats separate elaboration, and
+several tools reject it. There is no \VHDL{} equivalent because \VHDL{} never
+made the mistake. Never write it.
+
+\begin{notebox}{Parameters that must not be overridden}
+A \VHDL{} generic can be constrained by its subtype: \code{generic (N : positive)}
+rejects zero and negative values at elaboration. \SV{} has no subtype
+constraints, so \code{parameter int unsigned N = 8} will happily accept
+\code{-1} reinterpreted as a very large unsigned number. Guard it yourself with
+an elaboration-time assertion:
+\begin{svcode}
+if (N < 1 || N > 64) $error("N out of range: %0d", N);
+\end{svcode}
+placed in a \code{generate} region, or with the \code{\$fatal} form inside an
+\code{initial} block. The first is checked at elaboration and is the better
+choice.
+\end{notebox}
+
+% ===========================================================================
+\section{Data types}
+\label{sec:rosetta:types}
+% ===========================================================================
+
+This is the section where the two languages diverge most, and where a careless
+translation costs you a week of debugging. \VHDL{} is strongly typed: the type
+system is the main tool the language gives you for catching mistakes. \SV{} is
+weakly typed by inheritance from Verilog, which had exactly one type, the bit
+vector, and grew everything else on top of it. Almost every expression that
+\VHDL{} would reject, \SV{} accepts by converting something silently.
+
+\subsection{The four-state and nine-state logic types}
+
+\begin{rosetta}
+\begin{rleft}
+-- from ieee.std_logic_1164
+signal a : std_ulogic;   -- unresolved
+signal b : std_logic;    -- resolved
+
+-- the nine values:
+--  'U' uninitialised
+--  'X' forcing unknown
+--  '0' forcing zero
+--  '1' forcing one
+--  'Z' high impedance
+--  'W' weak unknown
+--  'L' weak zero
+--  'H' weak one
+--  '-' don't care
+\end{rleft}
+\begin{rright}
+logic a;   // 4-state variable
+wire  b;   // 4-state net, resolved
+bit   c;   // 2-state, 0 or 1 only
+reg   d;   // same type as logic
+
+// the four values:
+//  0
+//  1
+//  x  unknown
+//  z  high impedance
+
+// no 'U', no 'W'/'L'/'H',
+// no '-'
+\end{rright}
+\end{rosetta}
+
+\index{logic type}\index{std\_logic}\index{four-state}
+
+Take the value systems first. \code{std\_logic} has nine values because it was
+designed to model both drive strength and the difference between ``never
+assigned'' and ``assigned a conflicting value''. \SV{} has four, because Verilog
+modelled strength separately, through net strengths, which nobody uses in
+\RTL{}. The mapping is:
+
+\begin{table}[htbp]
+  \centering
+  \caption{Value systems.}
+  \label{tab:rosetta:values}
+  \small
+  \begin{tabular}{@{}ll>{\raggedright\arraybackslash}p{0.60\linewidth}@{}}
+    \toprule
+    \code{std\_logic} & \SV{} & Comment \\
+    \midrule
+    \code{'U'} & --- & Reset value of a \SV{} four-state variable is \code{x}, not a separate value. \\
+    \code{'X'} & \code{x} & Direct equivalent. \\
+    \code{'0'}, \code{'1'} & \code{0}, \code{1} & Direct equivalent. \\
+    \code{'Z'} & \code{z} & Direct equivalent. \\
+    \code{'W'}, \code{'L'}, \code{'H'} & --- & Drive strengths; \SV{} keeps these in the (unused) strength system. \\
+    \code{'-'} & --- & No value. Don't-care is expressed by \code{casez}/\code{case inside}, not by a value. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The loss of \code{'U'} matters more than it looks. In \VHDL{} an unassigned
+signal starts at \code{'U'} and any logic that touches it produces \code{'U'},
+so a missing reset shows up immediately as a distinct colour in the waveform.
+In \SV{} an unassigned four-state variable starts at \code{x}, which is the
+same value a genuine conflict produces. You lose the ability to distinguish
+``never driven'' from ``driven to an unknown''. Two-state types (\kw{bit},
+\kw{int}) are worse still: they start at \code{0}, so a missing reset simply
+looks like a working reset.
+
+\begin{gotcha}{Two-state types hide missing resets}
+\begin{svcode}
+bit   [7:0] count_a;    // starts at 0
+logic [7:0] count_b;    // starts at x
+always_ff @(posedge clk) begin
+  count_a <= count_a + 1;   // no reset. Simulates perfectly from 0.
+  count_b <= count_b + 1;   // no reset. x forever. Bug visible.
+end
+\end{svcode}
+Silicon does not start at zero. Use four-state types (\kw{logic}) for
+everything in the \RTL{}, and reserve \kw{bit}, \kw{int} and friends for
+testbench bookkeeping where a two-state value is what you actually mean. The
+speed advantage of two-state simulation is real but it is not yours to take at
+the \RTL{} level.
+\end{gotcha}
+
+\subsection{Resolution and multiple drivers}
+
+\index{resolution function}\index{multiple drivers}
+
+\code{std\_logic} is a \emph{resolved subtype} of \code{std\_ulogic}. The
+resolution is done by an ordinary \VHDL{} function, \code{resolved}, written in
+\code{std\_logic\_1164} and visible in the source. You can write your own
+resolution function for your own type. \code{std\_ulogic} is unresolved, and
+two drivers on a \code{std\_ulogic} signal are an elaboration error.
+
+\SV{} moves the choice into the type kind rather than the type.
+
+\begin{rosetta}
+\begin{rleft}
+-- unresolved: two drivers = error
+signal s : std_ulogic;
+
+-- resolved: two drivers merge
+-- through function `resolved'
+signal r : std_logic;
+
+-- your own resolution:
+function my_res (v : my_vec)
+  return my_type;
+subtype my_res_t is
+  my_res my_type;
+\end{rleft}
+\begin{rright}
+// variable: one driver only
+logic s;
+
+// net: drivers merge through the
+// built-in wire resolution table
+wire r;
+
+// user-defined resolution:
+//   nettype with a resolution
+//   function -- exists, but is
+//   not supported for synthesis
+\end{rright}
+\end{rosetta}
+
+A \kw{logic} is a variable. It may be written by exactly one continuous
+assignment, or by procedural assignments from one \code{always} block, and any
+second source is an elaboration error in a conforming tool. A \kw{wire} is a
+net. Two drivers on a \kw{wire} are legal and are resolved by the built-in wire
+resolution: \code{0} against \code{1} gives \code{x}, anything against
+\code{z} gives the anything. That table is fixed by the \LRM{} and you cannot
+change it.
+
+\SV{}-2012 added user-defined nettypes (\code{nettype real\_net\_t with sum;}),
+which is the closest thing to a \VHDL{} resolution function. It is intended for
+analogue and mixed-signal modelling, it has no synthesis meaning, and you will
+not need it.
+
+\begin{ruleofthumb}
+\kw{logic} unless you need multiple drivers. \kw{wire} only for a real
+tri-state bus or for module inputs.
+\end{ruleofthumb}
+
+\subsection{Vectors, ranges and direction}
+
+\begin{rosetta}
+\begin{rleft}
+signal a : std_logic_vector(7 downto 0);
+signal b : std_logic_vector(0 to 7);
+signal u : unsigned(15 downto 0);
+signal s : signed(15 downto 0);
+
+-- attributes
+a'range          -- 7 downto 0
+a'length         -- 8
+a'high           -- 7
+a'low            -- 0
+a'left           -- 7
+a'right          -- 0
+a'ascending      -- false
+a'reverse_range  -- 0 to 7
+\end{rleft}
+\begin{rright}
+logic        [7:0] a;
+logic        [0:7] b;
+logic       [15:0] u;   // unsigned
+logic signed[15:0] s;
+
+// system functions
+$bits(a)     // 8
+$size(a)     // 8
+$high(a)     // 7
+$low(a)      // 0
+$left(a)     // 7
+$right(a)    // 0
+$increment(a)// 1 (i.e. [7:0])
+// no $range, no reverse_range
+\end{rright}
+\end{rosetta}
+
+\index{downto}\index{vector range}
+
+Both languages let you write the range in either direction. Both make the
+descending form the sane choice for a number, because bit $n$ then has weight
+$2^n$. The difference is one of convention strength: in \VHDL{} you meet
+\code{0 to N-1} vectors regularly, often in bus standards translated from a
+document; in \SV{} an ascending packed range is so rare that many engineers
+have never seen one, and some tools handle it poorly.
+
+\begin{ruleofthumb}
+Write \code{[N-1:0]} for every packed vector. If you inherit \code{[0:N-1]}
+code, convert it before you extend it.
+\end{ruleofthumb}
+
+The attribute-to-system-function mapping is nearly one to one, with two
+exceptions. \code{'range} has no \SV{} equivalent, because \SV{} has no range
+objects; a \VHDL{} \code{for i in a'range loop} becomes
+\code{for (int i = 0; i < \$size(a); i++)} or, for unpacked arrays,
+\code{foreach (a[i])}. \code{'reverse\_range} has no equivalent either. In the
+other direction \code{\$bits} is more general than \code{'length}: it returns
+the total number of bits of \emph{any} type, including a packed struct or an
+enumeration, which \VHDL{} can only do by hand.
+
+\subsection{The scalar types}
+
+\cref{tab:rosetta:scalars} is the table to memorise. Note in particular that
+\SV{} has both \kw{int} and \kw{integer}, that they differ, and that the one
+whose name matches \VHDL{}'s is the one you will almost never use.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Scalar types. ``4-state'' means the type can hold \code{x} and
+           \code{z}.}
+  \label{tab:rosetta:scalars}
+  \small
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    \VHDL{} & \SV{} & Width and sign & States \\
+    \midrule
+    \code{bit}            & \code{bit}       & 1, unsigned  & 2 \\
+    \code{std\_ulogic}    & \code{logic}     & 1, unsigned  & 4 \\
+    \code{std\_logic}     & \code{wire}      & 1, unsigned  & 4, resolved \\
+    \code{boolean}        & ---              & use \code{bit} or \code{logic}; any non-zero is true & --- \\
+    ---                   & \code{byte}      & 8, signed    & 2 \\
+    ---                   & \code{shortint}  & 16, signed   & 2 \\
+    \code{integer}        & \code{int}       & 32, signed   & 2 \\
+    ---                   & \code{integer}   & 32, signed   & 4 \\
+    ---                   & \code{longint}   & 64, signed   & 2 \\
+    \code{natural}        & ---              & \code{int unsigned} is close but unconstrained & 2 \\
+    \code{positive}       & ---              & no equivalent & --- \\
+    \code{real}           & \code{real}      & 64-bit IEEE 754 & --- \\
+    ---                   & \code{shortreal} & 32-bit IEEE 754 & --- \\
+    \code{time}           & \code{time}      & 64, unsigned; see \cref{sec:rosetta:time} & 4 \\
+    \code{character}      & \code{byte}      & 8, signed    & 2 \\
+    \code{string}         & \code{string}    & dynamic in \SV{}, fixed length in \VHDL{} & --- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Four entries deserve comment.
+
+\textbf{\code{boolean}.} \VHDL{} has a distinct boolean type, and a condition
+must be of that type: \code{if a = '1' then} is required because \code{a}
+itself is not a boolean. \SV{} has no boolean type. A condition is any
+expression; it is true if it is non-zero and, in a four-state type, known.
+\code{if (a)} is therefore idiomatic and correct, and \code{if (a == 1'b1)} is
+merely redundant. Where \VHDL{} forces you to be explicit, \SV{} does not, and
+this is the single most common cosmetic change in a translated file.
+
+\textbf{\code{int} versus \code{integer}.} \kw{int} is 32-bit signed two-state.
+\kw{integer} is 32-bit signed four-state and exists only for Verilog
+compatibility. \VHDL{}'s \code{integer} maps to \SV{}'s \kw{int}, not to
+\SV{}'s \kw{integer}. Use \kw{int} for loop counters and for parameters. If you
+need a loop variable that can hold \code{x}, you have a design problem, not a
+type problem.
+
+\textbf{\code{natural} and \code{positive}.} These are \VHDL{} subtypes with
+range constraints, checked at run time. \SV{} has \code{int unsigned}, which
+constrains the interpretation but not the range: nothing stops you assigning
+\code{-1} and reading back \code{4294967295}. See the trap below.
+
+\textbf{\code{string}.} A \VHDL{} string is a constrained array of
+\code{character} and its length is part of its subtype, which is why
+concatenating strings of different lengths is such a nuisance. A \SV{}
+\kw{string} is a dynamically sized built-in type with methods
+(\code{.len()}, \code{.substr()}, \code{.toupper()}) and ordinary \code{==}
+comparison. This is one of the few places where \SV{} is unambiguously more
+pleasant.
+
+\begin{gotcha}{There are no range constraints and no run-time checks}
+\begin{rosetta}
+\begin{rleft}
+subtype small_t is
+  natural range 0 to 15;
+signal s : small_t;
+
+-- assigning 16 is a run-time
+-- error: "value 16 out of
+-- range 0 to 15"
+s <= 16;
+\end{rleft}
+\begin{rright}
+// no subtype constraints exist.
+typedef int unsigned small_t;
+small_t s;
+
+// this is simply legal:
+s = 16;
+s = -1;      // reads as
+             // 4294967295
+\end{rright}
+\end{rosetta}
+Every \VHDL{} run-time range check you rely on disappears. A state variable
+declared as \code{natural range 0 to 3} becomes \code{logic [1:0]}, which
+wraps instead of failing, or \code{int}, which silently holds anything. The
+replacement is explicit: an \code{assert} in the \RTL{}, an
+\code{enum} for state variables, or an assertion in the testbench. Do not
+assume the tool will tell you.
+\end{gotcha}
+
+\subsection{numeric\_std and arithmetic types}
+
+\index{numeric\_std}\index{signed}\index{unsigned}
+
+\begin{rosetta}
+\begin{rleft}
+use ieee.numeric_std.all;
+
+signal u  : unsigned(7 downto 0);
+signal s  : signed(7 downto 0);
+signal v  : std_logic_vector(7 downto 0);
+signal i  : integer;
+
+u <= unsigned(v);
+v <= std_logic_vector(u);
+i <= to_integer(u);
+u <= to_unsigned(i, 8);
+s <= to_signed(i, 8);
+u <= resize(u, 8);
+u <= shift_left(u, 2);
+s <= shift_right(s, 2);  -- arithmetic
+u <= rotate_left(u, 3);
+\end{rleft}
+\begin{rright}
+logic        [7:0] u;
+logic signed [7:0] s;
+logic        [7:0] v;
+int                i;
+
+assign u = v;         // no cast needed
+assign v = u;         // no cast needed
+assign i = u;         // zero-extends
+assign u = i;         // truncates
+assign s = i;         // truncates
+// resize: implicit everywhere
+assign u = u << 2;
+assign s = s >>> 2;   // arithmetic
+assign u = {u[4:0], u[7:5]}; // rotate
+\end{rright}
+\end{rosetta}
+
+Look at the right-hand pane and count the conversion functions: there are none.
+This is the central practical difference. In \VHDL{}, \code{unsigned},
+\code{signed} and \code{std\_logic\_vector} are three distinct array types with
+the same element type, and the type marks (\code{unsigned(v)}) are what let you
+move between them. Every conversion is written down, and every one is checked.
+In \SV{}, signedness is a property of the vector, not a separate type, so
+\code{logic [7:0]} and \code{logic signed [7:0]} interoperate freely and the
+compiler applies whatever conversion makes the expression legal.
+
+The individual mappings:
+
+\begin{itemize}
+  \item \code{unsigned(v)} and \code{std\_logic\_vector(u)}: no operation at
+        all in \SV{}. The bits are the bits.
+  \item \code{to\_integer(u)}: implicit. Assigning a vector to an \kw{int}
+        zero-extends if the vector is unsigned and sign-extends if it is
+        signed. \code{\$signed(v)} and \code{\$unsigned(v)} force the
+        interpretation where you need it.
+  \item \code{to\_unsigned(i, N)} and \code{to\_signed(i, N)}: implicit
+        truncation to the width of the target. There is no width argument
+        because the target supplies it. If the value does not fit, the extra
+        bits are dropped without a warning.
+  \item \code{resize(u, N)}: implicit. This is convenient and it is the source
+        of half the bugs in \cref{sec:rosetta:widths}.
+  \item \code{shift\_left}/\code{shift\_right}: \code{<<}, \code{>>} and
+        \code{>>>}. Note carefully that \code{>>>} is arithmetic only if its
+        left operand is signed. On an unsigned operand it is identical to
+        \code{>>}.
+  \item \code{rotate\_left}/\code{rotate\_right}: no equivalent. Write the
+        concatenation, or a small function.
+\end{itemize}
+
+\begin{tipbox}{A rotate function}
+Since \SV{} has no rotate operator, put one in your package once:
+\begin{svcode}
+function automatic logic [31:0] rotl32 (logic [31:0] x, int unsigned n);
+  return (x << n) | (x >> (32 - n));   // n in 1..31
+endfunction
+\end{svcode}
+Note \kw{automatic}: see \cref{sec:rosetta:subprograms} for why this matters.
+For a parameterised width, make the function part of a parameterised package or
+give it a \code{parameter type}.
+\end{tipbox}
+
+\begin{notebox}{std\_logic\_arith and std\_logic\_unsigned}
+You may have inherited code that writes \code{use ieee.std\_logic\_unsigned.all}
+and then adds \code{std\_logic\_vector} values directly. Those packages are
+Synopsys creations that were placed in the \code{ieee} library without ever
+being IEEE standards. They overload the arithmetic operators on
+\code{std\_logic\_vector} itself, which means the same vector cannot be treated
+as signed in one expression and unsigned in another, and mixing them with
+\code{numeric\_std} produces ambiguous overloads. Do not use them in new
+\VHDL{}. There is an irony here worth noting: what those packages did to
+\VHDL{}, by making a raw bit vector arithmetic and implicitly unsigned, is
+exactly what \SV{} does by design. When you move to \SV{} you are permanently
+in \code{std\_logic\_unsigned} mode, which is precisely why
+\cref{sec:rosetta:widths} needs so much space.
+\end{notebox}
+
+% ===========================================================================
+\section{Literals and aggregates}
+\label{sec:rosetta:literals}
+% ===========================================================================
+
+\begin{rosetta}
+\begin{rleft}
+'0'            -- bit literal
+'1'
+'Z'
+'X'
+"1010"         -- 4-bit string literal
+x"A5"          -- 8-bit hex
+o"17"          -- 6-bit octal
+b"1010_1010"   -- with separators
+16#FF#         -- integer 255
+2#1010#        -- integer 10
+1_000_000      -- integer
+1.5e-3         -- real
+10 ns          -- physical
+'a'            -- character
+"hello"        -- string
+\end{rleft}
+\begin{rright}
+1'b0           // sized bit literal
+1'b1
+1'bz
+1'bx
+4'b1010        // 4-bit binary
+8'hA5          // 8-bit hex
+6'o17          // 6-bit octal
+8'b1010_1010   // with separators
+255            // 32-bit int
+10             // 32-bit int
+1_000_000      // separators work
+1.5e-3         // real
+10ns           // time literal
+"a"            // 8-bit value
+"hello"        // string
+\end{rright}
+\end{rosetta}
+
+\index{literal!sized}\index{literal!unsized}
+
+\subsection{Sized and unsized}
+
+A \VHDL{} literal is typed and, if it is an array literal, its length comes
+from the context. \code{"1010"} is four bits because it has four characters;
+\code{x"A5"} is eight bits because a hex digit is four bits. There is no way to
+write a bit-vector literal whose length adapts.
+
+A \SV{} literal has three parts: an optional width, a base, and the digits.
+\code{8'hA5} is eight bits wide. \code{'hA5} without the width is unsized: it
+takes its width from the context, and where there is no context it is at least
+32 bits. A bare number such as \code{255} is an unsized decimal, which means a
+32-bit signed \kw{int}.
+
+Then there are the special unsized fill literals, added in \SV{}-2005, which
+are the most useful literals in the language:
+
+\begin{svcode}[caption={The fill literals.},label={lst:rosetta:fill}]
+logic [31:0] a;
+a = '0;    // 32 zeros   -- replaces (others => '0')
+a = '1;    // 32 ones    -- replaces (others => '1')
+a = 'x;    // 32 x
+a = 'z;    // 32 z
+a = 1'b1;  // 32'h0000_0001  -- NOT all ones
+\end{svcode}
+
+\begin{gotcha}{\code{'1} and \code{1'b1} are not the same thing}
+\code{'1} fills every bit of the target. \code{1'b1} is a one-bit value that is
+zero-extended to the target. In an eight-bit context the first is
+\code{8'hFF} and the second is \code{8'h01}. The same distinction bites in
+comparisons:
+\begin{svcode}
+logic [7:0] mask;
+if (mask == '1)   ... // true when mask is 8'hFF   -- what you meant
+if (mask == 1'b1) ... // true when mask is 8'h01   -- almost never
+if (mask == 1)    ... // same as above: 1 is a 32-bit int
+\end{svcode}
+The \VHDL{} translation of \code{(others => '1')} is \code{'1}, always. Writing
+\code{1'b1} where you meant \code{'1} produces code that is legal, silent, and
+wrong.
+\end{gotcha}
+
+\begin{gotcha}{An unsized literal in a wide expression}
+\code{'1} has no width of its own: it takes the width of its context. That is
+usually what you want, but the context is not always what you think.
+\begin{svcode}
+logic [63:0] wide;
+wide = {32'h0, '1};   // inside a concatenation every operand is
+                      // self-determined. '1 has no size -> error or
+                      // an implementation-defined width. Write 32'hFFFF_FFFF.
+\end{svcode}
+Unsized literals are illegal as concatenation operands for exactly this reason.
+Some tools accept them and pick a width. Always give an explicit width inside
+\code{\{\}}.
+\end{gotcha}
+
+\subsection{Aggregates and assignment patterns}
+
+\begin{rosetta}
+\begin{rleft}
+constant ZERO : std_logic_vector(7 downto 0)
+  := (others => '0');
+constant ONE : std_logic_vector(7 downto 0)
+  := (others => '1');
+constant M : std_logic_vector(7 downto 0)
+  := (3 downto 0 => '1', others => '0');
+constant P : std_logic_vector(3 downto 0)
+  := ('1', '0', '1', '0');
+constant N : std_logic_vector(3 downto 0)
+  := (3 => '1', 1 => '1', others => '0');
+
+type pair_t is record
+  x : integer; y : integer;
+end record;
+constant C : pair_t := (x => 1, y => 2);
+\end{rleft}
+\begin{rright}
+localparam logic [7:0] ZERO = '0;
+
+localparam logic [7:0] ONE = '1;
+
+localparam logic [7:0] M = 8'h0F;
+// or: {4'b0, {4{1'b1}}}
+
+localparam logic [3:0] P = 4'b1010;
+
+localparam logic [3:0] N = 4'b1010;
+
+
+typedef struct packed {
+  int x; int y;
+} pair_t;
+localparam pair_t C = '{x:1, y:2};
+\end{rright}
+\end{rosetta}
+
+\index{aggregate}\index{assignment pattern}
+
+For packed vectors the \VHDL{} aggregate almost always collapses to an ordinary
+literal in \SV{}, because a packed vector \emph{is} a number. \code{(others =>
+'0')} becomes \code{'0}. A named aggregate that sets specific bits becomes a
+hexadecimal constant, a concatenation, or a part-select assignment:
+
+\begin{svcode}[caption={Setting a field of a vector.},label={lst:rosetta:fieldset}]
+logic [31:0] ctrl;
+always_comb begin
+  ctrl          = '0;      // (others => '0')
+  ctrl[3:0]     = 4'hF;    // (3 downto 0 => '1', ...)
+  ctrl[15:8]    = len_q;   // a named field
+end
+\end{svcode}
+
+The \code{'\{...\}} form, the \emph{assignment pattern}, is the true equivalent
+of a \VHDL{} aggregate, and it applies to unpacked arrays, structures and
+unions. Note the leading apostrophe: \code{\{1,2,3\}} is a concatenation,
+\code{'\{1,2,3\}} is an assignment pattern, and they mean entirely different
+things.
+
+\begin{svcode}[caption={Assignment patterns for composite types.},label={lst:rosetta:patterns}]
+typedef struct packed { logic [7:0] a; logic [7:0] b; } two_t;
+two_t   s = '{a: 8'h12, b: 8'h34};   // named, like VHDL's (a => ..., b => ...)
+two_t   t = '{8'h12, 8'h34};         // positional
+
+logic [7:0] mem [0:3] = '{8'h00, 8'h11, 8'h22, 8'h33};
+logic [7:0] all9 [0:3] = '{default: 8'h99};   // like (others => x"99")
+logic [7:0] two [0:3]  = '{2{8'hAA, 8'hBB}};  // replicated pattern
+\end{svcode}
+
+\code{'\{default: v\}} is the closest thing to \code{(others => v)} for an
+unpacked array or a structure, and it works at any nesting depth.
+
+\subsection{Concatenation and replication}
+
+\begin{rosetta}
+\begin{rleft}
+y <= a & b & c;
+
+-- replication needs a loop or an
+-- aggregate:
+y <= (others => a(7));
+-- or
+y <= a(7) & a(7) & a(7) & a(7);
+
+-- sign extension by hand:
+s16 <= (15 downto 8 => s8(7)) & s8;
+-- or, with numeric_std:
+s16 <= std_logic_vector(
+         resize(signed(s8), 16));
+\end{rleft}
+\begin{rright}
+assign y = {a, b, c};
+
+// replication operator:
+assign y = {4{a[7]}};
+
+// nested:
+assign y = {{4{a[7]}}, a[3:0]};
+
+// sign extension:
+assign s16 = {{8{s8[7]}}, s8};
+// or, since s8 is signed:
+assign s16 = $signed(s8);
+\end{rright}
+\end{rosetta}
+
+\index{concatenation}\index{replication}
+
+\code{\&} becomes \code{\{\}}. Note that \code{\&} in \SV{} is bitwise AND, so
+mistranslating a concatenation gives you a legal expression with a completely
+different meaning; the widths usually differ, but as \cref{sec:rosetta:widths}
+explains, differing widths are not an error.
+
+The replication operator \code{\{N\{expr\}\}} has no \VHDL{} counterpart short
+of an aggregate or a loop, and it is used constantly, above all for sign
+extension. The double brace is not a typo: the outer braces are the
+concatenation, the inner ones delimit the replicated expression. \code{N} must
+be a constant expression.
+
+% ===========================================================================
+\section{Operators, expressions and the width rules}
+\label{sec:rosetta:widths}
+% ===========================================================================
+
+If you read only one section of this chapter, read this one. The operator
+tables are boring and the width rules are not, and the width rules are where
+\VHDL{} designers lose days.
+
+\subsection{The operators}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Operators.}
+  \label{tab:rosetta:operators}
+  \small
+  \begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.235\linewidth}>{\raggedright\arraybackslash}p{0.215\linewidth}>{\raggedright\arraybackslash}p{0.47\linewidth}@{}}
+    \toprule
+    \VHDL{} & \SV{} & Note \\
+    \midrule
+    \code{and or xor xnor nand nor} & \code{\& | \textasciicircum{} \textasciitilde\textasciicircum{} \textasciitilde\& \textasciitilde|} & Bitwise. \\
+    \code{not} & \code{\textasciitilde} & Bitwise. \\
+    --- & \code{\&\& || !} & Logical (result is one bit). \VHDL{} uses the same words for both. \\
+    \code{= /=} & \code{== !=} & \code{x} on either side gives \code{x}. \\
+    --- & \code{=== !==} & Four-state identity: compares \code{x} and \code{z} literally. \\
+    --- & \code{==? !=?} & Wildcard: \code{x}/\code{z} in the right operand match anything. \\
+    \code{?= ?/=} (2008) & \code{==? !=?} & Nearest equivalent. \\
+    \code{< <= > >=} & \code{< <= > >=} & Signedness comes from the operands in \SV{}. \\
+    \code{+ - * /} \code{mod rem} & \code{+ - * / \%} & \code{\%} follows the sign of the dividend, like \code{rem}. \\
+    \code{**} & \code{**} & \\
+    \code{abs} & --- & No operator. Write \code{(x[N-1] ? -x : x)}. \\
+    \code{sll srl sla sra rol ror} & \code{<< >> <<< >>>} & No rotate. \code{>>>} is arithmetic only on a signed operand. \\
+    \code{\&} & \code{\{\}} & Concatenation. \\
+    --- & \code{\{N\{x\}\}} & Replication. \\
+    --- & \code{\&x |x \textasciicircum{}x} & Unary reduction over all bits. No \VHDL{}-2008 equivalent except \code{and\_reduce} etc. \\
+    \code{when else} & \code{?:} & Conditional expression. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Three rows deserve attention.
+
+\textbf{Logical versus bitwise.} \VHDL{} uses \code{and} for both, and the type
+system tells them apart: \code{and} on two booleans is logical, on two vectors
+is bitwise. \SV{} has separate operators. \code{a \& b} on two eight-bit
+vectors gives an eight-bit vector; \code{a \&\& b} gives one bit, true if both
+operands are non-zero. Writing \code{if (a \& b)} where you meant \code{\&\&}
+is legal and usually still works, which makes it a habit that survives until
+the day it does not.
+
+\textbf{The four-state comparisons.} \code{==} propagates unknowns: if either
+operand contains an \code{x}, the result is \code{x}, and \code{if} treats
+\code{x} as false. \code{===} compares the four-state values bit by bit and
+always returns \code{0} or \code{1}, so \code{a === 8'hxx} is a way of asking
+``is a exactly all-x''. \code{===} is not synthesisable and belongs in
+testbenches only. \VHDL{} has no equivalent to \code{==} because
+\code{std\_logic} equality already compares the nine values literally: \VHDL{}'s
+\code{=} behaves like \SV{}'s \code{===}, not like \code{==}. This is a real
+difference in behaviour, not just in spelling.
+
+\textbf{Reduction operators.} \code{|v} is one bit, true if any bit of \code{v}
+is set. \code{\&v} is true if all are. \code{\textasciicircum{}v} is the parity.
+\VHDL{}-2008 added \code{or\_reduce}, \code{and\_reduce} and \code{xor\_reduce}
+for the same purpose but the \SV{} form is one character.
+
+\subsection{Width rules: the part that matters}
+
+\index{width rules}\index{self-determined}\index{context-determined}
+
+\VHDL{}'s rule is short. The operands of \code{+} on \code{unsigned} must be of
+the same length or one of them must be an integer; the result has the length of
+the longer operand; assigning it to a target of a different length is an error.
+Every width is written down and every mismatch is a compile error.
+
+\SV{} has no such rule. Instead, every operand of an expression is classified
+as \emph{self-determined} or \emph{context-determined}. A self-determined
+operand is evaluated at its own natural width. A context-determined operand is
+first widened to the width of the whole expression, and the width of the whole
+expression is the maximum of all its context-determined operands \emph{and,
+for an assignment, of the left-hand side}. Operands are then zero-extended or
+sign-extended to that width, the operation happens, and the result is
+truncated to fit the target.
+
+That is the whole rule, and it has three consequences you must internalise.
+
+\begin{rosetta}
+\begin{rleft}
+signal a, b : unsigned(7 downto 0);
+signal c    : unsigned(15 downto 0);
+
+-- illegal: lengths differ
+-- c <= a + b;
+
+-- you must say what you mean:
+c <= resize(a, 16) + resize(b, 16);
+c <= "00000000" & (a + b);  -- 8-bit
+                            -- add
+\end{rleft}
+\begin{rright}
+logic  [7:0] a, b;
+logic [15:0] c;
+
+// legal. The 16-bit target makes
+// the addition 16 bits wide, so
+// a and b are zero-extended
+// first and no carry is lost:
+assign c = a + b;
+\end{rright}
+\end{rosetta}
+
+\textbf{Consequence one: the target width propagates into the expression.} This
+is the opposite of what most \VHDL{} designers expect, and it is usually
+helpful. \code{c = a + b} with a sixteen-bit \code{c} really does compute a
+sixteen-bit sum. The carry out of bit 7 is kept.
+
+\textbf{Consequence two: the propagation stops at self-determined operands.}
+The operands that are self-determined are the ones inside a concatenation or a
+replication, the right-hand operand of a shift, the condition of \code{?:}, the
+index of a part-select, an argument of a function or a task, and a port
+connection. In every one of those places the expression is evaluated at its
+own width and the surrounding context is ignored.
+
+\begin{gotcha}{Where context stops: the carry you did not get}
+\begin{svcode}
+logic  [7:0] a, b;
+logic [15:0] c;
+logic        cout;
+
+assign c    = a + b;             // 16-bit add. Carry kept. Fine.
+assign c    = {8'h00, a + b};    // 8-bit add inside {}. Carry LOST.
+assign cout = (a + b) >> 8;      // the whole expression is 8 bits wide, so
+                                 // a+b wraps and >>8 is always 0. LOST.
+assign {cout, c[7:0]} = a + b;   // 9-bit LHS -> 9-bit add. Carry kept.
+\end{svcode}
+The rule of thumb that protects you in every case, whatever the context, is to
+widen an operand explicitly. \code{\{1'b0, a\} + b} is nine bits wide by
+itself, regardless of where you put it, and it is exactly the \SV{} spelling of
+\code{resize(a,9) + resize(b,9)}. Get into the habit and the width rules stop
+being able to hurt you.
+\end{gotcha}
+
+\begin{tipbox}{Widen the operand, never trust the target}
+\begin{svcode}
+// Full adder result with explicit carry, safe anywhere:
+assign sum9 = {1'b0, a} + {1'b0, b} + cin;
+
+// Signed multiply-accumulate, safe anywhere:
+assign acc = $signed({{8{a[7]}}, a}) * $signed({{8{b[7]}}, b});
+\end{svcode}
+Writing the extension by hand costs you a handful of characters and makes the
+expression's width independent of where it appears. This is the single most
+useful defensive habit in \SV{} \RTL{}.
+\end{tipbox}
+
+\textbf{Consequence three: truncation is silent.} Assigning a wide expression
+to a narrow target drops the high bits with no message from most simulators.
+\tool{Verilator} warns (\code{WIDTHTRUNC}, \code{WIDTHEXPAND}) and this is one
+of the strongest arguments for lint-checking every file with it. Treat a
+\tool{Verilator} width warning as an error.
+
+\subsection{Signedness}
+
+\index{signed!expression rules}
+
+The signedness rule is one line, and it is the source of the second family of
+disasters:
+
+\begin{ruleofthumb}
+If any operand of an expression is unsigned, the whole expression is unsigned.
+\end{ruleofthumb}
+
+Signedness is decided over the whole expression, before any values are
+computed, and it is decided pessimistically. Two more facts complete the
+picture. First, a concatenation is \emph{always} unsigned, whatever it
+contains. Second, a part-select or bit-select is always unsigned, even of a
+signed vector: \code{s[7:0]} is unsigned even if \code{s} is
+\code{logic signed [7:0]}, though the whole-vector reference \code{s} is
+signed.
+
+\begin{gotcha}{One unsigned operand poisons the whole expression}
+\begin{svcode}
+logic signed [7:0] a;      // want -3
+logic        [7:0] b;      //  want 5
+logic signed [8:0] r;
+
+assign a = -8'sd3;
+assign b =  8'd5;
+assign r = a + b;          // b is unsigned -> the WHOLE add is unsigned.
+                           // a is zero-extended, not sign-extended:
+                           // 9'd253 + 9'd5 = 9'd258, not 2.
+
+assign r = a + $signed(b); // correct: 9'sd(-3) + 9'sd5 = 2
+
+logic signed [7:0] x, y;
+assign r = {x, 1'b0} + y;  // concatenation is unsigned -> whole add unsigned
+\end{svcode}
+The compiler says nothing. The waveform shows a plausible-looking number. This
+is the bug that \code{numeric\_std} exists to prevent, and \SV{} gives you no
+protection whatsoever: declare every signed quantity \code{logic signed}, and
+put \code{\$signed()} around anything you mix with it.
+\end{gotcha}
+
+\begin{gotcha}{Unsigned comparison with a negative}
+\begin{svcode}
+logic [7:0] cnt;
+if (cnt - 1 < 0)   ...     // NEVER true: unsigned result cannot be < 0
+if (cnt < -1)      ...     // -1 is a 32-bit signed int, but cnt is unsigned,
+                           // so the comparison is done unsigned:
+                           // cnt < 32'hFFFF_FFFF -> always true
+\end{svcode}
+\VHDL{} is no better on the first of these. \code{numeric\_std} defines both
+\code{"-"(UNSIGNED, NATURAL)} and \code{"<"(UNSIGNED, NATURAL)}, so
+\code{cnt - 1 < 0} analyses cleanly and is likewise always false; only a lint
+tool will tell you. \VHDL{} does save you from the second: the only matching
+operator takes a \code{NATURAL} on the right, and \code{-1} is outside that
+subtype, so \code{cnt < -1} is a bounds violation. An analyser will normally
+warn about it, and it is a hard error when the expression is
+evaluated. \SV{} accepts both, and the second
+is worse than useless: it is a tautology that the tool will happily optimise
+away, taking your intended logic with it.
+\end{gotcha}
+
+\subsection{The width of a comparison and of a ternary}
+
+The result of a comparison is always one bit. Its \emph{operands}, however, are
+context-determined with each other: they are widened to the maximum of the two,
+and only then compared. So \code{a > b} with an eight-bit \code{a} and a
+sixteen-bit \code{b} does a sixteen-bit comparison, which is what you want.
+Beware the intermediate: \code{(a + b) > c} sizes \code{a + b} against
+\code{c}, so if \code{c} is eight bits the addition wraps at eight bits before
+the comparison happens.
+
+The conditional operator is different again. In \code{cond ? x : y}, the
+condition is self-determined, and \code{x} and \code{y} are context-determined
+with the whole expression \emph{and with each other}. If \code{x} is signed and
+\code{y} is unsigned, the result is unsigned, and both are treated as unsigned.
+
+\begin{svcode}[caption={Widths in comparisons and conditionals.},label={lst:rosetta:cmpwidth}]
+logic  [7:0] a, b;
+logic [15:0] c;
+logic [15:0] r;
+
+if ((a + b) > c)  ...   // 16-bit add (c is 16 bits) then 16-bit compare
+if ((a + b) > 8'd200) ...  // 8-bit add: wraps. 8'd200 is 8 bits.
+if ((a + b) > 200)    ...  // 200 is a 32-bit int: 32-bit add. No wrap.
+
+assign r = sel ? a : c;     // a is widened to 16 bits (context = r and c)
+assign r = {8'h0, sel ? a : b};  // inside {}: self-determined, 8-bit result
+\end{svcode}
+
+The three \code{if} lines differ only in how the constant is written, and they
+compute three different things. That is the width rule in one picture.
+
+% ===========================================================================
+\section{Arrays, records and enumerations}
+\label{sec:rosetta:arrays}
+% ===========================================================================
+
+\subsection{Packed and unpacked}
+
+\index{array!packed}\index{array!unpacked}
+
+\SV{} splits the idea of an array in two, and this split has no \VHDL{}
+counterpart at all. Dimensions written \emph{before} the object name are
+\emph{packed}; dimensions written \emph{after} it are \emph{unpacked}.
+
+\begin{rosetta}
+\begin{rleft}
+-- an array of 4 bytes
+type mem_t is array (0 to 3) of
+  std_logic_vector(7 downto 0);
+signal m : mem_t;
+
+-- element access
+m(2)          -- one byte
+m(2)(7)       -- one bit
+
+-- VHDL makes no distinction
+-- between "packed" and
+-- "unpacked": the array is the
+-- array.
+\end{rleft}
+\begin{rright}
+// unpacked: 4 separate bytes
+logic [7:0] u [0:3];
+
+// packed: one 32-bit vector
+// viewed as 4 bytes
+logic [3:0][7:0] p;
+
+// element access is identical
+u[2]      p[2]      // one byte
+u[2][7]   p[2][7]   // one bit
+
+// but only p can do this:
+p[19:4]   // arbitrary bit slice
+p + 1     // arithmetic
+\end{rright}
+\end{rosetta}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\footnotesize\sffamily,
+      cell/.style={draw=codeframe,line width=0.7pt,minimum width=0.85cm,
+                   minimum height=0.55cm,inner sep=1pt},
+      grp/.style={draw=codekey,line width=1.1pt,rounded corners=1pt},
+      lbl/.style={font=\scriptsize\sffamily\color{codenumber}}
+    ]
+    % --- packed -------------------------------------------------------------
+    \node[lbl,anchor=west,font=\small\ttfamily\color{black}]
+      at (0,1.35) {logic [3:0][7:0] p;};
+    \node[lbl,anchor=west] at (0,0.95)
+      {one contiguous 32-bit vector: \texttt{p[19:4]} and \texttt{p+1} are legal};
+    \foreach \i in {0,...,31} {
+      \pgfmathsetmacro{\x}{0.30*\i}
+      \node[cell,minimum width=0.30cm,fill=svbg] at (\x+0.15,0.35) {};
+    }
+    \foreach \g/\name in {0/3,1/2,2/1,3/0} {
+      \pgfmathsetmacro{\xa}{2.4*\g}
+      \draw[grp] (\xa,0.06) rectangle (\xa+2.4,0.64);
+      \node[lbl] at (\xa+1.2,-0.22) {\texttt{p[\name]}};
+    }
+    \node[lbl,anchor=west] at (0,-0.62) {bit 31};
+    \node[lbl,anchor=east] at (9.6,-0.62) {bit 0};
+
+    % --- unpacked -----------------------------------------------------------
+    \node[lbl,anchor=west,font=\small\ttfamily\color{black}]
+      at (0,-1.65) {logic [7:0] u [0:3];};
+    \node[lbl,anchor=west] at (0,-2.05)
+      {four separate 8-bit objects: no slice across them, no arithmetic};
+    \foreach \g/\name in {0/0,1/1,2/2,3/3} {
+      \pgfmathsetmacro{\xa}{2.4*\g + 0.35*\g}
+      \foreach \i in {0,...,7} {
+        \pgfmathsetmacro{\x}{\xa + 0.30*\i}
+        \node[cell,minimum width=0.30cm,fill=vhdlbg] at (\x+0.15,-2.65) {};
+      }
+      \draw[grp,draw=accentalt] (\xa,-2.94) rectangle (\xa+2.4,-2.36);
+      \node[lbl] at (\xa+1.2,-3.22) {\texttt{u[\name]}};
+    }
+  \end{tikzpicture}
+  \caption{Packed and unpacked dimensions. A packed array is a bit vector with
+           a grouping imposed on it; an unpacked array is a collection of
+           separate objects. \VHDL{} has only the second kind, and gets the
+           first through explicit conversion functions.}
+  \label{fig:rosetta:packing}
+\end{figure}
+
+\cref{fig:rosetta:packing} is the picture to keep in mind. A packed array is a
+single vector with a shape; it is stored contiguously, it can be sliced at any
+bit boundary, it can be used in arithmetic, and it can be cast to and from any
+other packed type of the same total width. An unpacked array is a collection of
+separate objects; it is what you want for a memory, and it is what synthesis
+tools recognise as a RAM.
+
+\begin{table}[htbp]
+  \centering
+  \caption{What you may do with each kind.}
+  \label{tab:rosetta:packing}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    Operation & Packed & Unpacked \\
+    \midrule
+    Whole-object assignment       & yes & yes (types must match exactly) \\
+    Arithmetic and bitwise operators & yes & no \\
+    Arbitrary bit slice           & yes & no \\
+    Element and part select       & yes & yes (one element at a time) \\
+    Module port                   & yes & yes \\
+    Cast to another type          & yes & only through a bit-stream cast \\
+    Element type may be unpacked  & no  & yes \\
+    Inferred as a RAM             & no (it is one big register) & yes \\
+    \code{foreach} iteration      & yes & yes \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The \VHDL{} translation rule is simple in practice. A \VHDL{} array of vectors
+that you use as a memory becomes an unpacked array of packed vectors. A \VHDL{}
+array of vectors that you slice, concatenate or convert to a flat vector
+becomes a packed array.
+
+\begin{svcode}[caption={Memories and buses.},label={lst:rosetta:memvsbus}]
+// A 256 x 32 memory. Unpacked outer dimension: synthesis infers a RAM.
+logic [31:0] ram [0:255];
+always_ff @(posedge clk) if (we) ram[addr] <= wdata;
+
+// An 8-lane bus you also want as one 256-bit word. Packed both ways.
+logic [7:0][31:0] lanes;
+assign flat_256 = lanes;              // legal: same total width
+assign lanes[3] = something;          // per-lane access still works
+\end{svcode}
+
+\begin{gotcha}{Two dimensions, two meanings, one syntax}
+\code{logic [3:0] x [0:7]} is eight four-bit words. \code{logic [7:0][3:0] y}
+is one thirty-two-bit vector grouped into eight nibbles. \code{logic [3:0][7:0] z}
+is one thirty-two-bit vector grouped into four bytes. They are different types
+and the difference is which side of the name the dimension is on.
+
+Worse, the index order reverses. For \code{logic [1:0][7:0] q}, \code{q[1]} is
+the \emph{upper} byte, bits 15 down to 8; the leftmost packed dimension is the
+outermost. For unpacked arrays the leftmost dimension is also the outermost.
+When you have both, you read left to right through the packed dimensions and
+then left to right through the unpacked ones, but the packed ones are written
+before the name and the unpacked ones after it, so on the page the order is
+reversed. Write the declaration, then write \code{\$bits()} of it in a quick
+testbench and check.
+\end{gotcha}
+
+\subsection{Multidimensional arrays}
+
+\begin{rosetta}
+\begin{rleft}
+-- a true 2-D array of scalars
+type grid_t is array
+  (0 to 3, 0 to 7) of std_logic;
+signal g : grid_t;
+-- indexed with a comma:
+g(2, 5)
+
+-- an array of arrays
+type row_t is array (0 to 7)
+  of std_logic;
+type grid2_t is array (0 to 3)
+  of row_t;
+signal h : grid2_t;
+h(2)(5)
+\end{rleft}
+\begin{rright}
+// SystemVerilog has no comma-
+// indexed arrays. Every multi-
+// dimensional array is an array
+// of arrays.
+logic g [0:3][0:7];
+g[2][5]
+
+// same thing, packed:
+logic [3:0][7:0] h;
+h[2][5]
+
+// slices of unpacked arrays:
+logic row [0:7];
+assign row = g[2];   // legal, but see below
+\end{rright}
+\end{rosetta}
+
+\VHDL{}'s comma-indexed multidimensional array has no \SV{} equivalent, and it
+loses nothing: the array-of-arrays form does everything the comma form does and
+also lets you name and pass a row. \SV{} allows unpacked array slicing
+(\code{g[2]} above yields a whole row) and whole-array assignment when the types
+match exactly, which \VHDL{} also allows. Tool support for the slice in a
+\emph{continuous} assignment is uneven: \tool{Verilator} 5.020 accepts
+\code{assign row = g[2];}, while \tool{Icarus Verilog}~12 replies
+\code{sorry: Array slices are not yet supported for continuous assignment}.
+Inside an \code{always\_comb} block both are happy.
+
+\subsection{Records and structures}
+
+\begin{rosetta}
+\begin{rleft}
+type req_t is record
+  valid : std_logic;
+  addr  : std_logic_vector(31 downto 0);
+  data  : std_logic_vector(31 downto 0);
+end record req_t;
+
+signal r : req_t;
+
+r.valid <= '1';
+r <= (valid => '1',
+      addr  => a,
+      data  => d);
+
+-- a record cannot be treated as
+-- a bit vector without a
+-- conversion function you write
+-- yourself.
+\end{rleft}
+\begin{rright}
+typedef struct packed {
+  logic        valid;
+  logic [31:0] addr;
+  logic [31:0] data;
+} req_t;                  // 65 bits
+
+req_t r;
+
+r.valid = 1'b1;
+r = '{valid: 1'b1,
+      addr:  a,
+      data:  d};
+
+// a packed struct IS a bit vector
+assign flat65 = r;
+assign r      = flat65;
+assign r[63:32] = a;   // legal too
+\end{rright}
+\end{rosetta}
+
+\index{struct!packed}\index{record}
+
+The correspondence is close, with one important addition. A \VHDL{}
+\kw{record} is always what \SV{} calls unpacked: it is a collection of named
+fields with no defined bit layout, and turning it into a vector requires a
+conversion function you write. A \SV{} \code{struct packed} has a defined
+layout: the first field occupies the most significant bits, the last field the
+least significant, and the whole structure is a bit vector of the sum of the
+field widths. That makes packed structures the natural way to describe a bus
+transaction, a register field layout, or a pipeline stage payload, and it is
+one of the genuinely good things \SV{} gives you.
+
+Restrictions: a packed structure may contain only packed types, so no
+unpacked arrays, no \kw{real}, no \kw{string}. An unpacked structure (write
+\code{struct} without \kw{packed}) may contain anything, can cross a port, but
+cannot be used in arithmetic or sliced.
+
+Unions follow the same split. A \code{union packed} requires all members to be
+the same width and gives you a reinterpreting view of the same bits, which is
+the classic way to describe an instruction word. A plain \code{union} is
+unpacked and needs \code{\$cast} or \code{tagged} discipline. \VHDL{} has no
+union at all.
+
+\begin{svcode}[caption={A packed union: two views of the same 32 bits.},label={lst:rosetta:union}]
+typedef struct packed { logic [6:0] funct7; logic [4:0] rs2, rs1;
+                        logic [2:0] funct3; logic [4:0] rd;
+                        logic [6:0] opcode; } r_type_t;
+typedef union packed {
+  logic [31:0] raw;
+  r_type_t     r;
+} instr_t;
+
+instr_t i;
+assign i.raw    = fetch_data;
+assign is_add   = (i.r.opcode == 7'h33) && (i.r.funct3 == 3'b000);
+\end{svcode}
+
+\subsection{Enumerations}
+
+\begin{rosetta}
+\begin{rleft}
+type state_t is
+  (IDLE, RUN, DONE);
+signal s : state_t;
+
+s <= IDLE;
+if s = RUN then ... end if;
+
+state_t'pos(RUN)    -- 1
+state_t'val(1)      -- RUN
+state_t'succ(IDLE)  -- RUN
+state_t'pred(DONE)  -- RUN
+state_t'image(s)    -- "run"
+state_t'left        -- IDLE
+state_t'right       -- DONE
+\end{rleft}
+\begin{rright}
+typedef enum logic [1:0] {
+  IDLE, RUN, DONE
+} state_t;
+state_t s;
+
+s = IDLE;
+if (s == RUN) ...
+
+int'(RUN)      // 1
+state_t'(1)    // RUN
+s.next()       // successor of s
+s.prev()       // predecessor
+s.name()       // "RUN"
+s.first()      // IDLE
+s.last()       // DONE
+s.num()        // 3
+\end{rright}
+\end{rosetta}
+
+\index{enumeration}
+
+The concepts match, the spelling does not. Two differences matter.
+
+First, the base type. A \VHDL{} enumeration is its own type with an implicit
+integer position, and synthesis picks the encoding. A \SV{} enumeration has a
+base type, which defaults to \kw{int} if you do not give one. That default is
+wrong for \RTL{}: a state variable of type \kw{int} is thirty-two bits, is
+two-state, and starts at zero rather than \code{x}, so a missing reset is
+invisible. Always write the base type:
+
+\begin{ruleofthumb}
+\code{typedef enum logic [N-1:0] \{...\} state\_t;} Never let an \RTL{}
+enumeration default to \kw{int}.
+\end{ruleofthumb}
+
+Second, the strictness. \VHDL{} will not let you assign an integer to an
+enumeration without \code{'val}. \SV{} will not either, in principle: assigning
+an integer expression to an enumeration variable requires an explicit cast
+\code{state\_t'(expr)}. This is one of the very few places where \SV{} is as
+strict as \VHDL{}, and it is worth knowing because it surprises people who
+expect \SV{} to convert everything. Assigning \emph{from} an enumeration to an
+integer or a vector is implicit and needs no cast.
+
+The strictness stops at the cast, though, and this is where \VHDL{} is still
+ahead. \code{state\_t'(2'b11)} compiles and produces a variable holding a value
+that has no name. \VHDL{}'s type simply has no such value, and \code{'val} with
+an out-of-range position is a run-time error. If the source of the integer is
+untrusted, use \code{\$cast}, which checks and reports failure rather than
+storing a nameless value; \cref{sec:rosetta:conversion} gives the form.
+
+Explicit encodings work in both:
+
+\begin{svcode}[caption={A one-hot encoded state type.},label={lst:rosetta:onehot}]
+typedef enum logic [3:0] {
+  IDLE = 4'b0001,
+  ADDR = 4'b0010,
+  DATA = 4'b0100,
+  RESP = 4'b1000
+} state_e;
+state_e state_q, state_d;
+// $onehot(state_q) is then a useful assertion
+\end{svcode}
+
+The methods in the right-hand pane are the whole set, and they are worth
+learning together because the \VHDL{} attributes you would reach for are spread
+across three different mechanisms in \SV{}.
+
+\code{.name()} returns the enumeration label as a \kw{string}, and it is the
+direct replacement for the \VHDL{} attribute \code{'image}. The standard way
+to print a state in a message is
+\begin{svcode}
+$display("state = %s at %0t", state_q.name(), $time);
+\end{svcode}
+It returns an empty string if the value does not correspond to a label, which
+is itself a useful check, and it alone justifies giving a state machine an
+enumerated type: every log message and every assertion failure prints the state
+by name with no lookup table.
+
+\code{.next()} and \code{.prev()} are \code{'succ} and \code{'pred} with one
+important difference: they \emph{wrap round}. \code{DONE.next()} is
+\code{IDLE}, where \code{state\_t'succ(DONE)} is an error in \VHDL{}. Both take
+an optional count, so \code{s.next(2)} skips one member. The wrap-around makes
+``advance until you reach \code{last()}'' an infinite loop if the exit test is
+written carelessly; iterate over the members by count instead:
+
+\begin{svcode}
+state_t s = state_t'(0);
+for (int unsigned i = 0; i < s.num(); i++) begin
+  $display("%0d: %s", i, s.name());
+  s = s.next();
+end
+\end{svcode}
+
+\code{.num()} is the number of members and has no \VHDL{} attribute
+counterpart; \code{.first()} and \code{.last()} are \code{'left} and
+\code{'right}. Note that all six are methods called on a \emph{value}, not
+attributes of a type, so you need an object of the type to call them, and
+\code{state\_t::num()} is not legal.
+
+% ===========================================================================
+\section{Type conversion}
+\label{sec:rosetta:conversion}
+% ===========================================================================
+
+\begin{rosetta}
+\begin{rleft}
+-- closely related array types:
+u  <= unsigned(v);
+v  <= std_logic_vector(u);
+
+-- numeric conversions:
+i  <= to_integer(u);
+u  <= to_unsigned(i, 8);
+s  <= to_signed(i, 8);
+
+-- real and integer:
+r  <= real(i);
+i  <= integer(r);      -- rounds
+
+-- enumeration:
+p  <= state_t'pos(st);
+st <= state_t'val(p);
+
+-- anything else needs a function
+-- you write yourself.
+\end{rleft}
+\begin{rright}
+// related packed types: nothing
+assign u = v;
+assign v = u;
+
+// numeric: implicit
+assign i = u;
+assign u = i;
+assign s = i;
+
+// real and integer: implicit,
+// rounds to nearest
+assign r = i;
+assign i = r;
+
+// enumeration:
+assign p  = int'(st);
+assign st = state_t'(p);
+
+// static cast, any packed type:
+assign q = my_t'(expr);
+\end{rright}
+\end{rosetta}
+
+\index{cast!static}\index{cast!dynamic}
+
+\SV{} has four conversion mechanisms, in increasing order of ceremony.
+
+\textbf{Implicit conversion}, which happens whenever an expression of one type
+is assigned to an object of another and the two are compatible. Between packed
+types, ``compatible'' means ``both are collections of bits'', so almost everything
+converts. Width mismatches are fixed by truncation or extension, signedness by
+the rule in \cref{sec:rosetta:widths}. This is where the majority of \SV{} bugs
+come from.
+
+\textbf{The static cast} \code{type'(expr)}, which is the direct analogue of a
+\VHDL{} type mark. It is checked at compile time. It works on any packed type,
+on enumerations, and on \code{int}/\code{real} pairs. Note the apostrophe: the
+syntax is the type name, an apostrophe, then the parenthesised expression, and
+it looks disconcertingly like a \VHDL{} attribute.
+
+\textbf{The size cast} \code{16'(expr)} and the sign casts
+\code{\$signed(expr)}, \code{\$unsigned(expr)}, which change one property and
+leave the rest alone. \code{16'(a+b)} is the cleanest way to force an
+expression to a particular width without writing a concatenation, and it is
+much clearer than relying on the target.
+
+\textbf{The dynamic cast} \code{\$cast(dest, src)}, which checks at run time and
+either assigns and returns 1, or leaves the destination alone and returns 0.
+Use it when converting an integer to an enumeration where the value may not be
+a valid label, and, in \refverificationbook, for downcasting class handles. It is a
+function when you want the result and a task when you do not; used as a task,
+a failed cast is an error.
+
+\begin{svcode}[caption={The four mechanisms side by side.},label={lst:rosetta:casts}]
+typedef enum logic [1:0] {A, B, C} e_t;
+e_t          e;
+logic [1:0]  v;
+int          i;
+logic [15:0] w;
+
+assign v = e;              // implicit: enum to vector, always allowed
+// e = v;                  // ILLEGAL: needs a cast
+assign e = e_t'(v);        // static cast: no run-time check. v = 3 gives
+                           //   an out-of-range enum, silently.
+initial if (!$cast(e, v))  // dynamic cast: returns 0 if v is not A, B or C
+  $error("bad state code %0d", v);
+assign w = 16'(v);         // size cast: zero-extend to 16
+assign i = $signed(v);     // sign cast: treat v's bits as signed
+\end{svcode}
+
+\begin{gotcha}{\SV{} converts where \VHDL{} refused to compile}
+Every one of these produces a compile error in \VHDL{} and a silent conversion
+in \SV{}:
+\begin{svcode}
+logic [7:0] a; logic [15:0] b; logic [3:0] c;
+assign a = b;              // truncated to 8 bits
+assign b = a;              // zero-extended to 16 bits
+assign c = a + b;          // 16-bit add, then truncated to 4 bits
+assign a = 1'b1;           // 8'h01
+assign a = -1;             // 8'hFF
+real r; assign r = a;      // vector to real
+int  i; assign i = r;      // real to int, rounded
+\end{svcode}
+None of them is a mistake by itself. All of them are mistakes when they were
+not intended, and nothing in the language tells you which is which. The
+compensating discipline is: run \tool{Verilator} with \code{-Wall} over every
+file, and treat \code{WIDTHTRUNC} and \code{WIDTHEXPAND} as errors unless you
+have deliberately written a cast to say the conversion is wanted.
+\end{gotcha}
+
+\begin{notebox}{Bit-stream casts}
+\SV{} also supports \emph{bit-stream} casts, which flatten an arbitrary
+aggregate, including unpacked arrays and unpacked structures, into a bit vector
+and back:
+\begin{svcode}
+typedef struct { logic [7:0] a; logic [7:0] b [0:3]; } msg_t;   // unpacked
+msg_t        m;
+logic [39:0] flat;
+assign flat = {>>{m}};          // pack, left to right
+assign m    = {>>{flat}};       // unpack
+\end{svcode}
+This has no \VHDL{} equivalent short of writing the serialisation by hand. It
+is not synthesisable and it is meant for testbenches: it is the standard way to
+turn a transaction object into a byte stream for a scoreboard or a file. The
+\code{\{<<\{...\}\}} form streams right to left, which is how you reverse a bit
+or byte order in one expression.
+\end{notebox}
+
+Type conversion is the natural place to stop, because it is where the static
+half of the language runs out. Everything this chapter has described is
+decided before the simulation starts: a width, a signedness, an encoding, a
+layout in bits. None of it says when anything happens.
+
+That is the subject of \cref{ch:rosetta2}, and the two halves meet almost
+immediately. A continuous assignment applies the width rules of
+\cref{sec:rosetta:widths} on every input change; an \code{always\_ff} decides
+whether a truncation happens once per clock or never; the packed structure of
+\cref{sec:rosetta:arrays} is what crosses a port in an instantiation. Keep the
+rules below to hand while you read it, because the next chapter assumes them
+rather than restating them.
+
+% ===========================================================================
+\section{Checklist}
+\label{sec:rosetta:checklist}
+% ===========================================================================
+
+Operational takeaways for the static half of the language. The behavioural
+ones are at the end of \cref{ch:rosetta2}, and the complete two-part mapping
+table is with them.
+
+\begin{itemize}
+  \item \textbf{Every file starts} with \tick{timescale 1ns/1ps} and
+        \tick{default\_nettype none}, and ends with
+        \tick{default\_nettype wire}.
+  \item \textbf{Ports:} \code{input wire}, \code{output logic},
+        \code{inout wire}. ANSI style only. Connect every port explicitly;
+        \SV{} has no port defaults and an unconnected input is \code{z}.
+  \item \textbf{Generics become parameters}, architecture constants become
+        \kw{localparam}. Never write \code{defparam}.
+  \item \textbf{\code{logic} for everything} you drive from one place;
+        \code{wire} only where you genuinely need resolution.
+  \item \textbf{Declare signedness once}, in the declaration, and never mix a
+        signed and an unsigned operand in one expression without a cast.
+  \item \textbf{Widen before you add.} \code{\{1$^\prime$b0, a\} + b} for the
+        carry; assigning to a wider target does not create one.
+  \item \textbf{\code{>>>} on signed values}, always. Check every shift.
+  \item \textbf{\code{$^\prime$0} and \code{$^\prime$1}} for context-width
+        fills; a bare \code{0} is 32 bits and will surprise you inside a
+        concatenation.
+  \item \textbf{A packed struct is a bit vector} with names. Use it wherever
+        you would have written a \VHDL{} record on a port.
+  \item \textbf{Give every enumeration a base type} and, in \RTL{}, explicit
+        encodings.
+  \item \textbf{Lint every file} with \code{verilator -{}-lint-only -Wall}.
+        It is the type checker \SV{} does not have.
+\end{itemize}

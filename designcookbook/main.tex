@@ -1,0 +1,79 @@
+% ===========================================================================
+%  SystemVerilog for VHDL Designers -- The Design Cookbook
+%
+%  Build:   latexmk -pdf main.tex          (recommended)
+%  or:      pdflatex main && makeindex main && pdflatex main && pdflatex main
+%
+%  This booklet is one of four companions split out of the original
+%  SystemVerilog cookbook: Design (this one), Verification, Simulation, and
+%  a worked Example. Chapters that used to cross-reference material now
+%  living in a sibling booklet do so by name (\refverificationbook and
+%  friends, defined in preamble/macros.tex) instead of a page number.
+%
+%  The project is hierarchical: every chapter lives in its own folder under
+%  chapters/, together with its own figures/ subfolder.  The `import' package
+%  makes relative paths inside a chapter resolve against that chapter's
+%  folder, so a chapter can be moved without editing its body.
+% ===========================================================================
+\documentclass[11pt,a4paper,twoside,openright]{book}
+
+% --- Uncomment the next line (and compile with -shell-escape) to switch the
+% --- whole book from `listings' to `minted'.  See preamble/listings.tex.
+% \def\UseMinted{}
+
+\input{../_shared/preamble/packages}
+\input{../_shared/preamble/listings}
+\input{../_shared/preamble/macros}
+
+\makeindex
+
+\graphicspath{%
+  {figures/}%
+  {chapters/01-philosophy/figures/}%
+  {chapters/02-rosetta-types/figures/}%
+  {chapters/03-rosetta-behaviour/figures/}%
+  {chapters/04-beyond-vhdl/figures/}%
+}
+
+\hypersetup{
+  pdftitle  = {SystemVerilog for VHDL Designers: The Design Cookbook},
+  pdfauthor = {Luigi Giuffrida},
+  pdfsubject= {Digital design in SystemVerilog for VHDL designers},
+  pdfkeywords = {SystemVerilog, VHDL, digital design},
+  colorlinks = true,
+  linkcolor  = codekey,
+  citecolor  = accent,
+  urlcolor   = accentalt,
+}
+
+\begin{document}
+
+\frontmatter
+\input{frontmatter/titlepage}
+\input{frontmatter/preface}
+\input{frontmatter/howtoread}
+
+\cleardoublepage
+\tableofcontents
+\cleardoublepage
+
+\mainmatter
+
+\subimport{chapters/01-philosophy/}{chapter.tex}
+\subimport{chapters/02-rosetta-types/}{chapter.tex}
+\subimport{chapters/03-rosetta-behaviour/}{chapter.tex}
+\subimport{chapters/04-beyond-vhdl/}{chapter.tex}
+
+% ---------------------------------------------------------------------------
+\appendix
+% ---------------------------------------------------------------------------
+\subimport{backmatter/}{appendix-quickref.tex}
+
+\backmatter
+\input{backmatter/bibliography}
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Index}
+\printindex
+
+\end{document}

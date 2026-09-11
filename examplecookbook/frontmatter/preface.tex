@@ -1,0 +1,46 @@
+% ---------------------------------------------------------------------------
+% preface.tex
+% ---------------------------------------------------------------------------
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+\markboth{Preface}{Preface}
+
+Reading rules is not the same as reading code. This booklet is one design,
+worked all the way through: a CORDIC rotator, in VHDL and in SystemVerilog,
+verified by six testbenches in three languages. Every file is reproduced in
+full, not excerpted.
+
+This is the \textbf{Example Cookbook}, one of four companions covering
+\tool{SystemVerilog for VHDL Designers}. It assumes the material of
+\refdesignbook, \refverificationbook and \refsimulationbook, and applies all
+three, in one place, to one design.
+
+\section*{What this booklet is}
+
+\Cref{ch:case} develops \code{cordic\_rot} from its specification and
+fixed-point format, through a VHDL implementation and a SystemVerilog one,
+to six testbenches: a plain VHDL testbench, a class-based SystemVerilog
+testbench, a UVM environment, a C++ testbench driven through
+\tool{Verilator}, and two Python testbenches, one talking to the design over
+a socket and one written with \tool{cocotb}. Every construct used has
+already been introduced somewhere in the companion booklets; here you see it
+used together with everything else, under time pressure, in a design with
+real corners: a state machine, a parameterised datapath, a fixed-point
+number format, and a handshake protocol.
+
+\section*{The code}
+
+All the sources are distributed with this document under \file{code/cordic/}.
+Every one of them has been analysed and simulated before being typeset, and
+every line of tool output quoted in this booklet was produced by actually
+running something. Where a construct does not work in a particular tool, the
+text says which tool and which version.
+
+\section*{Acknowledgement}
+
+The choice of a CORDIC rotator as the worked example is not accidental. It
+is small enough to read in one sitting, large enough to need a state
+machine, a parameterised datapath, a fixed-point format and a handshake
+protocol, and arithmetic enough that a golden model in Python earns its
+keep. If you understand every line of this booklet, you can write
+SystemVerilog.

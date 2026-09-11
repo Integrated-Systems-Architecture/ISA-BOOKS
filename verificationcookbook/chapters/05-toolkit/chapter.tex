@@ -1,0 +1,1348 @@
+\chapter{The SystemVerilog Verification Toolkit}
+\label{ch:toolkit}
+
+\chapabstract{The language features that exist only for verification: dynamic
+data types, classes, dynamic threads, constrained randomisation, functional
+coverage and assertions. None of it is synthesisable and almost none of it has
+a \VHDL{} counterpart. This chapter is the vocabulary, taught one construct at
+a time and with no testbench architecture in the way; \cref{ch:tb} is where it
+gets assembled into a working testbench.}
+
+Everything in this chapter is a tool, and a tool is easier to understand once
+you know what it is for. So, briefly, here is the shape of the thing being
+built in \cref{ch:tb}.
+
+A modern testbench does not wiggle pins. It creates \emph{transactions},
+objects that describe one complete operation on the interface. It
+\emph{randomises} them inside constraints that describe what the design is
+allowed to be given. It hands them to a \emph{driver} that knows the pin-level
+protocol, watches the pins with an independent \emph{monitor}, checks the
+results in a \emph{scoreboard} against a reference model, and measures what
+the run actually exercised with \emph{functional coverage}. Around all of it,
+\emph{assertions} state protocol rules that must hold on every cycle whether
+anyone is looking or not.
+
+The sections follow the path a transaction takes through that machine rather
+than the order of the \LRM{}: storage first, because everything else is built
+out of queues; then the class that a transaction is; then the threads and the
+mailbox that move it between components, because a driver and a monitor are
+useless until they can run at once and talk to each other; then the solver
+that fills it in, the coverage that measures what the solver produced, and the
+assertions that check the pins underneath all of it. \code{program} blocks
+come last, as history.
+
+Read it once for the shape, then use it as a reference. Nothing here is worth
+memorising in isolation, and nothing here is worth writing until
+\cref{ch:tb} gives it a job.
+
+\begin{notebox}{What this chapter deliberately does not do}
+It does not build a testbench. Every construct is shown on the smallest
+example that demonstrates it, and questions of the form "where should this
+component live" or "who should own this mailbox" are left to
+\cref{ch:tb}, which answers them all at once with a worked example. If a
+section feels like it stops one step short of usefulness, that is the step
+\cref{ch:tb} takes.
+\end{notebox}
+
+
+% ===========================================================================
+\section{Dynamic data types}
+\label{sec:beyond:dyn}
+\label{sec:toolkit:dyn}
+\index{queue}\index{associative array}\index{dynamic array}
+
+A testbench has to remember things: what it sent and has not yet checked,
+which addresses it has touched, how many of each kind of transaction it has
+produced. The number of things to remember is not known when the simulation
+elaborates, because it depends on how the run goes.
+
+That is the problem \VHDL{} solves badly. \VHDL{} gives you fixed arrays,
+access types with manual \code{new} and \code{deallocate}, and that is all;
+building a queue means writing a linked list, and building a sparse memory
+model means writing a hash table. \SV{} has three dynamic containers and a
+string type built into the language, and they are the foundation everything
+later in this chapter stands on.
+
+\textbf{Dynamic arrays} have a size fixed at run time:
+
+\begin{svcode}
+int    da [];
+da = new[16];          // allocate
+da = new[32](da);      // grow, preserving the first 16 elements
+$display("%0d", da.size());
+da.delete();           // free
+\end{svcode}
+
+\textbf{Queues} are the workhorse. They are ordered, indexable, and grow at
+either end:
+
+\begin{svcode}
+int q [$];                    // unbounded queue
+int b [$:15];                 // bounded to 16 entries
+
+q.push_back(3); q.push_front(1);
+int head = q.pop_front();
+q.insert(1, 99);              // insert 99 at index 1
+q.delete(0);                  // remove element 0
+$display("%0d entries, last = %0d", q.size(), q[$]);
+int slice [$] = q[1:3];       // sub-queue
+q = {};                       // empty it
+\end{svcode}
+
+A queue is what a \VHDL{} designer would build from an access type and a lot
+of pointer code. Push at one end, pop at the other, and you have the
+expected-value list that every scoreboard is made of.
+
+\textbf{Associative arrays} are sparse maps with an arbitrary index type:
+
+\begin{svcode}
+logic [31:0] mem [logic [31:0]];   // sparse memory model
+int          hits [string];        // counters keyed by name
+byte         anyidx [*];           // wildcard index type
+
+mem[32'h8000_0000] = 32'hCAFE_BABE;
+if (mem.exists(addr)) rdata = mem[addr];
+hits["write"]++;
+
+logic [31:0] k;
+if (mem.first(k)) do $display("%h : %h", k, mem[k]); while (mem.next(k));
+$display("%0d locations touched", mem.num());
+\end{svcode}
+
+An associative array indexed by a 32-bit address models a 4\,GB memory that
+costs one entry per location actually written. Doing this in \VHDL{} means a
+hash table you write yourself. Note \code{exists()}, and use it. Reading a key
+that was never written is not an error: it returns the default value of the
+element type, so a missing entry is indistinguishable from an entry holding
+zero. Some tools also \emph{create} the entry on that read
+(\tool{Verilator}~5.020 does; \code{m.num()} goes up and \code{m.exists()}
+starts returning 1), so a memory model that polls addresses it has not written
+can quietly grow. Test with \code{exists()} first, always.
+
+\textbf{Strings} are a real type, not an array of characters:
+
+\begin{svcode}
+string s = "cordic";
+$display("%0d %s %s", s.len(), s.toupper(), s.substr(0,2));
+s = {s, "_rot"};                       // concatenation
+string msg = $sformatf("x=%0d y=%0d", x, y);
+int    n   = s.atoi();
+\end{svcode}
+
+\code{\$sformatf} is the one to remember. It formats into a \code{string}
+instead of printing, which is how every object in this chapter builds the
+description of itself that a failure message will quote.
+
+\subsection{Array manipulation methods}
+\index{array!methods}
+
+Every array-like object, fixed or dynamic or queue or associative, supports a
+family of methods that take an optional \code{with} clause. The \code{with}
+clause is an expression evaluated for each element, where \code{item} names
+the element. \refdesignbook lists the ones you will use.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Array manipulation methods. \code{item} is the implicit iterator
+  name in the \code{with} clause.}
+  \label{tab:beyond:arraymethods}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Method} & \textbf{Returns} & \textbf{Example} \\
+    \midrule
+    \code{sum} & scalar & \code{q.sum()} \\
+    \code{product} & scalar & \code{q.product()} \\
+    \code{and}, \code{or}, \code{xor} & scalar & \code{q.xor()} \\
+    \code{min}, \code{max} & queue of 1 & \code{q.max()[0]} \\
+    \code{find} & queue & \code{q.find(x) with (x > 10)} \\
+    \code{find\_first}, \code{find\_last} & queue of 0 or 1 & \code{q.find\_first with (item == k)} \\
+    \code{find\_index} & queue of indices & \code{q.find\_index with (item < 0)} \\
+    \code{unique} & queue & \code{q.unique()} \\
+    \code{unique\_index} & queue of indices & \code{q.unique\_index()} \\
+    \code{sort}, \code{rsort} & in place & \code{t.sort with (item.addr)} \\
+    \code{reverse}, \code{shuffle} & in place & \code{q.shuffle()} \\
+    \code{size}, \code{delete} & nothing & \code{q.delete()} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two idioms are worth memorising:
+
+\begin{svcode}
+// how many transactions were writes?
+int nwr = trs.sum() with (int'(item.is_write));
+
+// the index of the first entry matching an address, or an empty queue
+int idx [$] = trs.find_index with (item.addr == a);
+if (idx.size() == 0) $error("no match for %h", a);
+\end{svcode}
+
+\code{sum() with} returning a count is the standard counting idiom: the
+\code{with} expression is evaluated per element and the results are added.
+Note the cast to \code{int}, which is not decoration.
+
+\begin{gotcha}{The reduction is defined to happen in the element's width}
+1800-2017 says the accumulation for \code{sum} is performed in the type of the
+array element, so for \code{bit b [] = '\{1,1,1,1\};} the additions are
+one-bit-wide and \code{b.sum()} is defined to be \code{0}, the parity, not
+\code{4}. Nothing warns you.
+
+Worse, tools disagree. \tool{Verilator}~5.020 returns \code{4} for that
+expression, so code that is silently wrong on a commercial simulator is
+silently right on the open-source one, and the bug appears only when you
+change tool. \tool{Icarus Verilog}~12.0 does not implement \code{sum} on a
+dynamic array at all and refuses to elaborate. The portable form is the only
+form worth writing: \code{b.sum() with (int'(item))}, every time you are
+counting rather than adding.
+\end{gotcha}
+
+% ===========================================================================
+\section{Classes and object orientation}
+\label{sec:beyond:class}
+\label{sec:toolkit:class}
+\index{class}
+
+A queue holds things. The next question is what those things are, and for a
+testbench the answer is almost always a \emph{transaction}: one complete
+operation on the interface, with the stimulus that went in, the result that
+came back, and enough identity to find it again in a log of ten thousand.
+
+A \SV{} class is what a \VHDL{} protected type almost is, plus inheritance,
+plus a garbage collector. If you have used a protected type to build a shared
+counter or a mutex, you already have the idea: data plus methods, with the
+data reachable only through the methods. What \VHDL{} does not give you is a
+protected type that can be \emph{extended}, copied, stored in a queue, or
+randomised.
+
+\begin{svcode}[caption={A transaction class, the basic unit of a \SV{} testbench},label={lst:beyond:class}]
+class bus_txn;
+  rand  bit [31:0] addr;
+  rand  bit [31:0] data;
+  rand  bit        is_write;
+  local int        id;                 // not visible outside
+  static int       next_id = 0;        // one copy for the whole class
+
+  function new(bit [31:0] a = 0);
+    addr = a;
+    id   = next_id++;
+  endfunction
+
+  virtual function string convert2string();
+    return $sformatf("[%0d] %s @%h = %h", id,
+                     is_write ? "WR" : "RD", addr, data);
+  endfunction
+endclass
+\end{svcode}
+
+The pieces, in \VHDL{} terms:
+
+\begin{itemize}
+  \item \code{new()} is the constructor. \code{bus\_txn t = new();} allocates
+        an object and returns a \emph{handle} to it. There is no
+        \code{deallocate}: objects are garbage collected when the last handle
+        to them is dropped.
+  \item \code{this} refers to the current object, exactly as in C++ or Java,
+        and is needed only when a local name shadows a member.
+  \item \kw{local} and \kw{protected} restrict visibility; the default is
+        public, unlike a protected type where everything is private.
+  \item \kw{static} members belong to the class rather than to any object, so
+        \code{next\_id} counts every transaction ever created.
+  \item \kw{virtual} on a method enables polymorphism.
+\end{itemize}
+
+Two properties of a class matter more than the syntax. The first is that the
+locals of a class method have automatic lifetime, which is what makes it safe
+to call the same method from several threads at once
+(\cref{sec:toolkit:lifetime}). The second is that a class variable is a
+reference, and that one catches everybody.
+
+\subsection{Handles are references}
+
+This is the single most common source of confusion for a \VHDL{} designer, so
+it gets its own box.
+
+\begin{gotcha}{A class variable is a handle, and assignment copies the handle}
+\begin{svcode}
+bus_txn a = new();
+a.addr = 32'h1000;
+bus_txn b = a;      // b and a name the SAME object
+b.addr = 32'h2000;
+$display("%h", a.addr);   // 2000, not 1000
+\end{svcode}
+Assigning one handle to another does not copy the object; it makes a second
+name for it. A \VHDL{} record assignment copies the whole record, and that
+instinct is wrong here. The symptom is always the same: a container that
+appears to hold $N$ different objects and actually holds $N$ references to one
+object, which carries whatever values were last written into it. Put a
+\emph{copy} into the container, or construct a fresh object each time round
+the loop, and never store the handle you are about to reuse.
+\end{gotcha}
+
+Copying is explicit, and comes in two depths:
+
+\begin{svcode}
+bus_txn c = new a;          // shallow copy: new object, members copied
+                            // ... but nested handles still shared
+
+function bus_txn clone();   // deep copy: written by hand
+  clone = new();
+  clone.addr = addr; clone.data = data; clone.is_write = is_write;
+  clone.payload = payload.clone();   // recursive, for nested objects
+endfunction
+\end{svcode}
+
+\code{new a} performs a shallow copy: scalar members are duplicated, but a
+member that is itself a class handle is copied as a handle, so both objects
+share the nested object. UVM automates this with field macros
+(\cref{ch:uvm}); without UVM you write \code{clone()} yourself.
+
+\subsection{Inheritance and polymorphism}
+\index{class!inheritance}\index{polymorphism}
+
+\begin{svcode}
+virtual class txn_base;                 // abstract: cannot be instantiated
+  pure virtual function string convert2string();
+  virtual function void display();
+    $display("%s", convert2string());   // works for every subclass
+  endfunction
+endclass
+
+class mem_txn extends txn_base;
+  rand bit [31:0] addr;
+  function new(); super.new(); endfunction
+  virtual function string convert2string();
+    return $sformatf("addr=%h", addr);
+  endfunction
+endclass
+
+txn_base t;                             // a base handle ...
+mem_txn  d = new();
+t = d;                                  // ... holding a derived object
+t.display();                            // calls mem_txn's convert2string
+\end{svcode}
+
+A \kw{virtual} method is resolved by the type of the \emph{object}, not the
+type of the handle. A \kw{pure virtual} method has no body and forces every
+subclass to supply one; a class containing one must be declared
+\kw{virtual class} and cannot be instantiated. This is the mechanism the whole
+of UVM is built on: the framework holds base-class handles and calls virtual
+methods, and your subclasses supply the behaviour.
+
+Going the other way, from a base handle to a derived one, needs a checked
+cast:
+
+\begin{svcode}
+mem_txn d2;
+if (!$cast(d2, t)) $fatal(1, "handle is not a mem_txn");
+\end{svcode}
+
+\code{\$cast} returns 0 rather than failing when the object is not of the
+target type, so its return value must be checked.
+
+\subsection{Parameterised classes and the scope operator}
+
+\begin{svcode}
+class fifo_model #(type T = int, int DEPTH = 8);
+  local T q [$];
+  static int instances = 0;
+  function void put(T x);
+    if (q.size() >= DEPTH) $error("overflow");
+    q.push_back(x);
+  endfunction
+endclass
+
+fifo_model #(bus_txn, 16) f = new();
+$display("%0d", fifo_model#(bus_txn,16)::instances);   // :: reaches statics
+\end{svcode}
+
+The \code{::} operator reaches into a class scope without an object: static
+members, static methods, typedefs and parameters. Note that
+\code{fifo\_model\#(int,8)} and \code{fifo\_model\#(bus\_txn,16)} are
+different types with separate static variables, which is a surprise the first
+time a counter you believed was global turns out to have been counting two
+separate populations.
+
+\begin{rosetta}
+\begin{rleft}
+type counter_t is protected
+  procedure incr;
+  impure function get return natural;
+end protected;
+
+type counter_t is protected body
+  variable n : natural := 0;
+  procedure incr is begin
+    n := n + 1;
+  end procedure;
+  impure function get return natural
+  is begin return n; end function;
+end protected body;
+\end{rleft}
+\begin{rright}
+class counter_t;
+  local int n = 0;
+  function void incr(); n++; endfunction
+  function int get(); return n; endfunction
+endclass
+
+// ... plus inheritance, copying,
+// randomisation, queues of them,
+// and no explicit deallocation.
+counter_t c = new();
+\end{rright}
+\end{rosetta}
+
+Say it plainly: \textbf{classes are not synthesisable}. Not "poorly
+supported"; not synthesisable at all, by any tool, by design. They exist for
+testbenches, and every line of class code you write is simulation-only.
+
+% ===========================================================================
+\section{Concurrency control}
+\label{sec:beyond:fork}
+\label{sec:toolkit:fork}
+\index{fork!join}\index{mailbox}\index{semaphore}
+
+Objects on their own do nothing. Two of the components in \cref{ch:tb}, the
+driver and the monitor, have to run at the same time, at different rates, for
+the whole simulation, and they have to pass transaction objects between
+themselves without either one waiting on the other's schedule. That needs
+threads that can be created after elaboration, and a way for threads to hand
+each other data safely.
+
+\VHDL{} has neither. A \VHDL{} process is static: it exists from elaboration
+to the end of simulation, and the number of processes is fixed when the design
+is elaborated. If you want ten concurrent bus agents you write ten processes,
+or one generate loop that writes them for you, and you decide how many before
+the run starts.
+
+\SV{} threads are dynamic. You can create one at run time, wait for some of
+them, kill the rest, and create more.
+
+\subsection{\texttt{fork} and its endings}
+
+\begin{svcode}[caption={The three flavours of fork},label={lst:beyond:fork}]
+fork                      // join: wait for ALL branches
+  drive_a();
+  drive_b();
+join
+
+fork                      // join_any: continue after the FIRST finishes
+  begin wait_for_response(); resp_ok = 1; end
+  begin #1000ns;           resp_ok = 0; end   // a timeout
+join_any
+disable fork;             // kill whatever is still running
+
+fork                      // join_none: continue immediately
+  monitor_forever();      // a background thread
+join_none
+
+// later:
+wait fork;                // block until all my child threads are done
+\end{svcode}
+
+\code{join} is a barrier and the one ending with a \VHDL{}-like feel. The
+\code{join\_any} plus \code{disable fork} pair in the middle is the canonical
+timeout idiom, and there is no way to write it in \VHDL{} without a shared
+variable and a lot of care. \code{join\_none} starts a background thread and
+returns immediately, which is how a component that must run forever gets
+started without blocking whoever started it.
+
+\code{wait fork} is the fourth ending and the one people forget. It is not a
+\code{fork} at all: it is a statement that blocks until every thread the
+current thread has spawned, by any of the three forms, has finished.
+
+\begin{gotcha}{\texttt{disable fork} is scoped to the thread, not to the \texttt{fork}}
+This is a language trap rather than a testbench trap, and it is worth
+understanding precisely because the damage is silent.
+
+\code{disable fork} terminates \emph{all} active descendant threads of the
+thread that executes it. Not the branches of the immediately preceding
+\code{fork}: every descendant, however long ago it was started and by which
+call. If a task you invoked twenty lines earlier left a \code{join\_none}
+thread running in the background, that thread dies too, without a message.
+
+The fix is to give the \code{disable} a bounded scope by nesting the timeout
+inside its own thread, so that the only descendants in existence are the two
+branches you care about:
+
+\begin{svcode}
+fork begin : timeout_scope
+  fork
+    wait_for_response();
+    #1us;
+  join_any
+  disable fork;      // sees only timeout_scope's own children
+end join
+\end{svcode}
+
+The alternative is \code{disable} with an explicit block label, which kills
+exactly that named block and nothing else. Either is fine; a bare
+\code{disable fork} in a task that anybody else may call is not.
+\end{gotcha}
+
+\subsection{Passing data between threads}
+
+\SV{} provides two library classes and one language construct for
+inter-thread communication. All three are built into the language; none of
+them has to be imported.
+
+A \textbf{mailbox} is a typed, blocking FIFO. It is what a \VHDL{} designer
+would build from a shared variable and a protected type, except that the
+blocking semantics are already correct and already race-free.
+
+\begin{svcode}
+mailbox #(bus_txn) mbx  = new();    // unbounded: put() never blocks
+mailbox #(bus_txn) mbx4 = new(4);   // bounded to 4 entries
+
+mbx.put(t);              // blocks while the mailbox is full
+mbx.get(t);              // blocks while it is empty, then removes
+mbx.peek(t);             // like get, but leaves the item in place
+if (mbx.try_put(t)) ...  // non-blocking: returns 0 instead of waiting
+if (mbx.try_get(t)) ...
+if (mbx.try_peek(t)) ...
+$display("%0d pending", mbx.num());
+\end{svcode}
+
+Bounded and unbounded are genuinely different objects, not a tuning knob. An
+unbounded mailbox is a pure queue with a blocking read: the producer runs as
+fast as it likes and memory absorbs the difference. A bounded one is a
+rendezvous with slack $n$: the producer is throttled to the consumer's rate,
+which is usually what you want and is always what makes a stalled consumer
+visible.
+
+Note that a mailbox is untyped unless you parameterise it. Plain
+\code{mailbox mbx = new();} accepts anything, and a type error then becomes a
+run-time failure inside \code{get} rather than a compile error. Write
+\code{mailbox \#(T)}.
+
+A \textbf{semaphore} is a counting mutex. It holds a number of keys; a thread
+that wants the resource takes keys and blocks until enough are available, and
+returns them when it is done.
+
+\begin{svcode}
+semaphore sem = new(1);    // one key: a plain mutex
+sem.get(1);                // blocks until a key is free
+// ... exclusive section ...
+sem.put(1);                // return it
+
+if (sem.try_get(1)) ...    // non-blocking
+\end{svcode}
+
+\code{new(0)} creates a semaphore with no keys, which is a barrier that some
+other thread must open with \code{put}. Note that \code{put} does not check
+that you ever held a key: putting more keys back than you took quietly
+increases the count and destroys the mutual exclusion.
+
+A \textbf{named event} is a synchronisation point with no payload. It is
+declared with \kw{event}, triggered with \code{->}, and waited on in one of
+two ways that behave differently.
+
+\begin{svcode}
+event e;
+-> e;                              // trigger it
+@(e);                              // wait for the NEXT trigger
+wait (e.triggered);                // ... or for one in this time step
+
+wait_order(a, b, c);               // events must occur in this order
+\end{svcode}
+
+\begin{gotcha}{\texttt{@(e)} and \texttt{wait (e.triggered)} are not the same wait}
+\code{@(e)} is edge-sensitive: it blocks until the \emph{next} trigger of
+\code{e}, and a trigger that already happened is gone. \code{e.triggered} is a
+state that is true for the whole time step in which the event fired, so a
+thread that reaches \code{wait (e.triggered)} later in the same time step
+still sees it.
+
+The failure this causes is total and silent: a thread waits forever on an
+event that fired a few picoseconds of simulated time before it got there, and
+the testbench simply stops making progress with no error. It is at its most
+likely exactly where you least want it, between a thread that was just started
+with \code{join\_none} and has not yet executed its first statement, and the
+thread that started it. Prefer \code{wait (e.triggered)} everywhere except in
+a deliberate "wait for the next one" loop.
+\end{gotcha}
+
+\subsection{Static and automatic lifetime}
+\label{sec:toolkit:lifetime}
+\index{automatic lifetime}\index{static lifetime}
+
+Dynamic threads bring a trap that does not exist in a language where the
+number of processes is fixed. It catches everybody exactly once.
+
+In Verilog, and by inheritance in \SV{}, the arguments and locals of a task or
+function declared in a module, interface or package have \textbf{static}
+lifetime by default: one copy, created at elaboration, shared by every
+invocation. A \VHDL{} process variable is static in the same sense, so the
+concept is not new. What is new is that \SV{} lets you call the same task from
+several threads at once, and they then share those variables.
+
+\begin{svcode}[caption={The bug: four threads, one variable},label={lst:toolkit:staticbug}]
+task print_after(int n);      // `int n' is STATIC here
+  #(n * 10ns);
+  $display("thread %0d at %0t", n, $time);
+endtask
+
+initial begin
+  for (int i = 1; i <= 4; i++) begin
+    fork
+      print_after(i);         // four concurrent calls, ONE copy of n
+    join_none
+  end
+end
+\end{svcode}
+
+All four calls share the single static \code{n}. The first sets it to 1 and
+suspends at the delay; the second sets it to 2 and suspends; by the time any
+of them wakes, \code{n} is 4. The output is four identical lines, all at the
+same time, and the testbench appears to have started one thread instead of
+four.
+
+There are two fixes and you need both.
+
+\begin{svcode}[caption={The fix: automatic task, automatic loop variable},label={lst:toolkit:staticfix}]
+task automatic print_after(int n);   // each call gets its own n
+  #(n * 10ns);
+  $display("thread %0d at %0t", n, $time);
+endtask
+
+initial begin
+  for (int i = 1; i <= 4; i++) begin
+    automatic int k = i;             // a fresh k per iteration
+    fork
+      print_after(k);
+    join_none
+  end
+end
+\end{svcode}
+
+\code{task automatic} gives every invocation its own copy of the arguments and
+locals. \code{automatic int k = i;} inside the loop body gives every
+\emph{iteration} its own variable to capture the loop counter into; without
+it, the forked thread reads \code{i} after the loop has advanced and you get
+the same symptom for a different reason.
+
+\begin{gotcha}{Where the default flips, and why it bites on a refactor}
+Everything declared inside a \kw{class} or a \kw{program} already has
+automatic lifetime. Everything declared directly in a \kw{module},
+\kw{interface} or \kw{package} does not. So the trap does not appear while you
+are writing class-based code, and appears the moment you lift a working class
+method out into a module-level task to share it, at which point the same
+source text means something different. Write \kw{automatic} on every task and
+function that is not deliberately keeping state between calls, or declare the
+whole enclosing unit automatic (\code{module automatic tb;},
+\code{program automatic test;}), which flips the default for everything inside
+it. \VHDL{} procedures are always automatic, so nothing in your background
+prepares you for this.
+\end{gotcha}
+
+% ===========================================================================
+\section{Randomisation and constraints}
+\label{sec:beyond:random}
+\label{sec:toolkit:random}
+\index{randomisation}\index{constraint}
+
+The transaction class exists; something has to fill it in. A \VHDL{}
+testbench describes stimulus \emph{procedurally}: a loop that walks addresses,
+a nested loop that walks data patterns, a hand-written list of corner cases.
+You write the sequence of inputs, so the test contains exactly as many cases
+as you had patience for.
+
+\SV{} lets you describe the \emph{legal input space} declaratively and asks a
+solver for points inside it. This is a different way of thinking, and it is
+the single largest productivity difference between the two languages in
+verification: the test now contains one description and a number you can
+raise from a hundred to a hundred thousand overnight.
+
+\begin{svcode}[caption={A constrained transaction},label={lst:beyond:rand}]
+class bus_txn;
+  rand  bit [31:0] addr;
+  rand  bit [7:0]  len;
+  rand  bit [1:0]  size;        // weighted below; see the note on randc
+  rand  bit        is_write;
+
+  constraint c_align  { addr[1:0] == 2'b00; }
+  constraint c_range  { addr inside {[32'h0000_0000 : 32'h0000_FFFF],
+                                     [32'h8000_0000 : 32'h8000_0FFF]}; }
+  constraint c_len    { len inside {[1:16]};
+                        is_write -> len <= 8; }
+  constraint c_dist   { size dist {0 := 1, 1 := 2, 2 := 5, 3 := 2}; }
+  constraint c_noxing { (addr[11:0] + len*4) < 4096; }  // no 4k crossing
+endclass
+
+bus_txn t = new();
+if (!t.randomize()) $fatal(1, "constraints unsatisfiable");
+\end{svcode}
+
+Every variable marked \kw{rand} is chosen by the solver so that all active
+constraints hold simultaneously. The solver considers the constraints as a
+system, not in order: \code{c\_noxing} can force \code{len} down even though
+\code{len} appears first in the file. That is the property that makes the
+declarative form worth learning, and it is also why the distribution of the
+result is rarely the one you pictured.
+
+\index{randc}\kw{randc} is the other declaration you will meet. It makes a
+variable \emph{cyclic}: the solver visits every value of its range once before
+any value repeats, which is how you sweep a small field without writing the
+loop. It is tempting here, because \code{size} has only four values. It is not
+allowed here: 1800-2017 forbids a \code{dist} constraint on a \kw{randc}
+variable, and for a good reason, since a cyclic variable already has a fixed
+distribution. Choose one, weighted or cyclic, per variable.
+
+\begin{gotcha}{Ignoring the return value of \texttt{randomize()}}
+\code{randomize()} returns \code{1} on success and \code{0} when the solver
+could not satisfy the constraints. It does not throw, print or stop.
+
+Written as a bare statement, \code{t.randomize();} compiles, discards the
+result, and leaves the object holding whatever values it had before, which for
+a freshly constructed object is all zeros. The test then runs happily, sending
+the same transaction a thousand times, and reports a full pass having verified
+one vector. \code{void'(t.randomize());} is worse than the bare call, not
+better, because it documents in the source that you meant to ignore a
+failure.
+
+The only acceptable forms are
+\code{if (!t.randomize()) \$fatal(1, "...");} or a macro that expands to it.
+Every serious lint rule flags a discarded \code{randomize()} return value, and
+every team turns that rule on after being bitten once. When it does fail, use
+the tool's constraint debugger to find the contradiction rather than deleting
+constraints until the solver stops complaining.
+\end{gotcha}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Constraint constructs.}
+  \label{tab:beyond:constraints}
+  \small
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    \textbf{Construct} & \textbf{Meaning} \\
+    \midrule
+    \code{a inside \{[1:9], 15\}} & set and range membership \\
+    \code{a -> b} & implication: if \code{a} holds then \code{b} must \\
+    \code{if (a) b; else c;} & the same thing, written imperatively \\
+    \code{x dist \{1 := 4, 2 := 1\}} & weight \emph{per value}, ratio 4:1 \\
+    \code{x dist \{[1:4] :/ 8\}} & weight 8 shared \emph{across} the range \\
+    \code{solve a before b} & ordering hint; changes the distribution only \\
+    \code{foreach (arr[i]) arr[i] < 10;} & one constraint per element \\
+    \code{unique \{a, b, c\}} & all different \\
+    \code{soft x == 0;} & default, overridable by a later constraint \\
+    \code{x.size() inside \{[1:8]\}} & constrain a dynamic array's size \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Controlling randomisation from the outside}
+
+The class states what is \emph{legal}. A test states what it wants
+\emph{this time}, and it does so without editing the class. That separation is
+the reason the mechanism is worth its complexity.
+
+Inline constraints add requirements for one call only:
+
+\begin{svcode}
+if (!t.randomize() with { addr inside {[32'h1000:32'h1FFF]};
+                          is_write == 1'b1; })
+  $fatal(1, "cannot build a write into the low window");
+\end{svcode}
+
+Individual variables and constraint blocks can be switched off:
+
+\begin{svcode}
+t.size.rand_mode(0);        // stop randomising size; keep its value
+t.c_align.constraint_mode(0);  // allow unaligned addresses for this test
+\end{svcode}
+
+And two hooks run around every call:
+
+\begin{svcode}
+function void pre_randomize();  ... endfunction   // set up state
+function void post_randomize();                   // fix up derived fields
+  crc = compute_crc(addr, data);
+endfunction
+\end{svcode}
+
+For variables that are not class members there is \code{std::randomize()}:
+
+\begin{svcode}
+int a, b;
+if (!std::randomize(a, b) with { a < b; b < 100; }) $error("no solution");
+\end{svcode}
+
+And for cases where a distribution is all you need, without a solver:
+
+\begin{svcode}
+x = $urandom();                  // 32-bit unsigned
+y = $urandom_range(15, 4);       // inclusive, either argument order
+randcase                         // weighted branch selection
+  3: send_read();
+  1: send_write();
+  1: send_idle();
+endrandcase
+\end{svcode}
+
+\begin{gotcha}{The solver does not distribute the way you expect}
+Given \code{rand bit [3:0] a; rand bit b; constraint c \{ b -> a == 0; \}}
+you might expect \code{b} to be 1 half the time. It is not. The solver picks
+uniformly over the \emph{solution space}: there are 16 solutions with
+\code{b == 0} and exactly one with \code{b == 1}, so \code{b} is 1 about one
+time in seventeen. \code{solve b before a;} restores the intuitive split by
+telling the solver to choose \code{b} first. This is not a bug and it is not
+tool-specific; it follows from the definition. Whenever a random variable
+constrains the range of another, check the distribution with a covergroup
+before trusting it.
+\end{gotcha}
+
+\begin{tipbox}{Reproducibility}
+A random test that cannot be replayed is worthless. Fix the seed on the
+command line (\code{vsim -sv\_seed 12345} or the equivalent), print it in the
+banner of every run, and record it with the failure. Do not call
+\code{\$urandom} from code whose execution order depends on the number of
+threads, because the per-thread random stability guarantees of the \LRM{}
+depend on objects being created in a deterministic order.
+\end{tipbox}
+
+\begin{notebox}{Constraints need a real solver, and not every tool has one}
+Constrained randomisation is the feature that most sharply divides simulators.
+\tool{QuestaSim} and the other commercial simulators ship a constraint solver
+and implement the whole of clause 18. The open-source tools do not, and they
+fail in two different and equally dangerous ways.
+\tool{Icarus Verilog}~12.0 rejects a \code{constraint} block outright
+(\code{sorry: Constraint declarations not supported}), which is at least
+honest. \tool{Verilator}~5.020 compiles the class, accepts
+\code{randomize()}, and emits \code{\%Warning-CONSTRAINTIGN: Constraint
+ignored (unsupported)} once per constraint block, then randomises the
+\kw{rand} variables with every constraint discarded. Compiled exactly as
+written, \refdesignbook produces five such warnings and a first draw
+of \code{len = 156} against \code{len inside \{[1:16]\}}. A warning you
+filtered out of the log is the only thing standing between that and a test
+which believes its stimulus is legal.
+\refsimulationbook returns to what this means for an open-source flow.
+\end{notebox}
+
+% ===========================================================================
+\section{Functional coverage}
+\label{sec:beyond:cov}
+\label{sec:toolkit:cov}
+\index{coverage!functional}\index{covergroup}
+
+Random stimulus raises an immediate question: what did it actually test? The
+solver was told what is legal, not what is interesting, and it has no idea
+which of the legal points matter. The answer is functional coverage, and the
+distinction from code coverage is the first thing to get straight, because the
+audience for this book has usually met only the second.
+
+\textbf{Code coverage} is measured by the tool from the \RTL{} source with no
+help from you: which lines executed, which branches were taken both ways,
+which expressions took each value, which state machine states and transitions
+were visited. It answers "did the stimulus exercise the code I wrote?" It
+cannot tell you about a feature you forgot to implement, because there is no
+code for it.
+
+\textbf{Functional coverage} is written by you, from the specification. It
+answers "did the stimulus exercise the situations the specification cares
+about?" A design that ignores byte enables can have 100\% code coverage and
+0\% coverage of the byte-enable cross, because you wrote a coverpoint for
+byte enables and the tests never varied them.
+
+You need both. Code coverage finds untested code; functional coverage finds
+untested intent.
+
+\begin{svcode}[caption={A covergroup for the bus transaction},label={lst:beyond:cg}]
+covergroup bus_cg @(posedge clk);
+  option.per_instance = 1;
+  option.at_least     = 2;      // a bin counts as hit after 2 samples
+
+  cp_kind : coverpoint kind {
+    bins rd   = {READ};
+    bins wr   = {WRITE};
+    bins idle = {IDLE};
+  }
+
+  cp_len : coverpoint len {
+    bins one       = {1};
+    bins small     = {[2:7]};
+    bins burst[4]  = {[8:63]};       // auto-split into 4 bins
+    bins max       = {64};
+    illegal_bins bad = {0};
+    ignore_bins  rsv = {[65:255]};
+  }
+
+  cp_addr : coverpoint addr[15:12] {
+    wildcard bins low  = {4'b00??};
+    bins     other     = default;
+  }
+
+  cp_seq : coverpoint kind {
+    bins rd_then_wr = (READ => WRITE);
+    bins back2back  = (WRITE [*3]);
+  }
+
+  x_kind_len : cross cp_kind, cp_len {
+    ignore_bins no_idle_len = binsof(cp_kind.idle);
+    bins        long_writes = binsof(cp_kind.wr) &&
+                              binsof(cp_len) intersect {[8:64]};
+  }
+endgroup
+
+bus_cg cg = new();      // covergroups must be constructed
+\end{svcode}
+
+The vocabulary, briefly:
+
+\begin{itemize}
+  \item A \kw{coverpoint} is a variable or expression whose values you care
+        about. Without explicit bins, the tool creates one automatically per
+        value, up to \code{option.auto\_bin\_max} (64 by default).
+  \item \kw{bins} name value sets. \code{bins b[4] = \{[8:63]\}} splits the
+        range into four; \code{bins b[] = \{[8:63]\}} makes one bin per value.
+  \item \kw{illegal\_bins} turn a hit into a runtime error; \kw{ignore\_bins}
+        remove values from the denominator, which is how you exclude
+        unreachable cases honestly.
+  \item \code{default} catches everything not named, and does not count
+        towards coverage. It is a debugging aid, not a way to reach 100\%.
+  \item Transition bins use \code{=>}: \code{(READ => WRITE)} covers the
+        value pair on consecutive samples, and \code{[*3]} repeats.
+  \item \kw{cross} builds the product of two coverpoints;
+        \code{binsof}/\code{intersect} filter the product down to the
+        combinations that mean something.
+  \item \code{option.per\_instance = 1} keeps a separate record per covergroup
+        instance instead of merging them, which you almost always want when
+        the same agent is instantiated several times.
+\end{itemize}
+
+Sampling is either automatic, through the event in the \code{covergroup}
+header, or manual:
+
+\begin{svcode}
+covergroup txn_cg (ref bus_txn t);   // no event: sampled explicitly
+  cp_addr : coverpoint t.addr { bins lo = {[0:'hFFFF]};
+                                bins hi = {['h8000_0000:'h8000_0FFF]}; }
+endgroup
+...
+tcg.sample();
+$display("coverage so far: %0.2f%%", tcg.get_coverage());
+\end{svcode}
+
+Explicit \code{sample()} is the better habit, because it lets you sample a
+complete, validated transaction rather than whatever the wires happened to
+hold at an arbitrary clock edge. \cref{ch:tb} shows where in a testbench that
+call belongs.
+
+\begin{gotcha}{A coverpoint with no bins can report 100\% and mean nothing}
+\code{coverpoint addr;} on a 32-bit address does not create four billion bins.
+It creates \code{auto\_bin\_max} of them (64), each covering a huge range, and
+hitting one address in each range reports full coverage. Worse, a coverpoint
+on a single-bit signal that never changes will report 50\% and look like
+progress. Always write explicit bins that correspond to something in the
+specification. Auto-bins are for a first look, never for a coverage sign-off
+number.
+\end{gotcha}
+
+\begin{gotcha}{A covergroup is a type; nothing is sampled until you construct it}
+\code{covergroup bus\_cg; ... endgroup} declares a type, exactly as
+\code{class} does. Until \code{cg = new();} has run there is no instance and
+every \code{sample()} call does nothing useful. The coverage report then shows
+0\% and looks like a stimulus problem rather than a missing line. A covergroup
+declared inside a class may only be constructed in that class's constructor,
+which at least makes the right place to put the line obvious.
+\end{gotcha}
+
+\begin{ruleofthumb}
+Write the covergroup before the tests, from the specification. A coverage
+model written after the tests measures the tests, not the specification.
+\end{ruleofthumb}
+
+Coverage numbers are produced in order to be closed, and closing them is a
+loop rather than a measurement: run many seeds, merge the databases, look at
+the holes, and decide for each one whether it needs a directed test, a
+constraint change or an honest \code{ignore\_bins}. That loop is a methodology
+question rather than a language question, and \cref{sec:tb:closure} walks
+through it with real numbers.
+
+\begin{notebox}{Covergroups are a commercial-simulator feature}
+Unlike constraints, where \tool{Verilator} silently ignores what it cannot
+do, covergroups are rejected outright. \tool{Verilator}~5.020 reports
+\code{\%Error-UNSUPPORTED: covergroup}, along with a separate error for each
+coverpoint and each bin specification, and stops. \tool{Icarus
+Verilog}~12.0 does not parse the construct at all: a \code{covergroup} block
+is a syntax error. Functional coverage in this form needs
+\tool{QuestaSim} or another commercial simulator.
+\refsimulationbook describes what \tool{Verilator} offers instead, which
+is line and toggle coverage, a different and much weaker thing.
+\end{notebox}
+
+% ===========================================================================
+\section{SystemVerilog Assertions}
+\label{sec:beyond:sva}
+\label{sec:toolkit:sva}
+\index{assertion}\index{SVA}
+
+Coverage says what happened. Something still has to say what was allowed to
+happen, on every cycle, whether or not a scoreboard was watching.
+
+A \VHDL{} \code{assert ... report ... severity} statement checks a condition
+at one instant. Checking something that spans time, such as "grant follows
+request within three cycles", means writing a process with a counter, and the
+process is usually longer and buggier than the design it checks.
+
+SVA is a temporal language embedded in \SV{} for exactly this. It is also the
+one construct in this chapter that a design engineer writes as often as a
+verification engineer, because an assertion inside a module is a statement of
+the module's contract, and \code{bind} (\refdesignbook) lets you
+attach one to a module you do not own.
+
+\subsection{Immediate and concurrent}
+
+An \emph{immediate} assertion is the \VHDL{} one, in procedural code:
+
+\begin{svcode}
+always_comb begin
+  a_onehot: assert ($onehot(sel))
+    else $error("sel = %b is not one-hot", sel);
+end
+\end{svcode}
+
+A \emph{concurrent} assertion is a separate, clocked, always-running check:
+
+\begin{svcode}
+a_gnt: assert property (@(posedge clk) disable iff (!rst_n)
+                        req |-> ##[1:3] gnt)
+       else $error("no grant within 3 cycles of request");
+\end{svcode}
+
+\subsection{Sampling semantics, and why they matter}
+\index{assertion!sampling}
+
+A concurrent assertion does not read signals when it runs. It reads
+\emph{sampled values}, taken in the Preponed region of the clock tick, before
+any design process has executed in that time step. This is the same idea as
+the clocking-block input skew of \refdesignbook, and it exists for
+the same reason: an assertion must see the values the flip-flops saw, not the
+values they are producing.
+
+That gives you a set of sampled-value functions, all of which operate on the
+preponed values:
+
+\begin{svcode}
+$past(sig)      // the sampled value one clock tick ago
+$past(sig, 3)   // three ticks ago
+$rose(sig)      // sampled value went 0 -> 1 at this tick
+$fell(sig)      // 1 -> 0
+$stable(sig)    // unchanged since the previous tick
+$changed(sig)   // the negation of $stable
+\end{svcode}
+
+\begin{gotcha}{An assertion sees the \emph{old} value at the edge}
+\begin{svcode}
+always_ff @(posedge clk) count <= count + 1;
+a_inc: assert property (@(posedge clk) count == $past(count) + 1);
+\end{svcode}
+This passes, and the reason surprises people. At the edge where \code{count}
+becomes 5, the assertion samples \code{count} in the Preponed region, so it
+reads 4, and \code{\$past(count)} reads 3. The assertion is comparing the two
+\emph{previous} values, and it never sees the value being assigned at the
+current edge. Every concurrent assertion is one delta behind the procedural
+code around it. Write \code{\$past} expressions in terms of what the register
+held \emph{before} this edge, and cross-check the first cycle after reset,
+where \code{\$past} of an unknown is \code{X} and comparisons quietly fail.
+\end{gotcha}
+
+\subsection{Sequences and properties}
+
+\begin{svcode}[caption={A valid/ready handshake checker},label={lst:beyond:sva}]
+module handshake_chk #(parameter int W = 16) (
+  input logic clk, rst_n,
+  input logic valid, ready,
+  input logic [W-1:0] data
+);
+  // 1. valid must not be withdrawn before the transfer completes
+  property p_valid_stable;
+    @(posedge clk) disable iff (!rst_n)
+      valid && !ready |=> valid;
+  endproperty
+
+  // 2. the payload must not change while the transfer is pending
+  property p_data_stable;
+    @(posedge clk) disable iff (!rst_n)
+      valid && !ready |=> $stable(data);
+  endproperty
+
+  // 3. every request is eventually granted, within 32 cycles
+  property p_no_starve;
+    @(posedge clk) disable iff (!rst_n)
+      $rose(valid) |-> ##[1:32] (valid && ready);
+  endproperty
+
+  a_valid_stable: assert property (p_valid_stable)
+                  else $error("valid dropped at %t", $time);
+  a_data_stable : assert property (p_data_stable);
+  a_no_starve   : assert property (p_no_starve);
+
+  // measurement, not checking:
+  c_transfer    : cover property (@(posedge clk) valid && ready);
+  c_backpressure: cover property (@(posedge clk) valid && !ready [*4]);
+endmodule
+\end{svcode}
+
+\refdesignbook is a complete, useful checker. It is a plain module, so
+it can be instantiated normally, or attached to a design you do not own with
+\code{bind} (\refdesignbook); \refexamplebook attaches this one to the
+CORDIC rotator that way. Three assertions and two covers replace perhaps
+eighty lines of \VHDL{} checking process.
+
+The operators, in order of how often you will need them, appear in
+\refdesignbook.
+
+\begin{table}[htbp]
+  \centering
+  \caption{The assertion operators worth learning first.}
+  \label{tab:beyond:sva}
+  \small
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    \textbf{Operator} & \textbf{Meaning} \\
+    \midrule
+    \code{a |-> b} & overlapping implication: \code{b} starts on the same tick \\
+    \code{a |=> b} & non-overlapping: \code{b} starts on the next tick \\
+    \code{\#\#n} & delay of exactly \code{n} clock ticks \\
+    \code{\#\#[a:b]} & delay between \code{a} and \code{b} ticks \\
+    \code{\#\#[1:\$]} & eventually, unbounded (needs a liveness-aware tool) \\
+    \code{disable iff (c)} & abandon any attempt in progress while \code{c} \\
+    \code{a [*n]} & \code{a} holds on \code{n} consecutive ticks \\
+    \code{a [->n]} & \code{a} holds on the \code{n}-th occurrence, gaps allowed \\
+    \code{a [=n]} & \code{n} occurrences, the last need not be at the end \\
+    \code{a throughout b} & \code{a} holds for the whole duration of \code{b} \\
+    \code{a within b} & sequence \code{a} occurs inside sequence \code{b} \\
+    \code{a intersect b} & both hold and end on the same tick \\
+    \code{first\_match(a)} & take only the earliest match of \code{a} \\
+    \code{a and b}, \code{a or b} & both / either sequence matches \\
+    \code{not p} & the property must never hold \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      >={Latex[length=1.6mm]},
+      att/.style={draw=accent,line width=1pt,->},
+      fail/.style={draw=warnframe,line width=1pt,->},
+      tick/.style={draw=codeframe,line width=0.6pt},
+      lbl/.style={font=\scriptsize\sffamily}]
+
+    % time axis
+    \draw[->,line width=0.8pt] (0,0) -- (11.6,0) node[right,lbl] {$t$};
+    \foreach \i in {0,...,6} {
+      \draw[tick] (\i*1.6,-0.15) -- (\i*1.6,3.0);
+      \node[lbl,below] at (\i*1.6,-0.2) {$c_{\i}$};
+    }
+
+    % req waveform
+    \node[lbl,anchor=east] at (-0.15,0.6) {\ttfamily req};
+    \draw[line width=1pt,draw=codekey]
+      (0,0.4) -- (1.6,0.4) -- (1.6,0.9) -- (4.8,0.9) -- (4.8,0.4) -- (9.6,0.4);
+
+    % attempts
+    \node[lbl,anchor=east] at (-0.15,1.6) {attempts};
+    \draw[att] (0,1.4) -- (0.5,1.4) node[right,lbl] {vacuous};
+    \draw[att] (1.6,1.9) -- (4.8,1.9)
+        node[midway,above,lbl] {attempt at $c_1$: matches at $c_3$};
+    \draw[fail] (3.2,2.5) -- (9.6,2.5)
+        node[midway,above,lbl] {attempt at $c_2$: no grant, fails at $c_6$};
+  \end{tikzpicture}
+  \caption{A concurrent assertion starts a new attempt at every clock tick.
+  Ticks where the antecedent is false pass vacuously; several attempts may be
+  in flight at once, and each one succeeds or fails independently.}
+  \label{fig:beyond:sva}
+\end{figure}
+
+\refdesignbook shows the mental model that most often goes missing. A
+concurrent assertion is not a single check. At \emph{every} tick of its clock,
+a new evaluation attempt begins. If the antecedent (the left side of
+\code{|->}) is false, the attempt passes \emph{vacuously} and costs nothing.
+If it is true, the attempt stays alive until the consequent succeeds or fails.
+Several attempts overlap in time. This is why \code{first\_match} exists and
+why a badly written property can report several failures for one bug.
+
+\subsection{\texttt{assert}, \texttt{assume}, \texttt{cover}, \texttt{restrict}}
+
+The same property can be used four ways, and the meaning depends on the tool.
+
+\begin{itemize}
+  \item \kw{assert}: in simulation, check and report on failure. In formal, a
+        proof obligation.
+  \item \kw{assume}: in simulation, usually checked like an assert but
+        reported as an environment error. In formal, a \emph{constraint} on
+        the inputs, so the prover only considers traces where it holds.
+        Assuming too much is the classic way to prove a false theorem.
+  \item \kw{cover}: never fails. It reports how many times the sequence
+        occurred. In formal, a request to find a trace that reaches it, which
+        is also the best way to sanity-check that your assumptions have not
+        made the design unreachable.
+  \item \kw{restrict}: formal only, ignored by simulators. A constraint used
+        to limit the proof space deliberately, for example to prove a property
+        only for aligned addresses.
+\end{itemize}
+
+\begin{rosetta}
+\begin{rleft}
+-- PSL, in a VHDL comment or,
+-- since VHDL-2008, directly:
+default clock is rising_edge(clk);
+
+property p_gnt is
+  always (req -> next_e[1 to 3] (gnt));
+
+assert p_gnt
+  report "no grant in 3 cycles";
+\end{rleft}
+\begin{rright}
+property p_gnt;
+  @(posedge clk)
+    req |-> ##[1:3] gnt;
+endproperty
+
+a_gnt: assert property (p_gnt)
+  else $error("no grant in 3");
+\end{rright}
+\end{rosetta}
+
+If you have met PSL, SVA will feel familiar: both descend from the same
+temporal-logic tradition, both have a boolean layer, a temporal layer and a
+verification layer, and the operators map closely (\code{next\_e[1 to 3]}
+against \code{\#\#[1:3]}, \code{until} against \code{throughout}). The
+practical differences are that SVA is part of the language rather than a
+separate standard, that its tool support is far wider, and that it can call
+into \SV{} functions and covergroups directly. PSL remains a reasonable choice
+for a \VHDL{} design, and \tool{QuestaSim} accepts it in both the VHDL and the
+Verilog flavours.
+
+\begin{notebox}{Where to put assertions}
+Three places, in increasing order of preference for \RTL{}: inline in the
+module (fine for small, obviously-local checks such as one-hot state);
+in a separate checker module bound with \code{bind} (the default for anything
+non-trivial); or in the interface itself, so that every instance of the
+protocol is checked wherever it appears. The last is how professional
+verification IP ships its protocol checks.
+\end{notebox}
+
+\begin{notebox}{Which half of SVA an open-source tool gives you}
+SVA support is not all-or-nothing, and \tool{Verilator}~5.020 draws the line
+in a place worth knowing. With \code{--assert} it accepts immediate
+assertions, \code{assert property} and \code{cover property} with a clock and
+\code{disable iff}, the implication operators \code{|->} and \code{|=>}, and
+the sampled-value functions \code{\$past}, \code{\$rose}, \code{\$fell} and
+\code{\$stable}. A property built from those runs, and a failure prints a
+proper message naming the assertion label. What it rejects is the temporal
+layer: any \code{\#\#} delay, including a plain \code{\#\#1}, gives
+\code{\%Error-UNSUPPORTED: \#\# (in sequence expression)}, and any \code{[*n]}
+repetition gives \code{\%Error-UNSUPPORTED: boolean abbrev}. So
+\code{p\_valid\_stable} and \code{p\_data\_stable} from
+\refdesignbook compile and run under \tool{Verilator}, and
+\code{p\_no\_starve} and \code{c\_backpressure} do not. Write the
+single-cycle properties first; they catch most protocol bugs and they are the
+portable ones.
+\end{notebox}
+
+% ===========================================================================
+\section{\texttt{program} blocks}
+\label{sec:beyond:program}
+\label{sec:toolkit:program}
+\index{program block}
+
+One construct remains, and it is here so that you recognise it rather than so
+that you use it.
+
+A \kw{program} block looks like a module but its code runs in the Reactive
+region of the scheduler, after all design activity in that time step has
+settled. It was introduced in \SV{}-3.1 to solve the testbench race problem:
+a testbench written in an ordinary \code{initial} block competes with design
+processes in the Active region, and whether it sees the old or the new value
+of a signal depends on the simulator's scheduling.
+
+\begin{svcode}
+program automatic test (simple_bus.tb bus);
+  initial begin
+    bus.cb.req <= 1'b1;
+    @(bus.cb);
+    // ... implicit $finish when the program's initial blocks end
+  end
+endprogram
+\end{svcode}
+
+The honest modern view is that clocking blocks solved the same problem more
+precisely, and better. Once every testbench signal goes through a clocking
+block with defined input and output skews, the region a testbench statement
+executes in stops mattering. UVM does not use program blocks; most current
+methodology guides advise against them; \tool{Verilator} does not support
+them. Recognise one when you meet it in older code, understand why it is
+there, and do not write new ones. The one thing worth keeping from the design
+is the automatic lifetime: \code{program automatic} was the original way to
+flip the default of \cref{sec:toolkit:lifetime}, and \code{module automatic}
+does the same job in code you would actually write today.
+
+% ===========================================================================
+\section{Where this goes next}
+\label{sec:toolkit:next}
+% ===========================================================================
+
+You now have every construct a \SV{} testbench is made of, and no testbench.
+That is deliberate, and it is the last thing this chapter has to say.
+
+A queue, a class, a mailbox, a constraint block, a covergroup and a property
+are individually unremarkable, and the reason to learn them is what they
+become when they are put together: a component that reconstructs transactions
+from pins without being told what was sent, a generator whose output you can
+multiply by a thousand without writing a thousand cases, and a verdict that
+can be trusted because it can be shown to fail. \cref{ch:tb} assembles exactly
+these pieces, in this order, around the CORDIC rotator, and it also answers
+the questions this chapter kept postponing: which component owns which
+mailbox, where the covergroup is sampled, when the run is allowed to stop.
+\cref{ch:uvm} then replaces the hand-written scaffolding with a standard
+library, and changes nothing else.
+
+Read \cref{ch:tb} next. If a construct here did not make sense in isolation,
+it will make sense when you see the job it does.
+
+% ===========================================================================
+\section{Checklist}
+\label{sec:toolkit:checklist}
+% ===========================================================================
+
+\begin{itemize}
+  \item \textbf{A class handle is a reference.} \code{b = a} gives you two
+        names for one object. Copy explicitly, or construct a fresh object
+        each time round the loop.
+  \item \textbf{Cast before you count.} \code{q.sum()} accumulates in the
+        element's width, so write \code{q.sum() with (int'(item))} whenever
+        the answer is a count. Tools disagree about this; the cast is right
+        everywhere.
+  \item \textbf{Declare every task and function} \kw{automatic}, or accept
+        that two threads share one variable. Class and \kw{program} members
+        already are; module, interface and package members are not.
+  \item \textbf{Contain every \code{disable fork}} inside its own
+        \code{fork ... join}, or use a labelled block. A bare one kills every
+        descendant thread you have, including a monitor somebody else started.
+  \item \textbf{Prefer \code{wait (e.triggered)} to \code{@(e)}.} The first is
+        race-free within the time step; the second loses a trigger that has
+        already happened and then waits forever.
+  \item \textbf{Always check what \code{randomize()} returned.} A failed
+        solve leaves the old values in place and says nothing.
+        \code{void'(t.randomize())} is worse than the bare call.
+  \item \textbf{Constrain the legal input space}, not the test you happen to
+        want. The test belongs in an inline \code{with \{...\}} clause.
+  \item \textbf{Seed deliberately and record the seed.} A random test you
+        cannot reproduce is not a test.
+  \item \textbf{Coverage answers a different question from checking.} Passing
+        tells you nothing about what you exercised.
+  \item \textbf{A covergroup with no \code{bins}} auto-generates them, and
+        auto-generated bins on a 32-bit value are meaningless. Write them,
+        and remember that the covergroup does nothing until \code{new()} runs.
+  \item \textbf{Concurrent assertions sample in the Preponed region}, so they
+        see the value that existed \emph{before} the edge. This is what you
+        want, and it is not what you expect on the first day.
+  \item \textbf{Check what your simulator implements.} Constraints,
+        covergroups and the temporal layer of SVA are the three features an
+        open-source tool is most likely to reject or, worse, to ignore.
+\end{itemize}

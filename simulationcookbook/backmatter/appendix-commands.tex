@@ -1,0 +1,79 @@
+% ---------------------------------------------------------------------------
+% appendix-commands.tex -- simulator and cocotb command-line reference.
+% Split off from the original SystemVerilog cookbook's appendix-cheatsheet.tex;
+% the VHDL/SystemVerilog language mapping moved to the Design Cookbook (see
+% backmatter/appendix-quickref.tex there).
+% ---------------------------------------------------------------------------
+\chapter{Command-Line Reference}
+\label{app:simcommands}
+
+\chapabstract{The command lines used throughout this booklet, gathered onto
+one page: QuestaSim, Verilator, Icarus Verilog, and cocotb.}
+
+\section{Command lines}
+
+\subsection*{QuestaSim}
+
+\begin{shcode}
+vlib work
+vlog -sv +incdir+. cordic_pkg.sv cordic_if.sv cordic_rot.sv \
+        tb_cordic_pkg.sv tb_cordic_top.sv
+vsim -c -sv_seed random -do "run -all; quit" tb_cordic_top
+
+# with UVM: compile the library too, and run the UVM top
+vlog -sv -uvm +incdir+. cordic_pkg.sv cordic_if.sv cordic_rot.sv \
+        cordic_uvm_pkg.sv tb_cordic_uvm.sv
+vsim -c -uvm +UVM_TESTNAME=cordic_random_test -sv_seed 1234 \
+        -do "run -all; quit" tb_cordic_uvm
+\end{shcode}
+
+\subsection*{Verilator}
+
+\begin{shcode}
+# lint only, the first thing to run on any new file
+verilator --lint-only -Wall cordic_pkg.sv cordic_rot.sv --top-module cordic_rot
+
+# C++ testbench
+verilator --cc --exe --build --trace -j 0 \
+          cordic_pkg.sv cordic_rot.sv tb_cordic.cpp --top-module cordic_rot
+./obj_dir/Vcordic_rot
+
+# SystemVerilog testbench, run directly
+verilator --binary --timing -j 0 cordic_pkg.sv cordic_rot.sv tb.sv
+./obj_dir/Vtb
+\end{shcode}
+
+\subsection*{QuestaSim, VHDL}
+
+\begin{shcode}
+vlib work
+vcom -2008 cordic_pkg.vhd cordic_rot.vhd tb_cordic_rot.vhd
+vsim -c -gG_N_RANDOM=300 -do "run -all; quit" tb_cordic_rot
+
+# in a do file, to silence the numeric_std metavalue warnings at time zero
+set NumericStdNoWarnings 1
+\end{shcode}
+
+\subsection*{Icarus Verilog}
+
+\begin{shcode}
+iverilog -g2012 -o sim cordic_pkg.sv cordic_rot.sv tb.sv && ./sim
+\end{shcode}
+
+\subsection*{cocotb}
+
+\begin{makecode}
+# VHDL: the language revision is an ANALYSIS switch, so COMPILE_ARGS.
+SIM           ?= questa
+TOPLEVEL_LANG ?= vhdl
+VHDL_SOURCES   = $(PWD)/cordic_pkg.vhd $(PWD)/cordic_rot.vhd
+COMPILE_ARGS  += -2008
+TOPLEVEL       = cordic_rot
+MODULE         = test_cordic
+include $(shell cocotb-config --makefiles)/Makefile.sim
+
+# For SystemVerilog: SIM=questa, or SIM=verilator with Verilator 5.036 or
+# later (cocotb refuses anything older).  Icarus cannot compile cordic_pkg.sv
+# at all, because of the constant-function ROM.
+\end{makecode}
+

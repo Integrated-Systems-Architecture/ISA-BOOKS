@@ -1,0 +1,148 @@
+% ---------------------------------------------------------------------------
+% appendix-quickref.tex
+% ---------------------------------------------------------------------------
+\chapter{One-Page Quick Reference}
+\label{app:quickref}
+
+\chapabstract{Every command and file field in this booklet, compressed onto
+one page to keep next to the keyboard.}
+
+\section{Commands}
+
+\begin{longtable}{@{}p{0.46\textwidth}p{0.49\textwidth}@{}}
+\toprule
+\textbf{Command} & \textbf{Purpose}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Command} & \textbf{Purpose}\\
+\midrule
+\endhead
+\code{fusesoc --cores-root <dir> ...} & Add \code{<dir>} to where \FuseSoC
+  looks for \file{.core} files. Repeat once per root you need.\\
+\code{fusesoc ... run --target <t> <core>} & Resolve dependencies and run
+  target \code{<t>} of \code{<core>}.\\
+\code{fusesoc ... run --target <t> <core> --run\_options="..."} & Pass
+  arguments straight through to the simulation binary (plusargs).\\
+\code{python3 util/vendor.py <descriptor>.vendor.hjson} & Fetch one
+  dependency at its pinned revision into \file{vendor/}.\\
+\code{make vendor} & Run the vendoring script over every
+  \file{*.vendor.hjson} the lab has.\\
+\code{make help} & List a lab's own Makefile targets with a one-line
+  description each.\\
+\code{make <target> --dry-run} & Print the commands a target would run,
+  without running them.\\
+\code{python3 regtool.py -r -t rtl <regs>.hjson} & Generate
+  \code{*\_reg\_pkg.sv} and \code{*\_reg\_top.sv} from a register
+  description.\\
+\code{python3 regtool.py -D -o <regs>.h <regs>.hjson} & Generate the
+  matching C header of offsets, masks and field macros.\\
+\code{make regs} & Run both regtool invocations above for a lab that
+  defines this target.\\
+\bottomrule
+\end{longtable}
+
+\section{.core file fields}
+
+\begin{longtable}{@{}p{0.30\textwidth}p{0.65\textwidth}@{}}
+\toprule
+\textbf{Field} & \textbf{Meaning}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Field} & \textbf{Meaning}\\
+\midrule
+\endhead
+\code{CAPI=2:} & Required first line; marks the file as Core API v2.\\
+\kw{name} & \code{vendor:library:core:version}, the string a dependant
+  names in its own \kw{depend} list.\\
+\kw{filesets.<name>.files} & Source paths, relative to the \file{.core}
+  file, in compile order.\\
+\kw{filesets.<name>.file\_type} & \code{systemVerilogSource},
+  \code{vhdlSource}, \code{cSource}, \dots\\
+\kw{filesets.<name>.depend} & Other cores' names; \FuseSoC resolves them
+  recursively.\\
+\kw{targets.<name>.filesets} & Which filesets this target pulls in.\\
+\kw{targets.<name>.default\_tool} & Which tool block under \kw{tools} to
+  use.\\
+\kw{targets.<name>.toplevel} & The module to elaborate from.\\
+\kw{targets.<name>.tools.<tool>} & Tool-specific options
+  (\code{verilator\_options}, \code{vlog\_options}, \dots).\\
+\bottomrule
+\end{longtable}
+
+\section{.vendor.hjson fields}
+
+\begin{longtable}{@{}p{0.30\textwidth}p{0.65\textwidth}@{}}
+\toprule
+\textbf{Field} & \textbf{Meaning}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Field} & \textbf{Meaning}\\
+\midrule
+\endhead
+\kw{name} & A label for the descriptor (not a \FuseSoC core name).\\
+\kw{target\_dir} & Where the snapshot is copied to.\\
+\kw{upstream.url} & The upstream repository.\\
+\kw{upstream.rev} & The pinned tag, branch or commit -- the whole
+  reproducibility guarantee.\\
+\kw{exclude\_from\_upstream} & Paths dropped from the copy (tests, CI).\\
+\bottomrule
+\end{longtable}
+
+\section{.hjson register description fields}
+
+\begin{longtable}{@{}p{0.30\textwidth}p{0.65\textwidth}@{}}
+\toprule
+\textbf{Field} & \textbf{Meaning}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Field} & \textbf{Meaning}\\
+\midrule
+\endhead
+\kw{name} / \kw{regwidth} & The block's name (prefixes every generated
+  symbol) and bus width in bits (normally 32).\\
+\kw{registers[].name} / \kw{.desc} & One entry per register; \kw{desc} ends
+  up as a comment in the generated header.\\
+\kw{swaccess} & Software access: \code{ro}, \code{wo} or \code{rw} --
+  what the CPU is allowed to do at this address.\\
+\kw{hwaccess} & Hardware access: \code{hro} (hardware reads \kw{.q} only)
+  or \code{hwo} (hardware writes \kw{.d} only).\\
+\kw{hwqe} & Adds a one-cycle \kw{.qe} write-strobe alongside \kw{.q}, so
+  hardware can see \emph{when} software wrote, not just the value.\\
+\kw{hwext} & Removes the register's internal storage; \kw{hw2reg} must
+  drive the read value combinationally every cycle.\\
+\kw{resval} & Reset value, in the generated hardware and in
+  documentation.\\
+\kw{fields[].bits} / \kw{.name} & Sub-fields of a register, each with its
+  own bit range and name (e.g.\ \code{"0"} for \code{DONE}).\\
+\bottomrule
+\end{longtable}
+
+\section{Writing a new .core file, in five steps}
+
+\begin{enumerate}
+  \item Name it: \code{<vendor>:<lab>:<core>:<version>}.
+  \item List your sources in a fileset, in compile order.
+  \item Declare dependencies by name in \kw{depend}; vendor them first if
+        they are not already under \file{vendor/}.
+  \item Add one target per tool you run, starting with \code{lint}.
+  \item Set \kw{toplevel} to what that target should elaborate.
+\end{enumerate}
+
+\section{The three traps to remember}
+
+\begin{enumerate}
+  \item A \file{.core} file's filesets do nothing until a target lists
+        them; check the target block first when a build seems to be
+        missing files.
+  \item \kw{upstream.rev: "main"} is fine while developing, wrong once a
+        lab ships: pin it to a SHA or tag.
+  \item \code{include} of another Makefile must come last if that file
+        defines a catch-all rule, or every target after it is invisible.
+  \item Generated files (\code{*\_reg\_pkg.sv}, \code{*\_reg\_top.sv},
+        \code{*\_regs.h}) are overwritten by \code{make regs}; edit the
+        \file{.hjson} source, never the generated files themselves.
+\end{enumerate}

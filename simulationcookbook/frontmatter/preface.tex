@@ -1,0 +1,44 @@
+% ---------------------------------------------------------------------------
+% preface.tex
+% ---------------------------------------------------------------------------
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+\markboth{Preface}{Preface}
+
+Sooner or later you will need to run a simulation without a QuestaSim
+licence in front of you, or with a golden model already written in Python
+that you would rather not reimplement in SystemVerilog. This booklet is
+about both situations.
+
+This is the \textbf{Simulation Cookbook}, one of four companions covering
+\tool{SystemVerilog for VHDL Designers} in full. It assumes the design and
+verification material of \refdesignbook and \refverificationbook, and adds
+the tools that make a testbench runnable without a commercial licence, plus
+the four ways of driving one from Python.
+
+\section*{What this booklet is}
+
+\Cref{ch:verilator} is about \tool{Verilator}, which is not an event
+simulator and should not be treated as one: it compiles a language subset to
+C++, it is two-state, and it has no route to UVM, but it is also the fastest
+thing you will run on a laptop and the best free linter for SystemVerilog by
+a wide margin. The chapter compares it directly with \tool{QuestaSim},
+feature by feature, so you know before you start which of the two a given
+testbench needs. \Cref{ch:python} covers the four ways of connecting Python
+to a testbench, from a bare socket to \tool{cocotb}, which lets the HDL
+testbench disappear entirely.
+
+\section*{What this booklet is not}
+
+It is not a verification methodology text; the class-based testbench and UVM
+that these tools ultimately run are covered in \refverificationbook, and the
+design-side language they compile is covered in \refdesignbook. Where this
+booklet needs a design to simulate, it uses the CORDIC rotator developed in
+full in \refexamplebook.
+
+\section*{The tools}
+
+\Cref{app:tooling} lists exactly what to install, on Linux, macOS or WSL2,
+and \cref{app:simcommands} gathers every command line used in this booklet
+onto one page. Nothing in \cref{ch:verilator} or \cref{ch:python} needs a
+licence.

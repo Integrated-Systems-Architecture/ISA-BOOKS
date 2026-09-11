@@ -1,0 +1,78 @@
+% ---------------------------------------------------------------------------
+% titlepage.tex
+% ---------------------------------------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\begin{center}
+
+\vspace*{1.5cm}
+
+{\sffamily\Large\color{codenumber} A QUICK REFERENCE MANUAL}
+
+\vspace{1.2cm}
+
+{\sffamily\fontsize{34}{40}\selectfont\bfseries\color{codekey}
+ Git \& GitHub\\[4pt] Cookbook}
+
+\vspace{0.8cm}
+
+{\color{codeframe}\rule{0.8\textwidth}{1.4pt}}
+
+\vspace{0.8cm}
+
+{\sffamily\large
+ Version Control $\cdot$ Collaboration}
+
+\vspace{2.2cm}
+
+% --- a small decorative figure: the everyday Git workflow -----------------
+\begin{tikzpicture}[font=\sffamily\small]
+  \node[draw=codekey,fill=codebg,line width=1pt,rounded corners=3pt,
+        minimum width=2.6cm,minimum height=1.2cm,align=center] (w)
+       {\small Working\\[-1pt]\small Directory};
+  \node[draw=codekey,fill=codebg,line width=1pt,rounded corners=3pt,
+        minimum width=2.6cm,minimum height=1.2cm,align=center,
+        right=1.6cm of w] (s)
+       {\small Staging\\[-1pt]\small Area};
+  \node[draw=accentalt,fill=codebg,line width=1pt,rounded corners=3pt,
+        minimum width=2.6cm,minimum height=1.2cm,align=center,
+        right=1.6cm of s] (r)
+       {\small Local\\[-1pt]\small Repository};
+  \draw[-{Latex[length=3mm]},line width=1.1pt,codekey]
+       (w.east) -- (s.west) node[midway,above,font=\scriptsize]{add};
+  \draw[-{Latex[length=3mm]},line width=1.1pt,accentalt]
+       (s.east) -- (r.west) node[midway,above,font=\scriptsize]{commit};
+\end{tikzpicture}
+
+\vfill
+
+{\sffamily\large Luigi Giuffrida}
+
+\vspace{4pt}
+
+{\sffamily\small Department of Electronics and Telecommunications\\
+ Politecnico di Torino}
+
+\vspace{1.0cm}
+
+{\sffamily\footnotesize\color{codenumber}
+ Draft --- \today}
+
+\end{center}
+\end{titlepage}
+
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+\begin{minipage}{0.78\textwidth}
+\small\itshape
+This booklet is a companion reference, not a full course. It covers the
+Git commands and \GitHub{} workflow that students need on a day-to-day
+basis, with just enough theory to understand what the commands actually
+do. For anything beyond this scope, the official documentation at
+\texttt{git-scm.com/doc} is the authoritative source.
+\end{minipage}
+\end{center}
+\vspace*{\fill}
+\cleardoublepage

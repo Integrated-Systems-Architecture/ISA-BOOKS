@@ -1,0 +1,49 @@
+% ---------------------------------------------------------------------------
+% preface.tex
+% ---------------------------------------------------------------------------
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+\markboth{Preface}{Preface}
+
+Verification is where SystemVerilog stops being VHDL with different
+punctuation. The design half of the language, covered in \refdesignbook, is a
+translation exercise: a process is an \code{always} block, a generic is a
+parameter. The verification half is not, because VHDL has no equivalent of
+most of it. Classes, mailboxes, dynamic threads, constrained randomisation and
+functional coverage do not map onto anything you have written before.
+
+This booklet is the \textbf{Verification Cookbook}, one of four companions
+covering \tool{SystemVerilog for VHDL Designers} in full. It assumes you
+already know the design-side language (\refdesignbook), and it spends its
+time on the part of SystemVerilog that exists purely to write better
+testbenches.
+
+\section*{What this booklet is}
+
+The vocabulary, then a complete testbench, then the standard library built
+on top of it. \Cref{ch:toolkit} introduces classes, dynamic types,
+constrained randomisation, functional coverage, assertions and dynamic
+threads: none of it is synthesisable, and none of it has a VHDL counterpart.
+\Cref{ch:tb} assembles that vocabulary into a complete layered testbench,
+from nothing, using no library at all. \Cref{ch:uvm} then shows that UVM is
+the same testbench with a standard base class in front of each part.
+
+As throughout the series, a \emph{trap} marks a mistake you are
+statistically likely to make, a \emph{recipe} gives a pattern to copy, and a
+plain note supplies background you can skip on a first reading.
+
+\section*{What this booklet is not}
+
+It is not a UVM reference manual; the Accellera UVM 1.2 user guide and the
+IEEE 1800.2 LRM remain the authoritative sources for anything not covered
+here. It does not discuss \tool{Verilator} or Python testbenches in any
+depth: that material, including how much of this chapter's testbench survives
+a change of simulator, is in \refsimulationbook. The worked CORDIC example
+that this booklet's testbenches are built against is developed in full in
+\refexamplebook.
+
+\section*{Acknowledgement}
+
+The testbenches built in this booklet are exercised, throughout, against the
+CORDIC rotator of \refexamplebook: small enough that the whole testbench fits
+in your head, and arithmetic enough that a golden model earns its keep.

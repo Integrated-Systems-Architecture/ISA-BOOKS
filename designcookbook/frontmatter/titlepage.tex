@@ -1,0 +1,80 @@
+% ---------------------------------------------------------------------------
+% titlepage.tex
+% ---------------------------------------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\begin{center}
+
+\vspace*{1.5cm}
+
+{\sffamily\Large\color{codenumber} AN INTRODUCTION TO SYSTEMVERILOG}
+
+\vspace{1.2cm}
+
+{\sffamily\fontsize{34}{40}\selectfont\bfseries\color{codekey}
+ SystemVerilog\\[4pt] for VHDL Designers}
+
+\vspace{0.4cm}
+
+{\sffamily\Large\color{accentalt} The Design Cookbook}
+
+\vspace{0.8cm}
+
+{\color{codeframe}\rule{0.8\textwidth}{1.4pt}}
+
+\vspace{0.8cm}
+
+{\sffamily\large
+ From Entities to Modules $\cdot$ The Language, Side by Side}
+
+\vspace{2.2cm}
+
+% --- a small decorative figure: the two languages meeting -----------------
+\begin{tikzpicture}[font=\sffamily\small]
+  \node[draw=codekey,fill=vhdlbg,line width=1pt,rounded corners=3pt,
+        minimum width=3.4cm,minimum height=1.5cm,align=center] (v)
+       {\bfseries VHDL\\[2pt]\scriptsize IEEE 1076};
+  \node[draw=accentalt,fill=svbg,line width=1pt,rounded corners=3pt,
+        minimum width=3.4cm,minimum height=1.5cm,align=center,
+        right=3.2cm of v] (s)
+       {\bfseries SystemVerilog\\[2pt]\scriptsize IEEE 1800};
+  \draw[-{Latex[length=3mm]},line width=1.1pt,codekey]
+       ([yshift=4pt]v.east) -- ([yshift=4pt]s.west)
+       node[midway,above,font=\scriptsize]{what you know};
+  \draw[-{Latex[length=3mm]},line width=1.1pt,accentalt]
+       ([yshift=-4pt]s.west) -- ([yshift=-4pt]v.east)
+       node[midway,below,font=\scriptsize]{what it means};
+\end{tikzpicture}
+
+\vfill
+
+{\sffamily\large Luigi Giuffrida, Alessandra Dolmeta}
+
+\vspace{4pt}
+
+{\sffamily\small Department of Electronics and Telecommunications\\
+ Politecnico di Torino}
+
+\vspace{1.0cm}
+
+{\sffamily\footnotesize\color{codenumber}
+ Draft --- \today}
+
+\end{center}
+\end{titlepage}
+
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+\begin{minipage}{0.78\textwidth}
+\small\itshape
+This booklet is one of four companions: Design (this one), Verification,
+Simulation, and a complete worked Example. It targets IEEE 1800-2017
+(SystemVerilog) and IEEE 1076-2008 (VHDL) and covers only the design-side
+half of the language: everything that maps, construct for construct, onto
+what a VHDL designer already knows.
+\end{minipage}
+\end{center}
+\vspace*{\fill}
+\cleardoublepage

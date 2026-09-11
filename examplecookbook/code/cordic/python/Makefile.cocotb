@@ -1,0 +1,37 @@
+# ===========================================================================
+#  Makefile.cocotb -- run test_cordic.py against either implementation.
+#
+#      make -f Makefile.cocotb            VHDL          under QuestaSim
+#      make -f Makefile.cocotb SV=1       SystemVerilog under Verilator
+#
+#  The Python testbench is identical in both cases.  That is the whole point.
+# ===========================================================================
+PWD_    := $(shell pwd)
+ROOT    := $(PWD_)/..
+
+TOPLEVEL := cordic_rot
+MODULE   := test_cordic
+SEED     ?= 20250905
+export SEED
+
+ifeq ($(SV),1)
+  SIM           := verilator
+  TOPLEVEL_LANG := verilog
+  VERILOG_SOURCES := $(ROOT)/sv/cordic_pkg.sv $(ROOT)/sv/cordic_rot.sv
+  EXTRA_ARGS    += --timing -Wno-fatal
+else
+  SIM           := questa
+  TOPLEVEL_LANG := vhdl
+  VHDL_SOURCES  := $(ROOT)/vhdl/cordic_pkg.vhd $(ROOT)/vhdl/cordic_rot.vhd
+  # The language revision is an ANALYSIS switch, so it belongs in
+  # COMPILE_ARGS.  Put it in SIM_ARGS instead and the run either rejects it
+  # as an unknown option or looks for a library built to a different
+  # revision and reports that it cannot find the entity.
+  COMPILE_ARGS  += -2008
+  # 'U' on the inputs at time zero makes numeric_std complain.  The design is
+  # in reset then, so the warnings are noise.
+  SIM_ARGS      += -do "set NumericStdNoWarnings 1"
+
+endif
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

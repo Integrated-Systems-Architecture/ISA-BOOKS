@@ -1,0 +1,17 @@
+# LaTeX build products
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.idx
+*.ilg
+*.ind
+*.listing
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+main.pdf

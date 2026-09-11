@@ -1,0 +1,84 @@
+% ---------------------------------------------------------------------------
+% bibliography.tex -- a reading list rather than a citation apparatus.
+% ---------------------------------------------------------------------------
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Further Reading}
+\chapter*{Further Reading}
+\markboth{Further Reading}{Further Reading}
+
+\section*{Standards}
+
+\begin{itemize}
+  \item IEEE Std 1800-2017, \emph{IEEE Standard for SystemVerilog --- Unified
+        Hardware Design, Specification, and Verification Language}. The
+        language reference manual. Chapter~9 (processes), Chapter~10
+        (assignment statements) and Chapter~4 (scheduling semantics) are the
+        three a VHDL designer should read first.
+  \item IEEE Std 1076-2008, \emph{IEEE Standard VHDL Language Reference
+        Manual}, and IEEE Std 1076-2019 for the newer features discussed in
+        \refdesignbook.
+  \item IEEE Std 1800.2-2020, \emph{Universal Verification Methodology
+        Language Reference Manual}.
+  \item IEEE Std 1364-2005, the last standalone Verilog standard, useful only
+        when reading legacy code.
+\end{itemize}
+
+\section*{Books}
+
+\begin{itemize}
+  \item C.~Spear and G.~Tumbush, \emph{SystemVerilog for Verification},
+        3rd~ed., Springer. The standard text on the class-based testbench,
+        and the natural sequel to \refverificationbook.
+  \item S.~Sutherland, S.~Davidmann and P.~Flake, \emph{SystemVerilog for
+        Design}, 2nd~ed., Springer. The design-side counterpart, written by
+        people who were in the room when the language was standardised.
+  \item D.~Thomas, \emph{The Verilog Hardware Description Language}, and
+        P.~Ashenden, \emph{The Designer's Guide to VHDL}. The two classics,
+        for when you want to know why something is the way it is.
+  \item P.~Ashenden and J.~Lewis, \emph{VHDL-2008: Just the New Stuff}.
+        Short, and it covers most of what \refdesignbook says VHDL can do.
+  \item M.~Keating, \emph{The Simple Art of SoC Design}. Not about either
+        language, and worth reading anyway.
+\end{itemize}
+
+\section*{Papers and application notes}
+
+\begin{itemize}
+  \item C.~Cummings, \emph{Nonblocking Assignments in Verilog Synthesis, Coding
+        Styles That Kill!}, SNUG 2000. The clearest published explanation of
+        the blocking/non-blocking rules and the races they exist to prevent.
+        Everything else by the same author on \code{always\_comb},
+        \code{unique}/\code{priority} and clock-domain crossing is worth the
+        time.
+  \item J.~E.~Volder, \emph{The CORDIC Trigonometric Computing Technique},
+        IRE Transactions on Electronic Computers, 1959. The original paper
+        behind \cref{ch:case}.
+  \item J.~S.~Walther, \emph{A Unified Algorithm for Elementary Functions},
+        Spring Joint Computer Conference, 1971. The generalisation.
+  \item R.~Andraka, \emph{A Survey of CORDIC Algorithms for FPGA Based
+        Computers}, FPGA~1998. The practical implementation reference,
+        including the gain, the convergence range and the quadrant folding
+        used in \cref{ch:case}.
+\end{itemize}
+
+\section*{Tools and online resources}
+
+\begin{itemize}
+  \item \emph{Verilator} manual, \url{https://verilator.org/guide/}. Read the
+        chapters on the language subset and on the C++ API before writing a
+        C++ testbench.
+  \item \emph{cocotb} documentation, \url{https://docs.cocotb.org/}.
+  \item \emph{GTKWave} (\url{https://gtkwave.sourceforge.net}) and
+        \emph{Surfer} (\url{https://surfer-project.org}), the two waveform
+        viewers that read VCD and FST.
+  \item \emph{OSVVM} (\url{https://osvvm.org}) and \emph{UVVM}
+        (\url{https://uvvm.org}), the two VHDL verification frameworks
+        referred to throughout \refdesignbook and \refverificationbook.
+  \item The \emph{lowRISC} and \emph{OpenTitan} SystemVerilog style guide,
+        \url{https://github.com/lowRISC/style-guides}. The best free
+        statement of what disciplined SystemVerilog looks like, and the
+        source of the naming conventions used in this book.
+  \item \emph{Verible}, \url{https://github.com/chipsalliance/verible}, for
+        formatting and linting.
+\end{itemize}

@@ -1,0 +1,2089 @@
+\chapter{The Rosetta Stone: Behaviour}
+\label{ch:rosetta2}
+
+\chapabstract{The second half of the reference core. Everything that
+\emph{describes behaviour}: concurrent assignments, processes, sequential
+statements, generate, instantiation, subprograms, packages, attributes,
+reporting and time. It ends with the complete \VHDL{}-to-\SV{} mapping table
+for both halves of the Rosetta Stone, which is the page to photocopy.}
+
+\Cref{ch:rosetta} dealt with the static half of the language. Four of its
+results are assumed on every page of this one, so they are worth restating
+before anything moves.
+
+\begin{itemize}
+  \item \code{logic} is a single-driver four-state variable, the counterpart of
+        \code{std\_ulogic}; \kw{wire} is the resolved net you need only for a
+        genuine multi-driver bus.
+  \item Widths never have to match. An assignment, a port connection or an
+        operand of the wrong width is truncated or extended in silence, and the
+        width of an arithmetic expression is decided partly by the thing you
+        assign it to (\cref{sec:rosetta:widths}).
+  \item Signedness is a property of an expression, not of a variable alone. One
+        unsigned operand makes the whole expression unsigned.
+  \item \code{'0} is the fill literal that replaces \code{(others => '0')}, and
+        it is not the same as \code{1'b0}.
+\end{itemize}
+
+Everything in this chapter is about the other axis: what happens over time,
+and in what order. The layout is the same as before, a \emph{rosetta} block
+with \VHDL{} on the left and \SV{} on the right, then prose that says what is
+the same, what is different, and what is missing.
+
+The traps in this half are the more expensive ones, because a type error stops
+the analyser and a behavioural error does not stop anything at all: a latch you
+did not mean to infer, a race between two \code{always} blocks, a function
+whose local variable is shared between two callers. \Cref{ch:philosophy}
+explained why the language works this way; here it is as a set of
+translations.
+
+
+% ===========================================================================
+\section{Concurrent statements}
+\label{sec:rosetta:concurrent}
+% ===========================================================================
+
+Everything between \kw{begin} and \kw{end architecture} in \VHDL{} is
+concurrent. Everything between the port list and \kw{endmodule} in \SV{} is
+too. The set of concurrent statements is almost the same.
+
+\subsection{Simple, conditional and selected assignment}
+
+\begin{rosetta}
+\begin{rleft}
+-- simple
+y <= a and b;
+
+-- conditional (when/else)
+y <= a when sel = '1' else b;
+
+z <= "00" when op = "00" else
+     "01" when op = "01" else
+     "10" when op = "10" else
+     "11";
+
+-- selected (with/select)
+with op select z <=
+  "00" when "00",
+  "01" when "01",
+  "10" when "10",
+  "11" when others;
+\end{rleft}
+\begin{rright}
+// simple
+assign y = a & b;
+
+// conditional
+assign y = sel ? a : b;
+
+assign z = (op == 2'b00) ? 2'b00 :
+           (op == 2'b01) ? 2'b01 :
+           (op == 2'b10) ? 2'b10 :
+                           2'b11;
+
+// selected: no concurrent form.
+// Use always_comb with case:
+always_comb begin
+  unique case (op)
+    2'b00: z = 2'b00;
+    2'b01: z = 2'b01;
+    2'b10: z = 2'b10;
+    default: z = 2'b11;
+  endcase
+end
+\end{rright}
+\end{rosetta}
+
+\index{continuous assignment}
+
+\VHDL{}'s simple signal assignment becomes \SV{}'s \kw{assign}, the
+\emph{continuous assignment}. A continuous assignment drives its target
+whenever any input changes, exactly like a concurrent signal assignment. The
+target must be a net or a variable with no other driver, which matches
+\VHDL{}'s single-driver rule for unresolved signals.
+
+The conditional form maps to the ternary operator. Chained ternaries become
+unreadable quickly; past two levels, write an \code{always\_comb} with an
+\code{if}/\code{else if} chain. The selected form has no concurrent equivalent
+at all, and its natural translation is \code{always\_comb} with a \code{case}.
+
+Note a good \VHDL{} habit that survives: \code{with/select} forces you to cover
+every choice, and the translated \code{case} should keep that discipline. Use
+\code{unique case} plus a \code{default}, or a \code{default} alone. Never
+write a \code{case} inside \code{always\_comb} without a \code{default} unless
+every possible value of the selector is listed; the missing branch infers a
+latch.
+
+\VHDL{}-2008 allows \code{when/else} and \code{with/select} inside a process
+as sequential statements. \SV{} has always allowed the ternary operator
+anywhere an expression is allowed, so this needs no translation.
+
+\subsection{Delays}
+
+\begin{rosetta}
+\begin{rleft}
+-- inertial (the default): pulses
+-- shorter than the delay are
+-- swallowed
+y <= a after 3 ns;
+
+-- transport: every change is
+-- propagated
+y <= transport a after 3 ns;
+
+-- explicit pulse rejection limit
+y <= reject 1 ns inertial a
+       after 3 ns;
+\end{rleft}
+\begin{rright}
+// continuous assignment delay:
+// inertial-like
+assign #3 y = a;
+
+// non-blocking assign with an
+// intra-assignment delay:
+// transport-like
+always @(a) y <= #3 a;
+
+// blocking, delay before the
+// assignment: NOT a delay model,
+// the process is simply blocked
+always @(a) #3 y = a;
+
+// gate/net delay:
+wire #3 y;
+
+// SystemVerilog has no keywords
+// for transport vs inertial.
+\end{rright}
+\end{rosetta}
+
+\index{delay!inertial}\index{delay!transport}
+
+\VHDL{} distinguishes inertial and transport delay explicitly, and the default
+for a signal assignment is inertial: a pulse narrower than the delay does not
+propagate. \SV{} has no keywords for the distinction. A delay on a continuous
+assignment behaves inertially: a new value arriving before the old one has
+propagated cancels it. The closest thing to transport delay is an
+\emph{intra-assignment} delay on a non-blocking assignment, \code{y <= \#3 a;}:
+the right-hand side is sampled immediately and the update is scheduled three
+time units later, so several pulses can be in flight at once and none is
+swallowed.
+
+Do not confuse that with \code{\#3 y = a;}, where the delay comes before the
+assignment. That form models no delay at all. The process stops for three time
+units, and every change of \code{a} during those three units is missed, because
+the process is not back at its event control to see them. It is neither
+inertial nor transport: it is a blocked process.
+
+None of this matters for synthesisable code. Synthesis ignores every delay, and
+delays in \RTL{} are a mistake, because they make simulation and synthesis
+disagree. The only place a delay belongs is in a testbench, where the
+distinction almost never arises. Learn the syntax so you can read gate-level
+netlists produced by a synthesis tool, and do not write it.
+
+\subsection{Blocks and named scopes}
+
+\begin{rosetta}
+\begin{rleft}
+mult_stage : block
+  signal partial : unsigned(15 downto 0);
+begin
+  partial <= a * b;
+  p <= std_logic_vector(partial);
+end block mult_stage;
+
+-- a guarded block (obsolete):
+-- b : block (guard_expr) begin
+\end{rleft}
+\begin{rright}
+// named begin/end block:
+begin : mult_stage
+  // declarations allowed here
+end : mult_stage
+
+// but at module level you want
+// a generate block:
+if (1) begin : mult_stage
+  logic [15:0] partial;
+  assign partial = a * b;
+  assign p       = partial;
+end
+\end{rright}
+\end{rosetta}
+
+A \VHDL{} \kw{block} groups concurrent statements and gives them a local
+declarative region and a name in the hierarchy. \SV{}'s nearest equivalent at
+module level is a \code{generate} block, which is what
+\cref{sec:rosetta:generate} is about. Inside a procedural block, a named
+\code{begin : label ... end : label} gives you a local declarative region in
+the same way. Guarded blocks are obsolete in \VHDL{} too and have no \SV{}
+counterpart.
+
+% ===========================================================================
+\section{Processes and procedural blocks}
+\label{sec:rosetta:processes}
+% ===========================================================================
+
+\subsection{The combinational process}
+
+\begin{rosetta}
+\begin{rleft}
+-- classic: explicit list
+comb : process (a, b, sel) is
+begin
+  if sel = '1' then
+    y <= a;
+  else
+    y <= b;
+  end if;
+end process comb;
+
+-- VHDL-2008:
+comb2 : process (all) is
+begin
+  if sel = '1' then y <= a;
+  else              y <= b;
+  end if;
+end process comb2;
+\end{rleft}
+\begin{rright}
+// Verilog-2001 explicit list
+always @(a or b or sel) begin
+  if (sel) y = a;
+  else     y = b;
+end
+
+// Verilog-2001 implicit list
+always @* begin ... end
+
+// SystemVerilog, the only form
+// you should write:
+always_comb begin
+  if (sel) y = a;
+  else     y = b;
+end
+\end{rright}
+\end{rosetta}
+
+\index{always\_comb}\index{process!combinational}
+
+\code{always\_comb} is the direct replacement for \code{process (all)}, and it
+is better than \code{process (all)} in the ways that matter. Beyond computing
+the sensitivity list for you, it carries four extra guarantees:
+
+\begin{enumerate}
+  \item It executes once at time zero, after all \code{initial} and
+        \code{always} blocks have started, whether or not anything in its
+        sensitivity set has changed. A plain \code{always @*} does not, so at
+        time zero its outputs are \code{x} until an input moves. A \VHDL{}
+        process also runs once at time zero, so this restores the \VHDL{}
+        behaviour that \code{always @*} lost.
+  \item Its sensitivity set includes signals read inside functions it calls.
+        \code{always @*} does not follow into functions, which is a classic
+        source of missing-sensitivity bugs. \VHDL{}-2008's \code{process (all)}
+        has the same extended rule as \code{always\_comb}.
+  \item It forbids blocking timing controls. You cannot write \code{\#5},
+        \code{@(posedge clk)} or \code{wait} inside it. That turns ``I
+        accidentally put a delay in my combinational logic'' into a compile
+        error.
+  \item Any variable written inside an \code{always\_comb} may not be written
+        anywhere else in the design. This is checked at elaboration and it is
+        the \SV{} equivalent of \VHDL{}'s single-driver rule for signals. It is
+        the strongest reason to use \code{always\_comb} rather than
+        \code{always @*}.
+\end{enumerate}
+
+\begin{gotcha}{\code{always\_comb} is not exactly \code{process (all)}}
+Two differences catch people.
+
+First, \code{always\_comb} triggers on a change in the value of anything it
+reads, including through a function call, but \emph{not} on a change to
+something read only through a hierarchical reference or through a
+\code{ref}-passed argument. \code{process (all)} has the same limitation, so in
+practice this is a wash. Do not put hierarchical references in combinational
+logic.
+
+Second, and this is the real one: in \VHDL{} a process assigns to
+\emph{signals} using \code{<=}, so all the assignments in the process take
+effect together at the end of the delta cycle, and reading a signal you assigned
+earlier in the same process gives you the old value. In \SV{},
+\code{always\_comb} should use \emph{blocking} assignments \code{=}, which take
+effect immediately, so reading back a variable you assigned earlier in the same
+block gives you the new value. The two models genuinely differ:
+\begin{rosetta}
+\begin{rleft}
+process (all) is
+begin
+  t <= a;      -- signal
+  y <= t;      -- OLD t!
+end process;
+-- y gets the previous value of t:
+-- this infers a register, or
+-- oscillates.
+\end{rleft}
+\begin{rright}
+always_comb begin
+  t = a;       // variable
+  y = t;       // NEW t
+end
+// y = a. What you meant.
+\end{rright}
+\end{rosetta}
+The \VHDL{} idiom for the right-hand behaviour is a \emph{variable} inside the
+process, declared in its declarative part and assigned with \code{:=}. A
+\SV{} \code{always\_comb} variable behaves like a \VHDL{} process variable, not
+like a \VHDL{} signal. Keep that mapping in your head:
+\emph{signal / \code{<=} / non-blocking} on one side, \emph{variable /
+\code{:=} / blocking} on the other.
+\end{gotcha}
+
+\subsection{The clocked process}
+
+\begin{rosetta}
+\begin{rleft}
+-- synchronous reset
+sync : process (clk) is
+begin
+  if rising_edge(clk) then
+    if rst = '1' then
+      q <= (others => '0');
+    else
+      q <= d;
+    end if;
+  end if;
+end process sync;
+
+-- asynchronous reset
+async : process (clk, rst_n) is
+begin
+  if rst_n = '0' then
+    q <= (others => '0');
+  elsif rising_edge(clk) then
+    q <= d;
+  end if;
+end process async;
+\end{rleft}
+\begin{rright}
+// synchronous reset
+always_ff @(posedge clk) begin
+  if (rst) q <= '0;
+  else     q <= d;
+end
+
+
+
+// asynchronous reset
+always_ff @(posedge clk or
+            negedge rst_n) begin
+  if (!rst_n) q <= '0;
+  else        q <= d;
+end
+\end{rright}
+\end{rosetta}
+
+\index{always\_ff}\index{reset!asynchronous}
+
+The structural correspondence is exact. \code{rising\_edge(clk)} becomes
+\code{@(posedge clk)}; \code{falling\_edge} becomes \code{negedge}. The reset
+sensitivity is in the same place in both languages: an asynchronous reset
+appears in the sensitivity list, a synchronous one does not.
+
+Two points of care.
+
+\textbf{Polarity in the sensitivity list must match the test.} If the reset is
+active low, you write \code{negedge rst\_n} in the list and \code{if (!rst\_n)}
+in the body. Writing \code{posedge rst\_n} with \code{if (!rst\_n)} is legal and
+produces a flip-flop that resets on the wrong edge, or, more often, a synthesis
+error you will not understand.
+
+\textbf{\code{always\_ff} restricts you usefully.} Like \code{always\_comb}, it
+enforces the single-driver rule at elaboration, and it requires exactly one
+event control at the top of the block. It also, by convention supported by
+every tool, means ``this is a flip-flop'': lint tools will flag a blocking
+assignment inside it.
+
+\begin{gotcha}{Blocking assignment in a clocked block}
+\begin{svcode}
+always_ff @(posedge clk) begin
+  a = d;        // blocking: a takes the new value IMMEDIATELY
+  b = a;        // so b gets the NEW a: this is one flop, not two
+end
+always_ff @(posedge clk) begin
+  a <= d;       // non-blocking: both updates happen at the end
+  b <= a;       // b gets the OLD a: a two-stage shift register
+end
+\end{svcode}
+The \VHDL{} equivalent of the second block is the familiar signal behaviour,
+and it is what you almost always want. The first block does not just produce
+different hardware: because the two \code{always} blocks in a design execute in
+an unspecified order within the same time step, blocking assignments to
+signals read by another clocked block produce a genuine race, and two
+simulators can give different answers for the same code.
+
+The rule is absolute and has no exceptions worth learning:
+\begin{ruleofthumb}
+Non-blocking \code{<=} in every \code{always\_ff}. Blocking \code{=} in every
+\code{always\_comb}. Never mix the two in one block, and never assign the same
+variable from two blocks.
+\end{ruleofthumb}
+\end{gotcha}
+
+\subsection{Latches}
+
+\code{always\_latch} exists and means what it says: it has
+\code{always\_comb}'s sensitivity rules but does not require every path to
+assign every output. Use it when you genuinely want a latch, which in
+synchronous design is approximately never, and rely on the tool to complain
+when a plain \code{always\_comb} accidentally infers one. \VHDL{} has no
+equivalent keyword; an incomplete \code{if} in a combinational process infers
+a latch there in exactly the same way and with exactly as little warning.
+
+\subsection{Waiting: \code{wait}, \code{@} and \code{\#}}
+
+\begin{rosetta}
+\begin{rleft}
+wait for 10 ns;
+wait until rst_n = '1';
+wait on a, b;
+wait;                 -- forever
+
+-- a process with no sensitivity
+-- list must end in a wait
+stim : process is
+begin
+  rst_n <= '0';
+  wait for 100 ns;
+  rst_n <= '1';
+  wait;
+end process stim;
+\end{rleft}
+\begin{rright}
+// initial: runs once at time 0
+// and then stops. No sensitivity
+// list, no trailing wait needed.
+initial begin
+  rst_n = 1'b0;
+  wait (cfg_done);   // no edge
+  @(a or b);         // any change
+  rst_n = 1'b1;  #100ns;
+  $finish;
+end
+\end{rright}
+\end{rosetta}
+
+\index{wait}\index{initial}
+
+The mapping of the waiting forms is in \cref{tab:rosetta:waits}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Waiting.}
+  \label{tab:rosetta:waits}
+  \small
+  \begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.28\linewidth}>{\raggedright\arraybackslash}p{0.19\linewidth}>{\raggedright\arraybackslash}p{0.47\linewidth}@{}}
+    \toprule
+    \VHDL{} & \SV{} & Meaning \\
+    \midrule
+    \code{wait for 10 ns}      & \code{\#10ns}          & Suspend for a fixed time. \\
+    \code{wait on a, b}        & \code{@(a or b)}       & Suspend until any listed signal changes. \\
+    \code{wait until c = '1'}  & \code{wait (c)}        & Return immediately if already true; otherwise wait for it. \\
+    \code{wait until c = '1'}  & \code{@(posedge c)}    & Not the same: this always waits for an edge. \\
+    \code{wait}                & \code{wait (0)}        & Suspend forever. Rare in \SV{}. \\
+    \code{wait until rising\_edge(clk)} & \code{@(posedge clk)} & The standard testbench step. \\
+    ---                        & \code{wait fork}       & Wait for all processes spawned by \code{fork} in this scope. \\
+    ---                        & \code{disable fork}    & Kill them instead. \\
+    ---                        & \code{final}           & A block that runs once at the end of simulation. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The subtle row is \code{wait until}. \VHDL{}'s \code{wait until c = '1'} waits
+for an \emph{event} on \code{c} that makes the condition true, so if \code{c}
+is already \code{'1'} the process still blocks. \SV{}'s \code{wait (c)} checks
+first and returns immediately if the condition already holds. To reproduce the
+\VHDL{} behaviour exactly you need \code{@(posedge c)}. Getting this wrong in a
+reset sequence gives you a testbench that hangs, or one that does not wait at
+all.
+
+\code{initial} has no \VHDL{} keyword but corresponds precisely to a process
+with no sensitivity list that ends in a \code{wait}. \code{final} has no
+\VHDL{} equivalent at all: it is a block that runs once, at the end of
+simulation, after the last event, and it is the right place for a coverage
+summary or a final scoreboard check.
+
+The last two rows before \code{final} are listed for completeness only.
+\code{fork} spawns concurrent processes at run time, which a \VHDL{} process
+cannot do, and \code{wait fork} and \code{disable fork} are how you join or
+kill them. There is no translation to give, because there is no \VHDL{}
+construct on the left; \refverificationbook introduces the whole mechanism.
+
+\begin{gotcha}{A module-level variable is shared by every process}
+A \VHDL{} process variable is declared in the process's declarative part and is
+visible only there. Two processes cannot share one by accident.
+\begin{rosetta}
+\begin{rleft}
+p1 : process is
+  variable count : integer := 0;
+begin
+  count := count + 1;
+  wait for 10 ns;
+end process p1;
+
+-- count belongs to p1.
+-- p2 cannot see it. Sharing
+-- requires a shared variable
+-- of a protected type.
+\end{rleft}
+\begin{rright}
+int count;    // module scope,
+              // STATIC lifetime
+
+initial forever begin
+  count = count + 1; #10ns;
+end
+initial forever begin
+  count = count + 1; #10ns;
+end
+// Both processes write the same
+// object. Race. No warning.
+\end{rright}
+\end{rosetta}
+Every variable declared in a module has static lifetime and module scope, so
+``local to this process'' is not the default: it is something you must arrange, by
+declaring the variable inside a named \code{begin}/\code{end} block, or inside
+an \kw{automatic} task or function. \code{always\_comb} and \code{always\_ff}
+protect you for synthesisable code by making a second writer an elaboration
+error, but plain \code{always} and \code{initial} blocks do not.
+\end{gotcha}
+
+% ===========================================================================
+\section{Sequential statements}
+\label{sec:rosetta:sequential}
+% ===========================================================================
+
+\subsection{Conditionals}
+
+\begin{rosetta}
+\begin{rleft}
+if a = '1' then
+  y <= b;
+elsif c = '1' then
+  y <= d;
+else
+  y <= e;
+end if;
+\end{rleft}
+\begin{rright}
+if (a)
+  y = b;
+else if (c)
+  y = d;
+else
+  y = e;
+\end{rright}
+\end{rosetta}
+
+Three cosmetic differences and no semantic one: parentheses are required around
+the condition, \code{elsif} is spelt \code{else if}, and there is no
+\code{end if} because a multi-statement branch is delimited by
+\code{begin}/\code{end}. The last is the one that produces bugs, because
+forgetting \code{begin}/\code{end} silently attaches only the first statement
+to the branch. Always write \code{begin}/\code{end}, even for a single
+statement, and your \VHDL{} instinct will be satisfied.
+
+\subsection{Case}
+
+\begin{rosetta}
+\begin{rleft}
+case op is
+  when "00" =>
+    y <= a;
+  when "01" | "10" =>
+    y <= b;
+  when others =>
+    y <= c;
+end case;
+
+-- VHDL-2008 matching case:
+case? addr is
+  when "1---" => sel <= '1';
+  when others => sel <= '0';
+end case?;
+\end{rleft}
+\begin{rright}
+case (op)
+  2'b00:
+    y = a;
+  2'b01, 2'b10:
+    y = b;
+  default:
+    y = c;
+endcase
+
+// wildcard case:
+casez (addr)
+  4'b1???: sel = 1'b1;
+  default: sel = 1'b0;
+endcase
+\end{rright}
+\end{rosetta}
+
+\index{case!casez}\index{case!casex}
+
+The plain \code{case} matches. The important difference is completeness:
+\VHDL{} requires a \code{case} to cover every value of the selector's subtype,
+so \code{when others} is compulsory unless every value is listed. \SV{} does
+not require anything, and a \code{case} without a \code{default} that fails to
+match simply leaves the targets unchanged, which in an \code{always\_comb}
+infers a latch. Write a \code{default} in every combinational \code{case}. There
+is no substitute for the discipline \VHDL{} enforced for you.
+
+\code{casez} treats \code{z} (written \code{?}) in either the case expression or
+a case item as a wildcard. \code{casex} treats both \code{x} and \code{z} as
+wildcards. \VHDL{}-2008's \code{case?} matches \code{'-'} in a choice and is
+the counterpart of \code{casez}.
+
+\begin{gotcha}{Never write \code{casex}}
+\code{casex} treats \code{x} as a don't-care \emph{in the case expression as
+well as in the items}. If the selector is unknown, because a reset was missed
+or an uninitialised register propagated, \code{casex} matches the first item
+anyway and the simulation proceeds happily along a branch that the silicon will
+not take.
+\begin{svcode}
+logic [3:0] sel;      // x after reset
+casex (sel)
+  4'b0001: y = a;     // MATCHES when sel is 4'bxxxx. Bug hidden.
+  4'b0010: y = b;
+  default: y = c;     // never reached
+endcase
+\end{svcode}
+\code{casez} is safer because only \code{z} is a wildcard and \code{z} rarely
+appears by accident inside a chip. Better still, use \code{case (sel) inside}
+with \code{4'b0001:} style patterns, which is the \SV{}-2005 form and matches
+only where you ask. Best of all, for a decoder, write \code{case (1'b1)} with
+explicit conditions:
+\begin{svcode}
+always_comb begin
+  unique case (1'b1)
+    sel[0]: y = a;
+    sel[1]: y = b;
+    default: y = c;
+  endcase
+end
+\end{svcode}
+\end{gotcha}
+
+\subsection{Case modifiers: \code{unique}, \code{unique0}, \code{priority}}
+
+\begin{rosetta}
+\begin{rleft}
+-- VHDL has no modifiers. The
+-- completeness requirement plus
+-- the semantics of `case' already
+-- imply parallel, full behaviour.
+
+-- pragmas are needed only to
+-- persuade synthesis:
+case op is           -- pragma full_case
+  when "00" => y <= a;
+  when "01" => y <= b;
+  when others => y <= c;
+end case;
+\end{rleft}
+\begin{rright}
+// exactly one item matches:
+unique case (op) ... endcase
+
+// at most one item matches:
+unique0 case (op) ... endcase
+
+// items are tried in order,
+// first match wins:
+priority case (op) ... endcase
+
+// plain: first match wins, no
+// check at all
+case (op) ... endcase
+\end{rright}
+\end{rosetta}
+
+\index{unique case}\index{priority case}
+
+These modifiers do two things at once, and the second is why they are worth
+using. To synthesis they say ``full case'' (\code{unique}, \code{priority}) and
+``parallel case'' (\code{unique}), replacing the comment pragmas that Verilog
+users have written for thirty years. To simulation they add a run-time check:
+\code{unique} reports a violation if no item matches or if more than one
+matches, \code{unique0} if more than one matches, \code{priority} if none
+matches. That run-time check is genuinely valuable and it is something \VHDL{}
+never offered.
+
+\begin{tipbox}{Use \code{unique case} plus \code{default}}
+The two are not redundant, but be clear about what each one buys.
+\code{default} tells the compiler that every path assigns the outputs, so no
+latch is inferred, and it gives you \VHDL{}'s \code{when others} completeness
+guarantee. \code{unique} adds the overlap check: simulation complains if two
+items match the same value.
+
+What you do \emph{not} get is the no-match check. \code{unique} reports a
+violation when no item matches, and a \code{default} makes the case always
+match, so that half of the check is switched off by construction. If it is the
+unreachable-state case you want to catch, drop the \code{default} and assign
+the outputs before the \code{case}, or add an explicit
+\code{default: \$error(...)}.
+\begin{svcode}
+always_comb begin
+  unique case (state_q)
+    IDLE: state_d = req ? RUN : IDLE;
+    RUN:  state_d = done ? DONE : RUN;
+    DONE: state_d = IDLE;
+    default: state_d = IDLE;    // also covers x propagation
+  endcase
+end
+\end{svcode}
+\end{tipbox}
+
+\subsection{Loops}
+
+\begin{rosetta}
+\begin{rleft}
+for i in 0 to 7 loop
+  y(i) <= a(7-i);
+end loop;
+
+for i in a'range loop
+  ...
+end loop;
+
+while cnt < 10 loop
+  cnt := cnt + 1;
+end loop;
+
+loop                -- infinite
+  ...
+  exit when done;
+end loop;
+
+next when skip;     -- continue
+exit;               -- break
+null;               -- do nothing
+\end{rleft}
+\begin{rright}
+for (int i = 0; i < 8; i++)
+  y[i] = a[7-i];
+
+foreach (a[i])
+  ...
+
+while (cnt < 10)
+  cnt = cnt + 1;
+
+forever begin       // infinite
+  ...
+  if (done) break;
+end
+
+repeat (8) @(posedge clk);
+do ... while (cond);
+
+continue;
+break;
+;                   // do nothing
+\end{rright}
+\end{rosetta}
+
+\index{loop!for}\index{foreach}
+
+The mapping is direct. Four remarks.
+
+\code{for} in \SV{} is the C form, with an initialisation, a condition and an
+increment. Declare the loop variable in the header (\code{for (int i = 0; ...)})
+and it is automatic and local to the loop; declare it outside and it is a
+static module-level variable shared with everything else, which in a
+testbench with several concurrent loops is a race.
+
+\code{foreach} has no \VHDL{} counterpart and is the natural translation of
+\code{for i in a'range loop}. It works on packed and unpacked arrays, on any
+number of dimensions (\code{foreach (m[i][j])}), and it gets the bounds and the
+direction right without you writing them.
+
+\code{repeat (N)} has no \VHDL{} equivalent and is extremely useful in
+testbenches: \code{repeat (10) @(posedge clk);} is the idiomatic ``wait ten
+clocks''.
+
+\code{do ... while} exists in \SV{} and not in \VHDL{}. \code{null} becomes an
+empty statement, a bare semicolon, which is easy to write by accident: an
+\code{if (c);} with a stray semicolon compiles and does nothing.
+
+For synthesis, both languages require loop bounds to be static, and the loop is
+unrolled. The \SV{} rule is the same as the \VHDL{} one.
+
+% ===========================================================================
+\section{Generate}
+\label{sec:rosetta:generate}
+% ===========================================================================
+
+\begin{rosetta}
+\begin{rleft}
+gen_stages : for i in 0 to N-1 generate
+  u_st : entity work.stage
+    generic map (IDX => i)
+    port map (
+      clk => clk,
+      d   => pipe(i),
+      q   => pipe(i+1));
+end generate gen_stages;
+
+gen_first : if i = 0 generate
+  ...
+end generate gen_first;
+
+-- VHDL-2008 adds else/elsif:
+gen_c : case MODE generate
+  when 0 => ...
+end generate gen_c;
+\end{rleft}
+\begin{rright}
+for (genvar i = 0; i < N; i++)
+  begin : gen_stages
+    stage #(.IDX(i)) u_st (
+      .clk (clk),
+      .d   (pipe[i]),
+      .q   (pipe[i+1]));
+  end
+
+if (MODE == 0) begin : gen_a
+  ...
+end else begin : gen_b
+  ...
+end
+
+case (MODE)
+  0: begin : gen_c0 ... end
+  default: begin : gen_cd ... end
+endcase
+\end{rright}
+\end{rosetta}
+
+\index{generate}\index{genvar}
+
+The three forms correspond one to one, including \code{case ... generate},
+which \VHDL{}-2008 added and \SV{} has always had. The keywords
+\code{generate} and \code{endgenerate} are optional in \SV{}-2009 and later;
+most modern code omits them, because the \code{for}, \code{if} or \code{case}
+at module level is unambiguously a generate construct.
+
+The loop variable is a \kw{genvar}\index{genvar}: an elaboration-time integer,
+not a run-time object. Declare it in the loop header
+(\code{for (genvar i = 0; ...)}) so its scope is the loop. \VHDL{} declares the
+equivalent implicitly in the \code{for ... generate} header, which is the same
+idea.
+
+\subsection{Names matter}
+
+\begin{gotcha}{An unnamed generate block still has a name}
+In \VHDL{} the generate label is compulsory. In \SV{} it is optional, and if
+you leave it out the tool invents one: \code{genblk1}, \code{genblk2}, numbered
+in order of appearance in the file. Every hierarchical path, every waveform
+name, every synthesis constraint and every assertion binding then depends on
+that number, and inserting an unrelated \code{if} earlier in the file
+renumbers everything below it.
+\begin{svcode}
+for (genvar i = 0; i < N; i++) begin        // becomes genblk1
+  stage u_st (...);
+end
+// path: top.genblk1[3].u_st  -- and it changes if you edit the file above
+
+for (genvar i = 0; i < N; i++) begin : g_stage
+  stage u_st (...);
+end
+// path: top.g_stage[3].u_st  -- stable
+\end{svcode}
+Name every generate block, with a consistent prefix such as \code{g\_}. It
+costs nothing and it is the difference between a constraint file that survives
+a refactor and one that does not.
+\end{gotcha}
+
+\subsection{A pipeline, both ways}
+
+The canonical use of \code{generate} is a regular structure whose stages differ
+only by index. Here is a systolic multiply-accumulate chain, in both languages.
+
+\begin{vhdlcode}[caption={A generated systolic chain in \VHDL{}.},label={lst:rosetta:systolic-vhdl}]
+architecture rtl of mac_chain is
+  type acc_arr_t is array (0 to N) of signed(31 downto 0);
+  type dat_arr_t is array (0 to N) of signed(15 downto 0);
+  signal acc : acc_arr_t;
+  signal dat : dat_arr_t;
+begin
+  acc(0) <= (others => '0');
+  dat(0) <= din;
+
+  gen_taps : for i in 0 to N-1 generate
+    tap : process (clk) is
+    begin
+      if rising_edge(clk) then
+        dat(i+1) <= dat(i);
+        acc(i+1) <= acc(i) + resize(dat(i) * coeff(i), 32);
+      end if;
+    end process tap;
+  end generate gen_taps;
+
+  dout <= std_logic_vector(acc(N));
+end architecture rtl;
+\end{vhdlcode}
+
+\begin{svcode}[caption={The same chain in \SV{}.},label={lst:rosetta:systolic-sv}]
+module mac_chain #(parameter int unsigned N = 8) (
+  input  wire                clk,
+  input  wire signed [15:0]  din,
+  input  wire signed [15:0]  coeff [0:N-1],
+  output logic signed [31:0] dout
+);
+  logic signed [31:0] acc [0:N];
+  logic signed [15:0] dat [0:N];
+
+  assign acc[0] = '0;
+  assign dat[0] = din;
+
+  for (genvar i = 0; i < N; i++) begin : g_taps
+    always_ff @(posedge clk) begin
+      dat[i+1] <= dat[i];
+      acc[i+1] <= acc[i] + 32'($signed(dat[i]) * $signed(coeff[i]));
+    end
+  end
+
+  assign dout = acc[N];
+endmodule
+\end{svcode}
+
+The two are the same design. Note three translation details. The \VHDL{} array
+types become plain unpacked arrays with no \code{type} declaration. The
+\code{resize(...)} disappears because the thirty-two-bit target does the
+widening, but the \code{32'(...)} size cast is written anyway, so that the
+multiply is done at thirty-two bits regardless of context. And the
+\code{coeff} port is an unpacked array of signed vectors, which \SV{} allows
+across a port boundary and which older Verilog did not.
+
+% ===========================================================================
+\section{Instantiation}
+\label{sec:rosetta:instantiation}
+% ===========================================================================
+
+\subsection{Component declaration or direct instantiation}
+
+\begin{rosetta}
+\begin{rleft}
+architecture rtl of top is
+  -- the old way: declare a
+  -- component, then instantiate it
+  component fifo is
+    generic (WIDTH : positive);
+    port (clk : in  std_logic;
+          d   : in  std_logic_vector;
+          q   : out std_logic_vector);
+  end component fifo;
+begin
+  u_fifo : fifo
+    generic map (WIDTH => 16)
+    port map (clk => clk,
+              d   => din,
+              q   => dout);
+end architecture rtl;
+\end{rleft}
+\begin{rright}
+module top (...);
+
+  // there is no component
+  // declaration in SystemVerilog.
+  // The module itself is the
+  // declaration.
+
+  fifo #(
+    .WIDTH (16)
+  ) u_fifo (
+    .clk (clk),
+    .d   (din),
+    .q   (dout)
+  );
+
+endmodule
+\end{rright}
+\end{rosetta}
+
+\index{instantiation}\index{component}
+
+The \VHDL{} component declaration is a local re-declaration of an entity's
+interface, and it exists because \VHDL{} originally insisted that everything be
+declared before use in the current design unit. Getting the component
+declaration out of step with the entity is a classic \VHDL{} bug: the two are
+checked only at elaboration, and a mismatched port list produces an error a
+long way from its cause.
+
+\SV{} has nothing of the kind. You instantiate a module by name, and the tool
+finds it in whatever was compiled. If it is not there, most tools issue a
+warning and create a black box, which is another reason to run
+\tool{Verilator}, whose default is an error.
+
+\VHDL{}-2008's direct entity instantiation removes the component declaration on
+the \VHDL{} side too, and it is what you should already be writing:
+
+\begin{vhdlcode}[caption={Direct entity instantiation: the modern \VHDL{} form.},label={lst:rosetta:direct}]
+u_fifo : entity work.fifo(rtl)      -- (rtl) selects the architecture
+  generic map (WIDTH => 16)
+  port map (clk => clk, d => din, q => dout);
+\end{vhdlcode}
+
+The architecture name in parentheses has no \SV{} equivalent, because a module
+has only one body.
+
+\subsection{Named, positional, and shorthand connections}
+
+\begin{rosetta}
+\begin{rleft}
+-- named (always do this)
+port map (clk => clk,
+          d   => din,
+          q   => dout,
+          err => open);
+
+-- positional (do not)
+port map (clk, din, dout, open);
+
+-- VHDL has no shorthand for
+-- "connect to a signal of the
+-- same name".
+\end{rleft}
+\begin{rright}
+// named (always do this)
+.clk (clk),
+.d   (din),
+.q   (dout),
+.err ()          // unconnected
+
+// positional (do not)
+fifo u (clk, din, dout, );
+
+// implicit .name
+.clk, .d, .q     // same-name
+
+// implicit .*
+fifo u_fifo (.*);
+\end{rright}
+\end{rosetta}
+
+Named association is the same idea in both languages, and it is the only form
+you should use. Note the spelling of an unconnected port: \VHDL{} writes
+\code{open}, \SV{} writes empty parentheses \code{.err()}. Omitting the port
+entirely is also legal in \SV{} and means the same thing, which is why
+\cref{sec:rosetta:ports} insisted you connect everything explicitly.
+
+\SV{} adds two shorthands that \VHDL{} does not have.
+
+\code{.name} connects the port \code{name} to a signal called \code{name} in
+the instantiating scope. \code{.*} does that for every port not explicitly
+connected. Both are elaboration-time checks: if no signal of that name exists,
+or the widths disagree, it is an error, not a silent implicit net.
+
+\code{.*} is genuinely controversial. In its favour: a hundred-port CPU core
+instantiated with \code{.*} is four lines instead of a hundred, name mismatches
+become errors, and adding a port to the module does not require editing every
+instantiation. Against it: you cannot see from the instantiation what is
+connected to what, code review becomes harder, and it encourages a naming
+convention where every signal in the parent has the same name as the port,
+which then breaks the moment you need two instances.
+
+\begin{ruleofthumb}
+Use full named association in \RTL{} you expect a human to read. Use \code{.*}
+only in testbench wrappers, where the connection is one-to-one by construction.
+\end{ruleofthumb}
+
+\subsection{Configurations and \kw{bind}}
+
+A \VHDL{} configuration binds component instances to entity/architecture pairs,
+possibly deep in the hierarchy, without editing the design. \SV{} has no
+equivalent for that job. What it does have, and \VHDL{} does not, is
+\kw{bind}\index{bind}: a way of attaching a module instance to an existing
+module or instance from outside it.
+
+\begin{svcode}[caption={\code{bind}: adding checkers without touching the \RTL{}.},label={lst:rosetta:bind}]
+// fifo_checker is an ordinary module full of assertions.
+// This attaches one to every instance of `fifo', with access to its internals:
+bind fifo fifo_checker u_chk (.clk(clk), .wr(wr_en), .rd(rd_en), .cnt(count_q));
+
+// or to one specific instance:
+bind top.u_dma.u_fifo fifo_checker u_chk (.*);
+\end{svcode}
+
+\code{bind} is how assertion and coverage code is kept out of synthesisable
+files. It is one of the most useful features \SV{} has that \VHDL{} lacks
+entirely. \cref{ch:beyond} treats it properly and \refverificationbook puts it to
+work.
+
+% ===========================================================================
+\section{Subprograms}
+\label{sec:rosetta:subprograms}
+% ===========================================================================
+
+\begin{rosetta}
+\begin{rleft}
+function parity (v : std_logic_vector)
+  return std_logic is
+  variable r : std_logic := '0';
+begin
+  for i in v'range loop
+    r := r xor v(i);
+  end loop;
+  return r;
+end function parity;
+
+procedure drive (
+  signal   clk : in  std_logic;
+  signal   d   : out std_logic_vector;
+  constant v   : in  std_logic_vector) is
+begin
+  wait until rising_edge(clk);
+  d <= v;
+end procedure drive;
+\end{rleft}
+\begin{rright}
+function automatic logic parity (
+    input logic [31:0] v);
+  logic r = 1'b0;
+  foreach (v[i]) r ^= v[i];
+  return r;
+endfunction
+
+task automatic drive (
+    ref   logic        clk,
+    output logic [7:0] d,
+    input logic [7:0]  v);
+  @(posedge clk);
+  d = v;
+endtask
+\end{rright}
+\end{rosetta}
+
+\index{function}\index{task}
+
+\subsection{Function or task?}
+
+A \VHDL{} \kw{function} returns a value and cannot wait. A \VHDL{}
+\kw{procedure} does not return a value and may wait. That is exactly the \SV{}
+distinction between \kw{function} and \kw{task}, with one relaxation and one
+addition.
+
+The relaxation: a \SV{} \kw{function} may have \code{output} and \code{inout}
+arguments as well as a return value, so it can pass several results back
+without a \kw{task}. A function that returns nothing is declared
+\code{function void f(...)} and is called as a statement.
+
+The addition: a \SV{} \kw{task} may consume time (\code{\#}, \code{@},
+\code{wait}) exactly as a \VHDL{} procedure may, but a \kw{function} may not,
+and a synthesisable function may not either. The rule is enforced by the
+compiler.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Subprograms.}
+  \label{tab:rosetta:subprograms}
+  \small
+  \begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.30\linewidth}>{\raggedright\arraybackslash}p{0.28\linewidth}>{\raggedright\arraybackslash}p{0.36\linewidth}@{}}
+    \toprule
+    \VHDL{} & \SV{} & Note \\
+    \midrule
+    \code{function} & \code{function} & Cannot consume time in either. \\
+    \code{procedure} & \code{task} & May consume time in both. \\
+    \code{procedure} (no waits) & \code{function void} & Callable as a statement. \\
+    \code{impure function} & (default) & Every \SV{} function may read module state. \\
+    \code{pure function} & --- & No way to declare purity. \\
+    parameter mode \code{in} & \code{input} & Copied in. \\
+    parameter mode \code{out} & \code{output} & Copied out on return. \\
+    parameter mode \code{inout} & \code{inout} & Copied both ways. \\
+    \code{signal} parameter & \code{ref} & Passed by reference; the only way to see live changes. \\
+    default argument values & default argument values & Same. \\
+    overloading by signature & --- & \SV{} has no subprogram overloading. \\
+    operator overloading & --- & No equivalent at all. \\
+    recursion (always allowed) & \code{automatic} required & See the trap below. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Purity}
+
+\VHDL{} distinguishes \kw{pure} and \kw{impure} functions: a pure function may
+read only its arguments, an impure one may read signals and variables in the
+enclosing scope. The default is pure, and the compiler enforces it.
+
+\SV{} has no such distinction. Every function may read anything in scope, and
+nothing tells you whether it does. Where \VHDL{} would have refused to compile
+a function that reads a signal you forgot to pass, \SV{} compiles it and the
+function silently depends on module state. In an \code{always\_comb} this is
+usually harmless, because \code{always\_comb} extends its sensitivity into
+functions, but it makes the function unusable anywhere else.
+
+\begin{ruleofthumb}
+Write every \SV{} function as if it were \VHDL{}-pure: take everything through
+arguments, return everything through the return value. Then it is reusable and
+testable.
+\end{ruleofthumb}
+
+\subsection{Lifetime: the one-word difference}
+
+\begin{gotcha}{Write \kw{automatic} on every subprogram}
+In \VHDL{}, a subprogram's local variables are created on entry and destroyed
+on return, so two concurrent calls have two independent sets and recursion
+works. In \SV{} that behaviour is opt-in. A function or task declared in a
+module, interface or package without the word \kw{automatic} has \emph{static}
+lifetime: its locals are allocated once, for the whole simulation, and every
+call shares them.
+
+Recursion is the immediate victim, and it is the one that shows up while you
+are still writing \RTL{}:
+\begin{svcode}
+// WRONG: static by default, so the recursive call overwrites `n'
+function int factorial (int n);
+  if (n <= 1) return 1;
+  return n * factorial(n - 1);
+endfunction
+
+// RIGHT
+function automatic int factorial (int n);
+  if (n <= 1) return 1;
+  return n * factorial(n - 1);
+endfunction
+\end{svcode}
+The other victim is concurrency, which matters once you start writing
+testbenches: two processes calling the same static task share its arguments and
+locals, and the failure looks like random data corruption. That is the trap in
+detail, together with the enclosing-unit form
+(\code{module automatic tb;}) and the reason class methods are exempt, in
+\refverificationbook.
+
+For a subprogram, the rule needs no detail at all. Write \kw{automatic} on
+every function and task. There is no downside: \kw{automatic} is what \VHDL{}
+always did.
+\end{gotcha}
+
+\subsection{Argument passing and \code{ref}}
+
+A \VHDL{} \code{signal} parameter lets a procedure see a signal live and drive
+it, which is how testbench procedures work. The \SV{} equivalent is \kw{ref}: a
+reference argument, not a copy. \code{const ref} passes by reference without
+allowing modification, which is the efficient way to pass a large array into a
+function.
+
+\begin{svcode}[caption={Argument modes.},label={lst:rosetta:argmodes}]
+function automatic void stats (
+    const ref logic [31:0] data [],   // by reference, read only, no copy
+    output int unsigned    n_ones,    // copied out on return
+    inout  int unsigned    running    // copied in and out
+);
+  n_ones = 0;
+  foreach (data[i]) n_ones += $countones(data[i]);
+  running += n_ones;
+endfunction
+\end{svcode}
+
+Note that \code{output} and \code{inout} arguments of a \SV{} subprogram are
+copied on entry and on return, not updated live. A \kw{task} that waits and
+then writes an \code{output} argument does not update the caller's variable
+until it returns. For live updates you need \kw{ref}, and \kw{ref} arguments
+are not allowed in a function that is called from a continuous assignment.
+
+\subsection{Overloading}
+
+\VHDL{} overloads subprograms by signature and lets you overload operators:
+this is how \code{numeric\_std} gives \code{"+"} a meaning for
+\code{unsigned}. \SV{} has neither. Two functions in the same scope may not
+share a name, and there is no way to give \code{+} a new meaning.
+
+The consequence for a \VHDL{} designer is concrete: the library-based approach
+to fixed-point arithmetic (\code{ieee.fixed\_pkg}, with \code{sfixed} and
+\code{ufixed} types and overloaded operators) has no \SV{} counterpart. You
+manage binary points by hand, with named functions and careful comments. This
+is one of the places where \VHDL{} is simply the better language, and it is
+worth saying so.
+
+% ===========================================================================
+\section{Packages and visibility}
+\label{sec:rosetta:packages}
+% ===========================================================================
+
+\begin{rosetta}
+\begin{rleft}
+package demo_pkg is
+  constant ITER : positive := 14;
+  subtype data_t is
+    signed(15 downto 0);
+  -- deferred constant: value in
+  -- the body
+  constant TABLE_SIZE : positive;
+  function atan_rom (i : natural)
+    return data_t;
+end package cordic_pkg;
+
+package body cordic_pkg is
+  constant TABLE_SIZE : positive := 16;
+  function atan_rom (i : natural)
+    return data_t is
+  begin
+    return to_signed(0, 16);
+  end function atan_rom;
+end package body demo_pkg;
+\end{rleft}
+\begin{rright}
+package demo_pkg;
+  localparam int unsigned ITER = 14;
+  typedef logic signed [15:0] data_t;
+
+  // no deferred constants: the
+  // value must be here
+  localparam int unsigned
+    TABLE_SIZE = 16;
+
+  function automatic data_t
+      atan_rom (int unsigned i);
+    return '0;
+  endfunction
+endpackage
+\end{rright}
+\end{rosetta}
+
+\index{package}
+
+\subsection{One unit, not two}
+
+A \VHDL{} package is two design units: the declaration, which is the interface,
+and the body, which holds the subprogram implementations and the values of
+deferred constants. Changing the body does not force recompilation of anything
+that uses the package, which is a real benefit on a large design.
+
+A \SV{} package is one unit. There is no body and no separation between
+interface and implementation. Everything, including function bodies, is in the
+package, and everything that imports the package is recompiled when it changes.
+
+Deferred constants therefore have no equivalent. A \VHDL{} package can declare
+\code{constant TABLE\_SIZE : positive;} in the declaration and give it a value
+in the body, hiding the value from users while still letting them use the name.
+\SV{} cannot do that at all.
+
+\subsection{Import and visibility}
+
+\begin{rosetta}
+\begin{rleft}
+use work.cordic_pkg.all;
+use work.cordic_pkg.data_t;
+
+-- fully qualified, no use clause
+signal x : work.cordic_pkg.data_t;
+
+-- a use clause in an entity
+-- applies to the entity and to
+-- every architecture of it
+\end{rleft}
+\begin{rright}
+import cordic_pkg::*;
+import cordic_pkg::data_t;
+
+// fully qualified, no import
+cordic_pkg::data_t x;
+
+// an import before the module
+// header is visible in the port
+// list too:
+module m
+  import cordic_pkg::*;
+  (input data_t d);
+\end{rright}
+\end{rosetta}
+
+The scope resolution operator is \code{::}, not \code{.}, and a fully qualified
+name needs no import at all. That is the safest form for occasional use, and it
+documents where the name comes from.
+
+The visibility rules differ in a way that matters. A wildcard import
+(\code{import pkg::*}) does not declare anything. It makes names
+\emph{candidates}: when the compiler meets an identifier that is not declared
+locally and is not visible from an enclosing scope, it looks through the
+wildcard imports. If exactly one supplies the name, that name is used and
+becomes permanently imported into the scope. If two supply it, that reference
+is an error, but only that reference: the rest of the file compiles.
+
+An explicit import (\code{import pkg::data\_t}) does declare the name. Two
+explicit imports of the same name into one scope are an error at the
+declaration, whether or not you use it. A local declaration always wins over a
+wildcard import, and always conflicts with an explicit one.
+
+\begin{gotcha}{A local name silently shadows a wildcard import}
+\begin{svcode}
+package pkg_a;  localparam int WIDTH = 32;  endpackage
+
+module m;
+  import pkg_a::*;
+  localparam int WIDTH = 8;    // shadows pkg_a::WIDTH. No warning.
+  logic [WIDTH-1:0] bus;       // 8 bits, not 32.
+endmodule
+\end{svcode}
+\VHDL{}'s \code{use ... all} behaves the same way in that a locally declared
+homograph hides the used one, but \VHDL{} makes the two candidates ambiguous
+where \SV{} silently prefers the local. In a large design with several
+imported packages, this is how two modules end up disagreeing about a bus
+width. Prefix package constants (\code{CFG\_WIDTH}), or use the qualified form
+\code{pkg\_a::WIDTH} wherever ambiguity is possible.
+\end{gotcha}
+
+\code{export pkg\_a::*;} inside a package re-exports names that the package
+itself imported, so that importing the outer package makes them visible too.
+\VHDL{} has no equivalent: a \code{use} clause in a package declaration does
+not propagate to users of that package. Use \code{export} sparingly; it makes
+the origin of a name very hard to find.
+
+\subsection{Package or header file?}
+
+\begin{tipbox}{When to use a package and when to use \file{.svh}}
+Use a \textbf{package} for everything the language can express: types,
+\code{typedef}s, constants (\kw{localparam}), functions, tasks, enumerations
+and \code{covergroup} definitions. A package is compiled, type-checked, and
+namespaced.
+
+Use an \textbf{included header} (\file{.svh}) only for text the language cannot
+express: macros, and the conditional-compilation guards around them. Guard it
+against double inclusion:
+\begin{svcode}
+`ifndef CORDIC_DEFS_SVH
+`define CORDIC_DEFS_SVH
+`define CORDIC_ASSERT(c) assert(c) else $error("cordic: %s", `"c`")
+`endif
+\end{svcode}
+A package cannot hold macros, because macros are gone before the compiler sees
+the package; a header cannot hold a type safely, because including it twice
+declares the type twice. The two mechanisms do not overlap and neither replaces
+the other.
+\end{tipbox}
+
+Packages themselves may be parameterised only indirectly: \SV{} has no generic
+packages. \VHDL{}-2008 does, though tool support is uneven. The usual \SV{}
+workaround is a package of \code{parameter type} definitions plus a class or a
+module that carries the parameters, and it is markedly less elegant than the
+\VHDL{} form.
+
+% ===========================================================================
+\section{Attributes and system functions}
+\label{sec:rosetta:attributes}
+% ===========================================================================
+
+\VHDL{} attributes and \SV{} system functions overlap without matching. The
+mapping is in \cref{tab:rosetta:attributes}. Two general remarks first.
+
+\VHDL{} attributes are part of the language and are evaluated by the same rules
+as everything else; \code{s'event} is an expression you can use anywhere.
+\SV{}'s equivalents are split between system functions usable anywhere
+(\code{\$bits}, \code{\$clog2}) and sampled-value functions
+(\code{\$rose}, \code{\$past}, \code{\$stable}) that are meaningful only in a
+clocked assertion context or with an explicit clocking event. You cannot write
+\code{if (\$rose(a))} in an ordinary \code{always\_comb} and get \VHDL{}'s
+\code{a'event} behaviour.
+
+Conversely, \SV{} has a set of bit-manipulation functions with no \VHDL{}
+counterpart at all, and they are used constantly: \code{\$clog2},
+\code{\$countones}, \code{\$onehot}, \code{\$isunknown}.
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{0.30\linewidth}>{\raggedright\arraybackslash}p{0.25\linewidth}>{\raggedright\arraybackslash}p{0.39\linewidth}@{}}
+  \caption{Attributes and system functions.}
+  \label{tab:rosetta:attributes} \\
+  \toprule
+  \VHDL{} & \SV{} & Note \\
+  \midrule
+  \endfirsthead
+  \multicolumn{3}{@{}l}{\small\itshape \cref{tab:rosetta:attributes}, continued}\\
+  \toprule
+  \VHDL{} & \SV{} & Note \\
+  \midrule
+  \endhead
+  \midrule
+  \multicolumn{3}{r@{}}{\small\itshape continues}\\
+  \endfoot
+  \bottomrule
+  \endlastfoot
+  \code{s'event}          & \code{@(s)} or \code{\$changed(s)} & No expression form outside assertions. \\
+  \code{rising\_edge(s)}  & \code{\$rose(s)}      & In assertions. In \RTL{}, \code{posedge}. \\
+  \code{falling\_edge(s)} & \code{\$fell(s)}      & \\
+  \code{s'stable}         & \code{\$stable(s)}    & Sampled-value function; needs a clock. \\
+  \code{s'last\_value}    & \code{\$past(s)}      & Not identical: \code{\$past} is the value one clock ago, \code{'last\_value} the value before the last change. \\
+  \code{s'delayed(t)}     & ---                   & No equivalent. \\
+  \code{s'last\_event}    & ---                   & No equivalent. \\
+  \code{t'image(x)}       & \code{\$sformatf("\%0d",x)}, \code{\%p} & For enumerations, \code{x.name()}. \\
+  \code{t'value(str)}     & ---                   & No equivalent; \code{\$sscanf} is the nearest. \\
+  \code{t'pos(x)}         & \code{int'(x)}        & \\
+  \code{t'val(i)}         & \code{t'(i)}          & Or \code{\$cast} for a checked conversion. \\
+  \code{t'succ(x)}, \code{t'pred(x)} & \code{x.next()}, \code{x.prev()} & Enumerations only. \\
+  \code{t'leftof}, \code{t'rightof}  & ---        & \\
+  \code{a'range}          & ---                   & Use \code{foreach} or \code{\$size}. \\
+  \code{a'reverse\_range} & ---                   & No equivalent. \\
+  \code{a'length}         & \code{\$size(a)}      & \code{\$bits(a)} for the total bit count. \\
+  \code{a'high}, \code{a'low} & \code{\$high(a)}, \code{\$low(a)} & \\
+  \code{a'left}, \code{a'right} & \code{\$left(a)}, \code{\$right(a)} & \\
+  \code{a'ascending}      & ---                   & Test \code{\$left(a) < \$right(a)}. \\
+  ---                     & \code{\$bits(t)}      & Bit count of any type, including a struct. \\
+  ---                     & \code{\$clog2(n)}     & Ceiling of $\log_2 n$. Constant expression. \\
+  ---                     & \code{\$countones(v)} & Population count. \\
+  ---                     & \code{\$onehot(v)}, \code{\$onehot0(v)} & Exactly one, or at most one, bit set. \\
+  ---                     & \code{\$isunknown(v)} & True if any bit is \code{x} or \code{z}. \\
+  ---                     & \code{\$typename(x)}  & The type of \code{x} as a string. Debug only. \\
+  ---                     & \code{\$dimensions}, \code{\$unpacked\_dimensions} & Array introspection. \\
+  \code{maximum}, \code{minimum} (2008) & ---     & No system function; write your own. \\
+\end{longtable}
+
+\begin{tipbox}{\code{\$clog2} replaces the \code{log2} dance}
+The \VHDL{} idiom for an address width is
+\code{integer(ceil(log2(real(DEPTH))))} with \code{use ieee.math\_real.all},
+and it has a well-known edge case at exact powers of two. \SV{} gives you
+\code{\$clog2(DEPTH)} as a constant function usable directly in a
+\kw{localparam}, and \code{\$clog2(1)} is 0, which is what you want. Use it in
+every parameterised memory:
+\begin{svcode}
+localparam int unsigned AW = (DEPTH > 1) ? $clog2(DEPTH) : 1;
+logic [AW-1:0] rd_ptr, wr_ptr;
+\end{svcode}
+\end{tipbox}
+
+% ===========================================================================
+\section{Reporting, assertions and files}
+\label{sec:rosetta:report}
+% ===========================================================================
+
+\subsection{Assertions and severity}
+
+\begin{rosetta}
+\begin{rleft}
+assert cnt < DEPTH
+  report "fifo overflow"
+  severity error;
+
+assert false
+  report "unreachable"
+  severity failure;
+
+report "starting test"
+  severity note;
+
+-- severity levels:
+--   note, warning, error, failure
+\end{rleft}
+\begin{rright}
+assert (cnt < DEPTH)
+  else $error("fifo overflow");
+
+assert (0)
+  else $fatal(1, "unreachable");
+
+$info("starting test");
+
+// severity tasks:
+//   $info, $warning, $error,
+//   $fatal
+\end{rright}
+\end{rosetta}
+
+\index{assertion!immediate}
+
+The structural correspondence is exact and the mapping of severities is in
+\cref{tab:rosetta:severity}. In both languages the assertion fires when the
+condition is \emph{false}. The \SV{} form puts the message in an \code{else}
+clause, which reads oddly at first and is logical once you see it: the
+\code{else} branch is what happens when the assertion fails, and it may contain
+any statement, a message being only the usual one.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Severity.}
+  \label{tab:rosetta:severity}
+  \small
+  \begin{tabular}{@{}ll>{\raggedright\arraybackslash}p{0.50\linewidth}@{}}
+    \toprule
+    \VHDL{} & \SV{} & Behaviour \\
+    \midrule
+    \code{note}    & \code{\$info}    & Message only. \\
+    \code{warning} & \code{\$warning} & Message only. \\
+    \code{error}   & \code{\$error}   & Message; simulation continues unless the tool is told otherwise. \\
+    \code{failure} & \code{\$fatal}   & Message and immediate stop. First argument is the exit code passed to \code{\$finish}. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two \SV{} refinements have no \VHDL{} counterpart. A \emph{deferred} assertion,
+written \code{assert \#0 (...)}, is evaluated at the end of the time step rather
+than immediately, which suppresses spurious failures caused by transient values
+in combinational logic. A \emph{final} assertion, \code{assert final (...)},
+is checked at the end of simulation. Both are worth knowing. Everything above
+is an \emph{immediate} assertion, a statement that runs when control reaches
+it; \SV{} also has \emph{concurrent} assertions, which describe behaviour over
+time and are a sublanguage \VHDL{} has nothing comparable to.
+\refverificationbook is where that sublanguage is taught, and where
+the assertions written with it are wired into a testbench.
+
+\subsection{Printing}
+
+\begin{rosetta}
+\begin{rleft}
+use std.textio.all;
+
+report "count = " &
+  integer'image(cnt);
+
+-- VHDL-2008 to_string:
+report "vec = " & to_string(v);
+
+-- printing a real
+report "f = " & real'image(f);
+
+-- hex needs a helper
+report "h = " & to_hstring(v);
+\end{rleft}
+\begin{rright}
+$display("count = %0d", cnt);
+
+$display("vec = %b", v);
+
+$display("f = %f", f);
+
+$display("h = %h", v);
+
+$write("no newline");
+msg = $sformatf("%0d", cnt);
+$display("%s at %0t",
+         state.name(), $time);
+\end{rright}
+\end{rosetta}
+
+\index{system task}
+
+\VHDL{} builds a string by concatenation and image functions; \SV{} uses C-like
+format specifiers. \cref{tab:rosetta:format} lists the ones you need.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Format specifiers.}
+  \label{tab:rosetta:format}
+  \small
+  \begin{tabular}{@{}ll>{\raggedright\arraybackslash}p{0.50\linewidth}@{}}
+    \toprule
+    \SV{} & \VHDL{} equivalent & Meaning \\
+    \midrule
+    \code{\%d} & \code{integer'image} & Decimal, padded to the width of the type. \\
+    \code{\%0d} & \code{integer'image} & Decimal, no padding. Use this one. \\
+    \code{\%h}, \code{\%0h} & \code{to\_hstring} (2008) & Hexadecimal. \\
+    \code{\%b}, \code{\%0b} & \code{to\_string} & Binary. \\
+    \code{\%o} & \code{to\_ostring} (2008) & Octal. \\
+    \code{\%s} & (the string itself) & String, or an enumeration's \code{.name()}. \\
+    \code{\%f}, \code{\%e}, \code{\%g} & \code{real'image} & Real. \\
+    \code{\%t} & \code{time'image} & Time, formatted by \code{\$timeformat}. \\
+    \code{\%p} & --- & ``Pretty print'': any aggregate, including structs and arrays. No \VHDL{} equivalent. \\
+    \code{\%m} & --- & The hierarchical name of the current scope. Very useful in messages. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\code{\%0d} rather than \code{\%d} is worth a habit: \code{\%d} pads to the
+width of the type, so a 32-bit counter prints as ten characters with nine
+leading spaces. \code{\%p} is the closest thing \SV{} has to a universal
+\code{'image}, and it will print a whole packed structure or unpacked array in
+one go, which is invaluable in a scoreboard message.
+
+\subsection{Files}
+
+\begin{rosetta}
+\begin{rleft}
+use std.textio.all;
+
+file f      : text;
+variable l  : line;
+variable v  : integer;
+
+file_open(f, "in.txt", read_mode);
+while not endfile(f) loop
+  readline(f, l);
+  read(l, v);
+end loop;
+file_close(f);
+
+file_open(f, "out.txt", write_mode);
+write(l, string'("hello"));
+writeline(f, l);
+file_close(f);
+\end{rleft}
+\begin{rright}
+int fd;
+int v;
+string s;
+
+fd = $fopen("in.txt", "r");
+while (!$feof(fd)) begin
+  void'($fscanf(fd, "%d\n", v));
+end
+$fclose(fd);
+
+fd = $fopen("out.txt", "w");
+$fdisplay(fd, "hello");
+$fclose(fd);
+
+// memory initialisation:
+$readmemh("init.hex", mem);
+$readmemb("init.bin", mem);
+\end{rright}
+\end{rosetta}
+
+\index{file I/O}\index{readmemh}
+
+\code{std.textio}'s two-step model, read a \code{line} object and then parse
+fields out of it, has no \SV{} counterpart. \SV{} reads directly with
+\code{\$fscanf} (formatted), \code{\$fgets} (a whole line into a
+\kw{string}), or \code{\$fread} (binary). The file handle is an \kw{int}, not a
+distinct file type, and passing a stale or zero handle is not caught.
+
+\code{\$readmemh} and \code{\$readmemb} have no \VHDL{} equivalent short of a
+TEXTIO loop you write yourself, and they are worth knowing well: one call
+loads an entire unpacked array from a text file of hexadecimal or binary
+values, they accept \code{@address} lines to jump around, and they are
+supported by every synthesis tool as a way to initialise a ROM.
+
+\begin{svcode}[caption={A ROM initialised from a file.},label={lst:rosetta:rom}]
+module atan_rom #(parameter int unsigned N = 16) (
+  input  wire  [3:0]  addr,
+  output logic [15:0] data
+);
+  logic [15:0] rom [0:N-1];
+  initial $readmemh("atan_table.hex", rom);
+  assign data = rom[addr];
+endmodule
+\end{svcode}
+
+% ===========================================================================
+\section{Time and delays}
+\label{sec:rosetta:time}
+% ===========================================================================
+
+\begin{rosetta}
+\begin{rleft}
+-- time is a physical type with
+-- units built into the language
+constant PERIOD : time := 10 ns;
+
+wait for PERIOD;
+wait for 100 ps;
+wait for 1 us;
+
+-- resolution limit is set by the
+-- simulator command line, e.g.
+--   vsim -t ps work.tb
+
+-- now / current time:
+report time'image(now);
+\end{rleft}
+\begin{rright}
+`timescale 1ns/1ps
+// or, inside the module:
+timeunit      1ns;
+timeprecision 1ps;
+
+localparam time PERIOD = 10ns;
+
+initial begin
+  clk = 0;  #PERIOD;
+  clk = 1;  #100ps;
+  clk = 0;  #1us;
+  clk = 1;  #10;
+  // "#10" is 10 TIME UNITS, and
+  // which unit that is depends
+  // on the timescale in force.
+  $display("%0t", $time);
+end
+\end{rright}
+\end{rosetta}
+
+\index{timescale directive}\index{time!units}
+
+\VHDL{}'s \code{time} is a physical type: a value carries its unit, the
+compiler checks it, and \code{10 ns} means ten nanoseconds no matter where it
+appears. The simulator's resolution limit affects rounding, not meaning.
+
+\SV{} inherited Verilog's model, in which a delay is a bare number scaled by a
+directive. \code{\#10} means ``ten time units'', and which unit that is depends on
+the \chTwoTick{timescale} in force for the module. \SV{} added time literals
+with units (\code{\#10ns}) and the \kw{timeunit}/\kw{timeprecision} declarations,
+and between them they make the problem avoidable. It is still there for anyone
+who does not use them.
+
+\begin{gotcha}{The timescale rule is genuinely awful}
+The timescale that applies to a module is the one established by the last
+\chTwoTick{timescale} directive that the compiler read \emph{before} that
+module, in the order the files were given on the command line. Not the file's
+own directive, if it has none; not the project's; the last one seen. So:
+
+\begin{itemize}
+  \item A module in a file with no \chTwoTick{timescale} inherits whatever the
+        previous file set. Change the file order and its delays change.
+  \item If no file sets one, the timescale is tool-defined, and
+        \tool{QuestaSim}, \tool{VCS} and \tool{Xcelium} do not agree.
+  \item The simulation's time precision is the \emph{smallest} precision of any
+        module in the design, so one testbench file with \code{1ps} precision
+        slows down the whole simulation.
+  \item \code{\$time} returns the time scaled and rounded to the calling
+        module's time unit, so the same instant prints differently in two
+        modules. \code{\$realtime} avoids the rounding but not the scaling.
+\end{itemize}
+
+\begin{svcode}
+// file a.sv
+`timescale 1ns/1ps
+module a; initial #10 $display("a at %0t", $time); endmodule
+// file b.sv -- no directive of its own
+module b; initial #10 $display("b at %0t", $time); endmodule
+\end{svcode}
+Compile \code{a.sv b.sv} and \code{b} waits 10\,ns. Compile \code{b.sv a.sv}
+and \code{b}'s timescale is tool-defined. Nothing warns you.
+
+The fix is mechanical and you should apply it to every file you write:
+\begin{svcode}
+`timescale 1ns/1ps        // first line of every .sv file
+module m;
+  timeunit      1ns;      // belt and braces: module-local, order-independent
+  timeprecision 1ps;
+  ...
+endmodule
+\end{svcode}
+and write delays with explicit units, \code{\#10ns}, never bare \code{\#10}.
+\end{gotcha}
+
+\begin{notebox}{Delays do not belong in \RTL{} at all}
+Both languages let you write a delay in synthesisable code and both ignore it
+at synthesis. The result is a simulation that does not match the netlist. The
+only delays in a well-written project are in the clock generator and the
+stimulus of the testbench:
+\begin{svcode}
+localparam time TCLK = 10ns;
+initial begin
+  clk = 1'b0;
+  forever #(TCLK/2) clk = ~clk;
+end
+\end{svcode}
+Everything else is driven from clock edges.
+\end{notebox}
+
+% ===========================================================================
+\section{The complete mapping table}
+\label{sec:rosetta:table}
+% ===========================================================================
+
+\cref{tab:rosetta:master} is the summary. It repeats, in one place, everything
+that \cref{ch:rosetta} and this chapter have established, static half and
+behavioural half together. Photocopy it.
+
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{0.31\linewidth}>{\raggedright\arraybackslash}p{0.28\linewidth}>{\raggedright\arraybackslash}p{0.35\linewidth}@{}}
+  \caption{\VHDL{} to \SV{}: the complete mapping.}
+  \label{tab:rosetta:master} \\
+  \toprule
+  \textbf{\VHDL{}} & \textbf{\SV{}} & \textbf{Notes} \\
+  \midrule
+  \endfirsthead
+  \multicolumn{3}{@{}l}{\small\itshape \cref{tab:rosetta:master}, continued}\\
+  \toprule
+  \textbf{\VHDL{}} & \textbf{\SV{}} & \textbf{Notes} \\
+  \midrule
+  \endhead
+  \midrule
+  \multicolumn{3}{r@{}}{\small\itshape continues on the next page}\\
+  \endfoot
+  \bottomrule
+  \endlastfoot
+
+  \multicolumn{3}{@{}l}{\textit{Design units}}\\
+  \midrule
+  \code{entity} + \code{architecture} & \code{module} ... \code{endmodule} & One unit, not two. \\
+  several architectures & parameter, \chTwoTick{ifdef}, or several modules & No ``same interface, other body''. \\
+  \code{configuration} & \code{config} (rare) & Effectively no equivalent. \\
+  \code{package} + \code{package body} & \code{package} ... \code{endpackage} & One unit. No deferred constants. \\
+  \code{library ieee;} & --- & No library clause. \\
+  \code{use pkg.all} & \code{import pkg::*} & Different resolution rules. \\
+  \code{use pkg.name} & \code{import pkg::name} & \\
+  \code{pkg.name} & \code{pkg::name} & Qualified reference, no import needed. \\
+  --- & \chTwoTick{include} \file{"x.svh"} & Textual inclusion. Macros only. \\
+  --- & \chTwoTick{define}, \chTwoTick{ifdef} & Preprocessor. No \VHDL{} equivalent. \\
+  --- & \chTwoTick{default\_nettype none} & Put it in every file. \\
+  analysis order & compilation unit, \code{\$unit} & Tool-defined. Avoid \code{\$unit}. \\
+  \midrule
+
+  \multicolumn{3}{@{}l}{\textit{Ports and parameters}}\\
+  \midrule
+  \code{in} / \code{out} / \code{inout} & \code{input} / \code{output} / \code{inout} & \\
+  \code{buffer} & \code{output} & \SV{} outputs are always readable. \\
+  port default \code{:= '0'} & --- & No default port values. \\
+  \code{generic} & \code{parameter} & \\
+  architecture \code{constant} & \code{localparam} & \\
+  \code{generic (type T)} (2008) & \code{parameter type T} & Well supported in \SV{}. \\
+  \code{generic map (X => 1)} & \code{\#(.X(1))} & Before the instance name. \\
+  --- & \code{defparam} & Deprecated. Never use. \\
+  \midrule
+
+  \multicolumn{3}{@{}l}{\textit{Types}}\\
+  \midrule
+  \code{std\_ulogic} & \code{logic} & 4-state variable. \\
+  \code{std\_logic} & \code{wire} & 4-state resolved net. \\
+  \code{std\_logic\_vector(N-1 downto 0)} & \code{logic [N-1:0]} & \\
+  \code{unsigned} & \code{logic [N-1:0]} & Unsigned is the default. \\
+  \code{signed} & \code{logic signed [N-1:0]} & \\
+  \code{bit} & \code{bit} & 2-state in both. \\
+  \code{boolean} & --- & Any non-zero value is true. \\
+  \code{integer} & \code{int} & Not \SV{}'s \code{integer}, which is 4-state. \\
+  \code{natural}, \code{positive} & --- & No range constraints, no run-time checks. \\
+  \code{real} & \code{real} & \\
+  \code{character} & \code{byte} & \\
+  \code{string} & \code{string} & Dynamic in \SV{}. \\
+  \code{time} & \code{time} + \chTwoTick{timescale} & See the timescale trap. \\
+  \code{subtype ... range} & --- & No equivalent. Assert instead. \\
+  \code{type ... is array} & unpacked \code{[..]} after the name & For memories. \\
+  --- & packed \code{[..]} before the name & One vector with a shape. \\
+  \code{record} & \code{struct packed} / \code{struct} & Packed gives a defined bit layout. \\
+  --- & \code{union}, \code{union packed} & No \VHDL{} equivalent. \\
+  \code{type ... is (A, B)} & \code{typedef enum logic [..] \{A,B\}} & Always give the base type. \\
+  \midrule
+
+  \multicolumn{3}{@{}l}{\textit{Literals and conversions}}\\
+  \midrule
+  \code{'0'}, \code{'1'} & \code{1'b0}, \code{1'b1} & \\
+  \code{"1010"} & \code{4'b1010} & \\
+  \code{x"A5"} & \code{8'hA5} & \\
+  \code{16\#FF\#} & \code{255} or \code{8'hFF} & \\
+  \code{(others => '0')} & \code{'0} & Not \code{1'b0}. \\
+  \code{(others => '1')} & \code{'1} & \\
+  aggregate \code{(a => 1, b => 2)} & \code{'\{a:1, b:2\}} & Note the apostrophe. \\
+  \code{\&} (concatenation) & \code{\{ , \}} & \code{\&} is bitwise AND in \SV{}. \\
+  --- & \code{\{N\{x\}\}} & Replication. No \VHDL{} form. \\
+  \code{unsigned(v)}, \code{std\_logic\_vector(u)} & --- & No conversion needed. \\
+  \code{to\_integer(u)} & implicit, or \code{int'(u)} & \\
+  \code{to\_unsigned(i,N)} & implicit truncation & \\
+  \code{to\_signed(i,N)} & \code{\$signed(...)} & \\
+  \code{resize(v,N)} & implicit, or \code{N'(v)} & Silent. This is the danger. \\
+  \code{integer(r)} on a real & implicit, rounds & \\
+  --- & \code{\$cast(d,s)} & Checked conversion at run time. \\
+  --- & \code{\{>>\{x\}\}} & Bit-stream cast. \\
+  \midrule
+
+  \multicolumn{3}{@{}l}{\textit{Statements}}\\
+  \midrule
+  \code{y <= expr;} (concurrent) & \code{assign y = expr;} & \\
+  \code{y <= a when c else b;} & \code{assign y = c ? a : b;} & \\
+  \code{with s select y <= ...} & \code{always\_comb} + \code{case} & No concurrent form. \\
+  \code{process (a, b)} & \code{always @(a, b)} & \\
+  \code{process (all)} & \code{always\_comb} & Also runs at time zero. \\
+  \code{process (clk)} + \code{rising\_edge} & \code{always\_ff @(posedge clk)} & \\
+  \code{process (clk, rst\_n)} & \code{always\_ff @(posedge clk or negedge rst\_n)} & Asynchronous reset. \\
+  signal \code{<=} in a process & non-blocking \code{<=} & Use in \code{always\_ff}. \\
+  variable \code{:=} in a process & blocking \code{=} & Use in \code{always\_comb}. \\
+  --- & \code{initial} & Process with no sensitivity list. \\
+  --- & \code{final} & No \VHDL{} equivalent. \\
+  \code{if / elsif / else / end if} & \code{if / else if / else} & \code{begin}/\code{end} required for blocks. \\
+  \code{case} + \code{when others} & \code{case} + \code{default} & \SV{} does not require completeness. \\
+  \code{case?} (2008) & \code{casez} & Never \code{casex}. \\
+  --- & \code{unique}, \code{unique0}, \code{priority} & Full/parallel case, plus a run-time check. \\
+  \code{for i in r loop} & \code{for (int i=..)} / \code{foreach} & \\
+  \code{while}, \code{loop} & \code{while}, \code{forever}, \code{repeat}, \code{do..while} & \\
+  \code{next}, \code{exit} & \code{continue}, \code{break} & \\
+  \code{null} & \code{;} & \\
+  \code{wait for 10 ns} & \code{\#10ns} & \\
+  \code{wait until c = '1'} & \code{wait (c)} & Different: no edge required. \\
+  \code{wait on a, b} & \code{@(a or b)} & \\
+  \code{after}, \code{transport} & \code{\#} & No inertial/transport distinction. \\
+  \midrule
+
+  \multicolumn{3}{@{}l}{\textit{Structure}}\\
+  \midrule
+  \code{for ... generate} & \code{for (genvar i=..) begin : g\_x} & Name every block. \\
+  \code{if ... generate} & \code{if (..) begin : g\_x} & \\
+  \code{case ... generate} (2008) & \code{case (..) ... endcase} & \\
+  \code{block} & named \code{begin}/\code{end} or generate block & \\
+  \code{component} + \code{port map} & direct instantiation & No component declaration. \\
+  \code{entity work.f(rtl)} & \code{f u\_f (...)} & No architecture selection. \\
+  \code{=> open} & \code{.p()} & Leave nothing implicit. \\
+  --- & \code{.name}, \code{.*} & Implicit connection. Use \code{.*} sparingly. \\
+  --- & \code{bind} & Attach checkers from outside. No \VHDL{} form. \\
+  \midrule
+
+  \multicolumn{3}{@{}l}{\textit{Subprograms and reporting}}\\
+  \midrule
+  \code{function} & \code{function automatic} & Always write \code{automatic}. \\
+  \code{procedure} & \code{task automatic} & Or \code{function void}. \\
+  \code{signal} parameter & \code{ref} & \\
+  \code{impure} & (default) & No purity control in \SV{}. \\
+  overloading, operator overloading & --- & No equivalent. \\
+  \code{assert ... report ... severity error} & \code{assert (c) else \$error(..)} & Fires when false in both. \\
+  \code{note}, \code{warning}, \code{error}, \code{failure} & \code{\$info}, \code{\$warning}, \code{\$error}, \code{\$fatal} & \\
+  \code{report x \& integer'image(i)} & \code{\$display("x \%0d", i)} & \\
+  \code{std.textio} & \code{\$fopen}, \code{\$fscanf}, \code{\$fdisplay} & No \code{line} object. \\
+  --- & \code{\$readmemh}, \code{\$readmemb} & Memory initialisation. \\
+\end{longtable}
+
+% ===========================================================================
+\section{Checklist}
+\label{sec:rosetta2:checklist}
+% ===========================================================================
+
+Operational takeaways for the behavioural half. When you see the left, write
+the right, and never do the things marked ``never''. The static half is at the
+end of \cref{ch:rosetta} and is not repeated here, with one exception: keep
+running \tool{Verilator} with \code{-Wall} over every file and treating
+\code{WIDTHTRUNC}, \code{WIDTHEXPAND} and \code{PINMISSING} as errors, because
+none of what follows protects you from a width.
+
+\begin{itemize}
+  \item \textbf{Every module repeats its timescale} as
+        \kw{timeunit}/\kw{timeprecision}, because
+        \chTwoTick{timescale} is inherited across files in command-line order
+        and nothing warns you when it is wrong.
+  \item \textbf{Processes:} \code{process (all)} becomes \code{always\_comb};
+        \code{process (clk)} with \code{rising\_edge} becomes
+        \code{always\_ff @(posedge clk)}. Use blocking \code{=} in
+        \code{always\_comb} and non-blocking \code{<=} in \code{always\_ff},
+        never the other way round, never both in one block.
+  \item \textbf{One writer per variable.} \code{always\_comb} and
+        \code{always\_ff} enforce this; plain \code{always} and \code{initial}
+        do not, and module-level variables are shared by every process.
+  \item \textbf{\code{case}:} always write a \code{default} in combinational
+        logic, because \SV{} does not require completeness and the missing
+        branch is a latch. Prefer \code{unique case} to get a run-time check
+        as well. Never write \code{casex}.
+  \item \textbf{Name every generate block} with a \code{g\_} prefix, or the
+        tool numbers them and your hierarchical paths change when you edit the
+        file.
+  \item \textbf{Instantiate with full named association} in \RTL{}. There is no
+        component declaration to keep in step, but there is also no width
+        check: \code{.*} belongs in testbench wrappers only.
+  \item \textbf{\code{wait until c = '1'} is \emph{not} \code{wait (c)}.}
+        \VHDL{} waits for an event that makes the condition true; \SV{} returns
+        at once if it already holds. Where you meant the \VHDL{} behaviour,
+        write \code{@(posedge c)}.
+  \item \textbf{Assertions:} \code{assert ... report ... severity} becomes
+        \code{assert (c) else \$error(...)}, so the message moves into the
+        \code{else}. Both fire when the condition is false.
+  \item \textbf{Every function and task is \kw{automatic}.} A static
+        subprogram breaks recursion and races when two processes call it.
+  \item \textbf{Put types, constants and functions in a package}, macros in an
+        \file{.svh} header, and nothing at all in \code{\$unit}.
+  \item \textbf{Reach for \code{\$clog2}, \code{\$countones}, \code{\$onehot},
+        \code{\$isunknown} and \code{\$bits}} where \VHDL{} made you write a
+        function. Do not expect \code{'range}, \code{'reverse\_range},
+        \code{'delayed} or \code{'value}: they have no equivalent.
+  \item \textbf{Delays belong in testbenches only}, written with explicit units
+        (\code{\#10ns}), and everything else is driven from a clock edge.
+\end{itemize}
+
+Together with \cref{ch:rosetta}, this chapter is enough to read and write
+\SV{} \RTL{}: every construct above has a \VHDL{} original you already know.
+What comes next has no original. \cref{ch:beyond} takes the design-side
+constructs \SV{} has and \VHDL{} does not, starting with interfaces, packed
+structures and parameterised types, and \refverificationbook takes the
+verification-side ones, from classes and constrained randomisation to the
+assertion sublanguage. Those two chapters are what makes the move worth
+making.

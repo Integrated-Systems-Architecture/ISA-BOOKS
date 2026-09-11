@@ -1,0 +1,57 @@
+% ---------------------------------------------------------------------------
+% appendix-quickref.tex
+% ---------------------------------------------------------------------------
+\chapter{One-Page Quick Reference}
+\label{app:quickref}
+
+\chapabstract{Everything in this booklet, compressed onto one page to
+keep next to the keyboard.}
+
+\begin{longtable}{@{}p{0.40\textwidth}p{0.55\textwidth}@{}}
+\toprule
+\textbf{Command} & \textbf{Purpose}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Command} & \textbf{Purpose}\\
+\midrule
+\endhead
+\code{git init} & Create a new repository here\\
+\code{git clone <url>} & Copy a remote repository, with history\\
+\code{git status} & What changed, what is staged\\
+\code{git diff} / \code{--staged} & Line-by-line unstaged / staged changes\\
+\code{git add <file>} / \code{.} & Stage a file / everything\\
+\code{git commit -m "..."} & Record a snapshot of the staged changes\\
+\code{git commit --amend} & Rewrite the last commit\\
+\code{git log --oneline --graph --all} & Compact history with branches\\
+\code{git show <commit>} & Full diff of one commit\\
+\code{git blame <file>} & Who last changed each line\\
+\code{git branch} & List local branches\\
+\code{git switch -c <name>} & Create and check out a branch\\
+\code{git switch <name>} & Check out an existing branch\\
+\code{git merge <branch>} & Merge a branch into the current one\\
+\code{git restore <file>} & Discard unstaged changes to a file\\
+\code{git restore --staged <file>} & Unstage a file, keep the edits\\
+\code{git reset --soft HEAD\textasciitilde 1} & Undo last commit, keep changes staged\\
+\code{git reset --hard HEAD\textasciitilde 1} & Undo last commit, discard changes\\
+\code{git revert <commit>} & Add a commit that undoes another (safe, shared history)\\
+\code{git stash} / \code{stash pop} & Set aside / restore unfinished work\\
+\code{git remote -v} & List remotes\\
+\code{git push -u origin <branch>} & Push and set the default upstream\\
+\code{git pull} / \code{pull --rebase} & Fetch and merge / replay onto new history\\
+\code{git fetch} & Download commits without touching the working dir\\
+\bottomrule
+\end{longtable}
+
+\section*{The five traps to remember}
+
+\begin{enumerate}
+  \item Editing a file does not stage it, and staging does not commit
+        it -- three separate steps.
+  \item \code{git add .} stages everything, junk included; keep a
+        \file{.gitignore} from the first commit.
+  \item \code{reset --hard} discards work with no confirmation; use
+        \code{revert} on anything already pushed.
+  \item Never force-push a branch someone else is also working on.
+  \item One pull request, one concern.
+\end{enumerate}

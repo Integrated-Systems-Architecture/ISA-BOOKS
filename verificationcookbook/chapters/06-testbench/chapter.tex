@@ -1,0 +1,2704 @@
+\chapter{Basic Testbenches}
+\label{ch:tb}
+
+\chapabstract{You can already write a \VHDL{} testbench, and after
+\cref{ch:toolkit} you know the \SV{} constructs a verification engineer uses.
+This chapter puts the two together, one layer at a time: first a literal
+translation, then the race conditions that translation hides, then
+self-checking, then file-based vectors, and finally a layered testbench with a
+transaction, a generator, a driver, a monitor, a scoreboard and a coverage
+collector. At the end you will be able to write a complete class-based
+testbench without importing a single line of UVM, and you will understand
+exactly which problem UVM was invented to solve.}
+
+Verification is where \SV{} stops being \VHDL{} with different punctuation.
+The design half of the language, covered in \refdesignbook, is a
+translation exercise. The
+verification half is not, because \VHDL{} has no equivalent of most of it:
+classes, mailboxes, dynamic threads, constrained randomisation and functional
+coverage do not map onto anything you have written before.
+
+\cref{ch:toolkit} taught those constructs one at a time. This chapter is the
+other half of the job, and the division of labour between the two is worth
+stating once, because it governs everything that follows. \cref{ch:toolkit}
+owns the construct: what a mailbox is, what \code{fork ... join\_none} does,
+what a covergroup declares. This chapter owns the \emph{use}: why the monitor
+puts a transaction into a mailbox rather than calling the scoreboard, why the
+driver runs two forked threads that do not know about each other, and why the
+covergroup that measures your stimulus tells you nothing about the design. If
+a piece of syntax here is unfamiliar, look it up there; if a piece of
+structure here seems arbitrary, the answer is in this chapter.
+
+Every testbench, in every language, does the same five things, and the whole
+of this chapter is about \emph{organising} those five things better. So we
+start by naming them.
+
+% ===========================================================================
+\section{The Five Parts of a Testbench}
+\label{sec:tb:five}
+% ===========================================================================
+
+\index{testbench!structure}A testbench, whether it is fifty lines of \VHDL{}
+or fifty thousand lines of \SV{}, consists of exactly five parts:
+
+\begin{enumerate}
+\item \textbf{The device under test.} One instance of the thing you are
+  verifying, plus whatever wires it needs.
+\item \textbf{Clock and reset generation.} Free-running, independent of
+  everything else, and usually the first thing you write.
+\item \textbf{Stimulus.} Something that puts values on the inputs, in a legal
+  order, at legal times.
+\item \textbf{Checking.} Something that decides whether the outputs are
+  right.
+\item \textbf{End of test.} Something that decides when to stop, and reports
+  the verdict.
+\end{enumerate}
+
+\cref{fig:tb:five} draws them. Nothing in the rest of this chapter adds a sixth
+box. The layered testbench of \cref{sec:tb:layered} looks far more complicated
+than a \VHDL{} testbench, and it is, but every one of its classes belongs to
+box 3 or box 4. The complexity buys separation, reuse and the ability to run
+ten thousand random transactions instead of the twelve you thought of by hand.
+It does not buy new functionality.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\sffamily\scriptsize,
+      bx/.style={draw=codeframe,fill=codebg,line width=0.8pt,
+                 rounded corners=2pt,minimum width=26mm,minimum height=10mm,
+                 align=center,inner sep=3pt},
+      dut/.style={bx,fill=svbg,draw=accentalt,line width=1pt,
+                  minimum width=26mm,minimum height=16mm},
+      ar/.style={-{Stealth[length=2mm]},line width=0.8pt,draw=codekey},
+      arg/.style={-{Stealth[length=2mm]},line width=0.8pt,draw=accent,
+                  dashed},
+      lb/.style={font=\sffamily\tiny\itshape,text=codenumber}
+    ]
+    \node[bx]  (clk)  at (-4.6, 1.9) {2. clock and reset\\generation};
+    \node[bx]  (stim) at (-4.6,-0.3) {3. stimulus};
+    \node[dut] (dut)  at ( 0.0, 0.8) {1. DUT};
+    \node[bx]  (chk)  at ( 4.6, 0.8) {4. checking};
+    \node[bx]  (fin)  at ( 0.0,-2.3) {5. end of test\\and verdict};
+
+    \draw[ar] (clk.east) -- ++(0.9,0) |- (dut.west);
+    \draw[ar] (stim.east) -- ++(0.9,0) |- ([yshift=-4mm]dut.west);
+    \draw[ar] (dut.east) -- (chk.west);
+    \draw[arg] (stim.north east) .. controls (0,2.9) .. (chk.north);
+    \node[lb,anchor=south] at (0.2,2.9) {expected values};
+    \draw[ar] (chk.south) |- (fin.east);
+    \draw[ar] (clk.south) -- (stim.north);
+  \end{tikzpicture}
+  \caption{The five parts of any testbench. Every construct in this chapter
+    belongs to part 3 or part 4.}
+  \label{fig:tb:five}
+\end{figure}
+
+Keep \cref{fig:tb:five} in mind. When a class-based testbench stops making
+sense, the fastest way back is to ask which of the five boxes the class you
+are staring at belongs to.
+
+\begin{ruleofthumb}
+If you cannot say which of the five parts a piece of testbench code belongs
+to, it is in the wrong file.
+\end{ruleofthumb}
+
+% ===========================================================================
+\section{The Literal Translation}
+\label{sec:tb:literal}
+% ===========================================================================
+
+Start with something small enough to hold in your head:
+\cref{lst:tb:accusv} is an eight-bit synchronous accumulator with an
+active-low asynchronous reset and an enable. The \VHDL{} version is the
+architecture you would write without thinking about it, and it is not
+reproduced here.
+
+\begin{svcode}[caption={An eight-bit accumulator, the DUT for this section},label={lst:tb:accusv}]
+`timescale 1ns/1ps
+
+module accu (
+  input  logic       clk,
+  input  logic       rst_n,
+  input  logic       en,
+  input  logic [7:0] d,
+  output logic [7:0] q
+);
+
+  logic [7:0] acc;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)   acc <= '0;
+    else if (en)  acc <= acc + d;
+  end
+
+  assign q = acc;
+
+endmodule : accu
+\end{svcode}
+
+Now the testbench. \cref{lst:tb:tbvhdl} is a perfectly ordinary \VHDL{}
+testbench for the \VHDL{} accumulator: reset, four accumulate cycles with the
+values 10, 20, 30 and 40, then one check that the result is 100.
+
+\begin{vhdlcode}[caption={A conventional \VHDL{} testbench},label={lst:tb:tbvhdl}]
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity tb_accu is
+end entity tb_accu;
+
+architecture behavioral of tb_accu is
+
+  constant TCLK : time := 10 ns;
+
+  signal clk   : std_logic := '0';
+  signal rst_n : std_logic := '0';
+  signal en    : std_logic := '0';
+  signal d     : unsigned(7 downto 0) := (others => '0');
+  signal q     : unsigned(7 downto 0);
+  signal done  : boolean := false;
+
+begin
+
+  dut : entity work.accu
+    port map (clk => clk, rst_n => rst_n, en => en,
+              d => d, q => q);
+
+  clk <= not clk after TCLK / 2 when not done else '0';
+
+  stim : process is
+  begin
+    rst_n <= '0';
+    wait for 3 * TCLK;
+    wait until rising_edge(clk);
+    rst_n <= '1';
+
+    for i in 1 to 4 loop
+      wait until rising_edge(clk);
+      wait for 1 ns;
+      en <= '1';
+      d  <= to_unsigned(i * 10, 8);
+    end loop;
+
+    wait until rising_edge(clk);
+    wait for 1 ns;
+    en <= '0';
+
+    wait until rising_edge(clk);
+    wait for 1 ns;
+    assert q = to_unsigned(100, 8)
+      report "accumulator wrong: expected 100, got "
+             & integer'image(to_integer(q))
+      severity error;
+
+    report "test finished" severity note;
+    done <= true;
+    wait;
+  end process stim;
+
+end architecture behavioral;
+\end{vhdlcode}
+
+\cref{lst:tb:tbsv} is the line-by-line \SV{} translation. Read it against the
+\VHDL{} before reading the commentary.
+
+\begin{svcode}[caption={The same testbench translated literally into \SV{}},label={lst:tb:tbsv}]
+`timescale 1ns/1ps
+
+module tb_accu;
+
+  localparam time TCLK = 10ns;
+
+  logic       clk   = 1'b0;
+  logic       rst_n = 1'b0;
+  logic       en    = 1'b0;
+  logic [7:0] d     = '0;
+  logic [7:0] q;
+
+  accu dut (.clk(clk), .rst_n(rst_n), .en(en),
+            .d(d), .q(q));
+
+  always #(TCLK/2) clk = ~clk;
+
+  initial begin
+    rst_n = 1'b0;
+    #(3*TCLK);
+    @(posedge clk);
+    rst_n = 1'b1;
+
+    for (int i = 1; i <= 4; i++) begin
+      @(posedge clk);
+      #1ns;
+      en = 1'b1;
+      d  = 8'(i * 10);
+    end
+
+    @(posedge clk);
+    #1ns;
+    en = 1'b0;
+
+    @(posedge clk);
+    #1ns;
+    assert (q == 8'd100)
+      else $error("accumulator wrong: expected 100, got %0d", q);
+
+    $display("[%0t] test finished", $time);
+    $finish;
+  end
+
+endmodule : tb_accu
+\end{svcode}
+
+Six things changed. Each of them deserves a paragraph.
+
+\subsection{The timescale}
+
+\index{timescale}\index{timeunit}\refdesignbook explains
+\code{`timescale}, the scoped \code{timeunit}~/ \code{timeprecision}
+alternative, and the rule by which a file with no directive silently inherits
+whichever one the compiler read last. Read that gotcha again before you write a
+testbench, because a testbench is where it does its damage: the clock generator
+is the one piece of code whose behaviour depends entirely on what \code{\#10}
+means, and a half-period that has quietly become picoseconds looks exactly like
+a simulation that hangs. The second failure mode is precision. With
+\code{1ns/1ns} the delay \code{\#0.5} is rounded to \code{\#1} without a
+warning in most tools, so a \SI{100}{\mega\hertz} clock silently becomes
+\SI{50}{\mega\hertz} and every timing number in your report is wrong by a
+factor of two.
+
+\begin{ruleofthumb}
+\code{`timescale 1ns/1ps} at the top of every file. Deviate only when you are
+modelling something sub-picosecond, which in digital verification you are not.
+\end{ruleofthumb}
+
+\subsection{\texttt{initial} versus a process with a final \texttt{wait}}
+
+\index{initial block}An \code{initial} block is a \VHDL{} process with no
+sensitivity list that ends in \code{wait;} (\refdesignbook). The difference
+that matters to a testbench writer is the default. A \VHDL{} process loops back
+to the top unless you stop it, so the one-shot stimulus idiom needs an explicit
+final \code{wait}; an \code{initial} block runs once and its thread terminates,
+so the \emph{forever} case is the one you must ask for, with \code{always} or
+with \code{forever} inside an \code{initial}.
+
+\begin{rosetta}
+\begin{rleft}
+stim : process is
+begin
+  -- do something once
+  a <= '1';
+  wait for 10 ns;
+  a <= '0';
+  wait;              -- never resumes
+end process stim;
+
+tick : process is
+begin
+  -- runs forever
+  clk <= not clk;
+  wait for 5 ns;
+end process tick;
+\end{rleft}
+\begin{rright}
+initial begin
+  // do something once
+  a = 1'b1;
+  #10ns;
+  a = 1'b0;
+end                  // thread ends here
+
+always begin
+  // runs forever
+  clk = ~clk;
+  #5ns;
+end
+\end{rright}
+\end{rosetta}
+
+Several \code{initial} blocks in the same module all start at time zero and run
+concurrently, exactly like several \VHDL{} processes. The order in which they
+start is not defined, which is the first hint of the trouble in
+\cref{sec:tb:races}.
+
+\subsection{Clock generation}
+
+The \VHDL{} idiom \code{clk <= not clk after 5 ns;} is a concurrent signal
+assignment: it re-executes every time \code{clk} changes, so it oscillates on
+its own. The \SV{} idiom is procedural.
+
+\begin{rosetta}
+\begin{rleft}
+-- concurrent assignment
+clk <= not clk after TCLK/2;
+
+-- or, in a process
+process is
+begin
+  clk <= '0';
+  wait for TCLK/2;
+  clk <= '1';
+  wait for TCLK/2;
+end process;
+\end{rleft}
+\begin{rright}
+// procedural, one statement
+always #(TCLK/2) clk = ~clk;
+
+// or, spelled out
+always begin
+  clk = 1'b0;
+  #(TCLK/2);
+  clk = 1'b1;
+  #(TCLK/2);
+end
+\end{rright}
+\end{rosetta}
+
+Two details. First, \code{clk} must have an initial value: \code{~1'bx} is
+\code{1'bx}, so an uninitialised clock stays \code{x} forever and nothing ever
+happens. The same trap exists in \VHDL{}, where \code{not 'U'} is \code{'U'},
+which is why you already write \code{signal clk : std\_logic := '0';}. Do the
+same in \SV{}: \code{logic clk = 1'b0;}. A variable initialiser in a module is
+executed once at time zero, before any \code{initial} block.
+
+Second, use a blocking assignment for the clock. This is one of the very few
+places where \code{=} is correct in a testbench, and the reason is explained in
+\cref{sec:tb:races}: the clock must change in the Active region so that
+everything sensitive to the edge sees a clean, single event.
+
+\begin{gotcha}{\texttt{always \#5 clk <= \textasciitilde clk;} is wrong}
+With a non-blocking assignment the clock edge happens in the NBA region, the
+same region where the design's flip-flops update, and every sampling guarantee
+you thought you had is gone. Some tools warn, some do not. Use
+\code{clk = \textasciitilde clk}, always.
+\end{gotcha}
+
+\subsection{Reset sequencing}
+
+There is nothing new here except syntax, but note the shape of the idiom in
+\cref{lst:tb:tbsv}: hold reset asserted for a few clock periods, then release
+it \emph{synchronously}, on a clock edge, so that the release has a defined
+relationship to the first active edge the design sees. An asynchronous release
+at an arbitrary time simulates fine, but every run then starts with a slightly
+different alignment, and in a gate-level simulation with real timing checks the
+recovery/removal check on the reset pin will fire.
+
+\begin{tipbox}{A reset task, not a reset paragraph}
+Put the reset sequence in a task from the first day, even in a flat testbench:
+\code{task automatic apply\_reset(int unsigned cycles = 5);} that drives
+\code{rst\_n} low, waits \code{cycles} clock edges and releases it
+non-blockingly on an edge. When the testbench grows into the layered form of
+\cref{sec:tb:layered}, that task becomes \code{cordic\_drv::reset()} unchanged.
+Note the default argument value, which \VHDL{} also has, and which is the
+cheapest way to keep a task configurable without a second overload.
+\end{tipbox}
+
+\subsection{Ending the simulation}
+
+\index{\$finish}A \VHDL{} testbench normally ends by \emph{starvation}: every
+process has suspended on a \code{wait} that will never resume, no signal has a
+pending transaction, so the simulator has no next event and stops. That is why
+\cref{lst:tb:tbvhdl} has the \code{done} signal: without it the clock generator
+would keep scheduling events forever.
+
+\SV{} does not rely on starvation. \code{\$finish} stops the simulator
+immediately and returns control to the shell; \code{\$stop} suspends it and
+drops you into the interactive prompt, which is what you want under a debugger
+and never what you want in a regression.
+
+\begin{rosetta}
+\begin{rleft}
+-- end by starvation:
+-- stop the clock, then
+-- suspend forever
+done <= true;
+wait;
+
+-- there is no
+-- "stop the simulator now"
+-- statement in VHDL-2008
+\end{rleft}
+\begin{rright}
+// end explicitly
+$finish;      // exit simulator
+$stop;        // break to prompt
+
+// $finish takes a verbosity
+// code: 0, 1 (default) or 2
+$finish(2);
+\end{rright}
+\end{rosetta}
+
+\begin{gotcha}{\texttt{\$finish} kills everything, immediately}
+\code{\$finish} is not \code{return}: it terminates the whole simulation where
+it executes. A monitor halfway through reconstructing a transaction is
+discarded, an unflushed scoreboard queue is never checked, and an open file may
+lose its last lines. Never call \code{\$finish} from inside a checking thread.
+Call it from one place, after an explicit drain, and put anything that must
+happen at the very end in a \code{final} block, which is the one thing
+\code{\$finish} does run.
+\end{gotcha}
+
+\subsection{Printing and asserting}
+
+\index{\$display}\refdesignbook gives the full mapping from \VHDL{}'s
+\code{report ... severity} to \code{\$display}, \code{\$info},
+\code{\$warning}, \code{\$error} and \code{\$fatal}, and the C-style format
+specifiers that go with them. Two consequences of that mapping shape every
+testbench in this chapter.
+
+The first is that \SV{} splits printing from counting. \code{\$display} only
+prints; the severity tasks print \emph{and} increment the simulator's error
+counters, which is what a batch regression reads to decide pass or fail. A
+mismatch reported with \code{\$display} is invisible to the regression script.
+Report failures with \code{\$error} or \code{\$fatal}, always, and reserve
+\code{\$display} for progress and configuration.
+
+The second is \code{\$sformatf}, which formats into a \code{string} instead of
+printing. Every \code{convert2string()} method in this chapter is one call to
+it, and that is what lets a transaction describe itself in a failure message
+written by someone else.
+
+\begin{notebox}{The shape of an immediate assertion}
+An immediate assertion has the shape of an \code{if}: the statement after the
+condition is the \emph{pass} action, the one after \code{else} is the
+\emph{fail} action, and both are optional. Writing a pass action is almost
+always a mistake, because it executes on every successful check and floods the
+log. Always give a label and a message naming the values involved:
+\code{a\_result\_ok : assert (q == 8'd100) else \$error("got \%0d", q);}. The
+label appears in the failure message, in the coverage database, and, for
+concurrent assertions, in the command that switches the assertion off.
+\end{notebox}
+
+At this point you have a working \SV{} testbench that does the same job as the
+\VHDL{} one. It is also, as it stands, quietly broken.
+
+% ===========================================================================
+\section{Why That Testbench Is Dangerous}
+\label{sec:tb:races}
+% ===========================================================================
+
+\index{race condition}Look again at the stimulus loop in
+\cref{lst:tb:tbsv}. It waits for a clock edge, waits \SI{1}{\nano\second}, then
+drives. The \SI{1}{\nano\second} is there because you have written it in every
+\VHDL{} testbench you have ever produced. Remove it and see what happens.
+
+\begin{svcode}[caption={A racy stimulus loop. Do not write this},label={lst:tb:racy}]
+initial begin
+  rst_n = 1'b1;
+  for (int i = 1; i <= 4; i++) begin
+    @(posedge clk);
+    en = 1'b1;          // blocking, on the edge
+    d  = 8'(i * 10);    // blocking, on the edge
+  end
+end
+\end{svcode}
+
+Two processes are now sensitive to the same event. The DUT's
+\code{always\_ff @(posedge clk)} wants to read \code{en} and \code{d}; the
+testbench's \code{initial} block wants to write them. Both are triggered by the
+same edge, and both run in the \textbf{Active} region of the same time slot.
+
+\refdesignbook explained what the \LRM{} says about that: processes
+scheduled in the Active region execute in an order that is explicitly left
+undefined. There is no rule. The simulator may run the testbench first, in
+which case the DUT sees the \emph{new} value of \code{en} and accumulates on
+this very edge; or it may run the DUT first, in which case the DUT sees the
+\emph{old} value and accumulates one cycle later. Both are conforming
+implementations.
+
+The observable result is a testbench that produces 100 on one simulator and 60
+on another, or 100 today and 60 after an unrelated module changes the compile
+order and with it the tool's internal process ordering. There is no warning. In
+\VHDL{} this class of bug does not exist, because the language separates the
+update phase from the evaluate phase and a signal assignment made during
+evaluation is never visible until the next delta cycle. \VHDL{} bought
+determinism with the signal/variable distinction; Verilog did not.
+
+\subsection{Remedy (a): drive on the other edge}
+
+The first fix is the one your \VHDL{} instincts reach for: move the driving
+away from the edge the design samples.
+
+\begin{svcode}
+initial begin
+  for (int i = 1; i <= 4; i++) begin
+    @(negedge clk);       // half a period away from the DUT
+    en = 1'b1;
+    d  = 8'(i * 10);
+  end
+end
+\end{svcode}
+
+This works. It is deterministic, it is simple, and for a small testbench with
+one clock it is defensible. It has two defects.
+
+The first is that it does not model reality. No real device drives a
+synchronous bus on the falling edge. Run this testbench against a gate-level
+netlist with back-annotated timing and the stimulus arrives half a period
+early, so every setup check passes trivially and the simulation tells you
+nothing about whether the interface closes timing. Add a second clock domain,
+or a negative-edge-triggered sub-block, and the convention breaks silently.
+
+The second is that it is a convention, not a declaration. It lives in your
+head. A colleague adding a new stimulus block six months later has no way of
+knowing the rule except by reading every existing block and inferring it.
+
+\subsection{Remedy (b): drive with non-blocking assignments}
+
+The second fix uses the scheduler rather than the waveform.
+
+\begin{svcode}
+initial begin
+  for (int i = 1; i <= 4; i++) begin
+    @(posedge clk);
+    en <= 1'b1;           // non-blocking
+    d  <= 8'(i * 10);
+  end
+end
+\end{svcode}
+
+Now the assignment is queued in the Active region and applied in the
+\textbf{NBA} region. The DUT's \code{always\_ff}, whichever order it runs in,
+evaluates the right-hand side of its own non-blocking assignments in Active,
+where \code{en} and \code{d} still hold their old values. The design therefore
+always sees the old value, on every simulator, deterministically.
+
+This is a genuine fix and it costs nothing. It is the same reason \RTL{} code
+uses \code{<=} inside \code{always\_ff}: non-blocking assignment makes the
+order in which parallel processes execute irrelevant. Use it everywhere in a
+testbench that drives \DUT{} inputs from a clocked context.
+
+\begin{gotcha}{You cannot read back what you just non-blocking-assigned}
+\begin{svcode}
+en <= 1'b1;
+$display("en is %b", en);   // prints the OLD value
+\end{svcode}
+The assignment has been \emph{queued}, not performed: \code{\$display} runs in
+Active, the update happens later in NBA. You already have this reflex for
+\VHDL{} signals, but the trap is sharper here, because the same variable could
+equally well have been assigned with \code{=}, in which case the print shows
+the new value. Use \code{\$strobe}, which prints in the Postponed region after
+everything has settled, or read the value after the next clock edge.
+\end{gotcha}
+
+\begin{gotcha}{Mixing \texttt{=} and \texttt{<=} on the same testbench signal}
+A signal driven with \code{=} in one block and \code{<=} in another is a race
+even if neither block is clocked: the blocking write lands in Active, the
+non-blocking write lands in NBA of the same time slot, and NBA always wins
+regardless of source order. The symptom is a signal that ignores the blocking
+assignment entirely and takes the non-blocking value, even when the blocking
+line is the later of the two in the source and ran last. Pick one operator per signal:
+clock with \code{=}, everything reaching the \DUT{} with \code{<=} or a
+clocking block, local bookkeeping with \code{=}.
+\end{gotcha}
+
+\subsection{Remedy (c): a clocking block}
+
+Non-blocking assignment removes the race but still leaves timing to
+convention: the stimulus changes exactly at the edge, which is a zero
+propagation delay that no hardware has. A \emph{clocking block} declares the
+timing instead, and it is the right answer.
+\index{clocking block}
+
+\refdesignbook introduced the syntax. Here is the real one, from
+\file{cordic\_if.sv}, retyped:
+
+\begin{svcode}[caption={The clocking blocks from \file{cordic\_if.sv}},label={lst:tb:cb}]
+interface cordic_if (input logic clk);
+
+  import cordic_pkg::*;
+
+  logic   rst_n, req_valid, req_ready, rsp_valid, rsp_ready;
+  data_t  req_x, req_y, rsp_x, rsp_y;
+  angle_t req_theta;
+
+  clocking drv_cb @(posedge clk);
+    default input #1step output #1ns;
+    output req_valid, req_x, req_y, req_theta;
+    output rsp_ready;
+    input  req_ready, rsp_valid, rsp_x, rsp_y;
+  endclocking
+
+  clocking mon_cb @(posedge clk);
+    default input #1step;
+    input req_valid, req_ready, req_x, req_y, req_theta;
+    input rsp_valid, rsp_ready, rsp_x, rsp_y;
+  endclocking
+
+  modport drv (clocking drv_cb, output rst_n, input clk);
+  modport mon (clocking mon_cb, input rst_n, input clk);
+
+endinterface : cordic_if
+\end{svcode}
+
+Take the crucial line apart word by word:
+
+\begin{svcode}
+default input #1step output #1ns;
+\end{svcode}
+
+\textbf{\code{\#1step}} is a unit of time equal to the smallest precision in
+the whole simulation, and it exists for exactly one purpose. A sample taken
+\code{\#1step} before the clock edge is a sample taken in the
+\textbf{Preponed} region, before any process in that time slot has executed.
+It is therefore the value the signal had \emph{immediately before} the edge:
+the value a real flip-flop would capture. No design process can have changed
+it yet, so there is no race, by construction and not by convention.
+
+\textbf{\code{output \#1ns}} means that an assignment to a clocking-block
+output does not take effect at the edge. It is scheduled \SI{1}{\nano\second}
+later, in the middle of the cycle, which is what a real driver with a
+propagation delay does. This removes the second half of the problem: the
+stimulus no longer changes at the instant a flip-flop is sampling.
+
+\cref{fig:tb:skew} shows the resulting timing.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\sffamily\scriptsize,
+      wv/.style={line width=1pt,draw=codekey},
+      wd/.style={line width=1pt,draw=accentalt},
+      ed/.style={draw=codenumber,dashed,line width=0.6pt},
+      an/.style={font=\sffamily\tiny,align=center},
+      ar/.style={-{Stealth[length=1.6mm]},line width=0.7pt}
+    ]
+    % --- clock -------------------------------------------------------------
+    \draw[wv] (0,2.6) -- (1,2.6) -- (1,3.2) -- (3,3.2) -- (3,2.6)
+              -- (5,2.6) -- (5,3.2) -- (7,3.2) -- (7,2.6) -- (8,2.6);
+    \node[anchor=east,font=\sffamily\scriptsize] at (-0.15,2.9) {\texttt{clk}};
+
+    % --- DUT output changes exactly at the edge ---------------------------
+    \draw[wv] (0,1.3) -- (1,1.3) -- (1,1.9) -- (5,1.9) -- (5,1.3) -- (8,1.3);
+    \node[anchor=east,font=\sffamily\scriptsize] at (-0.15,1.6)
+         {\texttt{req\_ready}};
+    \node[an,text=codenumber,anchor=north] at (2.9,1.15)
+         {driven by the DUT\\at the edge};
+
+    % --- driver output, 1 ns after the edge -------------------------------
+    \draw[wd] (0,0.0) -- (1.6,0.0) -- (1.6,0.6) -- (5.6,0.6)
+              -- (5.6,0.0) -- (8,0.0);
+    \node[anchor=east,font=\sffamily\scriptsize] at (-0.15,0.3)
+         {\texttt{req\_valid}};
+
+    % --- edges -------------------------------------------------------------
+    \draw[ed] (1,-0.7) -- (1,3.4);
+    \draw[ed] (5,-0.7) -- (5,3.4);
+
+    % --- annotations -------------------------------------------------------
+    \draw[ar,draw=accent] (0.35,3.9) -- (0.95,3.35);
+    \node[an,text=accent,anchor=south east] at (0.7,3.9)
+         {\texttt{input \#1step}\\sampled here\\(Preponed)};
+
+    \draw[ar,draw=accentalt] (2.5,-0.55) -- (1.65,-0.05);
+    \node[an,text=accentalt,anchor=west] at (2.55,-0.5)
+         {\texttt{output \#1ns} -- driven \SI{1}{\nano\second} after the edge};
+
+    \node[an,text=codenumber,anchor=south] at (3.0,3.45)
+         {clock period};
+    \draw[{Stealth[length=1.4mm]}-{Stealth[length=1.4mm]},draw=codenumber,
+          line width=0.5pt] (1,3.42) -- (5,3.42);
+  \end{tikzpicture}
+  \caption{What \code{default input \#1step output \#1ns} buys you. The
+    testbench samples strictly before the edge, so it never sees a value the
+    \DUT{} produced on that same edge; it drives strictly after the edge, so
+    the \DUT{} never samples a value in the instant it is changing.}
+  \label{fig:tb:skew}
+\end{figure}
+
+Using it is unremarkable, and \refdesignbook has the direction
+convention: a clocking block is written from the testbench's point of view, so
+\code{req\_ready}, an output of \code{cordic\_rot}, is an \code{input} here.
+
+\begin{svcode}
+vif.drv_cb.req_valid <= 1'b1;      // driven 1 ns after the next edge
+vif.drv_cb.req_x     <= t.x0;
+do @(vif.drv_cb); while (vif.drv_cb.req_ready !== 1'b1);
+vif.drv_cb.req_valid <= 1'b0;      // ready was sampled before the edge
+\end{svcode}
+
+Those four lines are the whole valid/ready handshake, and
+\cref{sec:tb:layered} uses them unchanged as the body of the driver's
+\code{send()} task.
+
+\begin{gotcha}{Two drivers on one signal: the clocking block always wins}
+A clocking-block output is driven in the Re-NBA region, after Active and after
+NBA. If another part of the testbench also assigns the same signal
+procedurally, the clocking block overwrites it in every time slot in which both
+happen, regardless of source order, and the symptom is a signal that ignores
+half your assignments. A signal listed as a clocking-block \code{output} must
+be driven \emph{only} through that clocking block. This is why
+\code{cordic\_if} keeps \code{rst\_n} out of \code{drv\_cb} and exposes it
+directly on the \code{drv} modport.
+\end{gotcha}
+
+\begin{gotcha}{\texttt{vif.drv\_cb.req\_ready} is not \texttt{vif.req\_ready}}
+The first is a sample taken before the most recent clock edge; the second is
+the live signal, right now. They differ by up to a clock cycle, and a testbench
+written half one way and half the other appears to see the same event at two
+different times. The symptom is a monitor that reports transactions one cycle
+later than the driver thinks it sent them, or a \code{wait} that hangs because
+it is watching a live signal that changed in a region the waiting thread cannot
+observe. Use the clocking-block reference for everything synchronous, and raw
+references only for asynchronous signals such as reset.
+\end{gotcha}
+
+\begin{notebox}{\texttt{\#1step} is not \texttt{\#1}}
+\code{1step} is a keyword, not a number with a unit. It denotes the smallest
+time precision used anywhere in the simulation and may appear only as a
+clocking-block input skew, where the \LRM{} defines it to mean the Preponed
+region of that time slot. \code{\#1} would mean one time \emph{unit},
+typically \SI{1}{\nano\second}, which is a thousand times too coarse.
+\end{notebox}
+
+\begin{ruleofthumb}
+Drive the \DUT{} only through a clocking block. Sample the \DUT{} only through
+a clocking block. Then the question "does my testbench race with the design?"
+has the answer "no", permanently, and you stop having to think about it.
+\end{ruleofthumb}
+
+% ===========================================================================
+\section{Making the Testbench Decide}
+\label{sec:tb:selfcheck}
+% ===========================================================================
+
+\index{self-checking testbench}The testbench in \cref{lst:tb:tbsv} contains one
+assertion, checking one value, at one time. That is not a testbench, it is a
+waveform generator with a comment. Going from "run it and look at the waves" to
+"the testbench decides" is the single largest quality improvement available to
+you, and it costs less effort than the waveform inspection it replaces.
+
+A self-checking testbench needs four things: a model of what the correct answer
+is, a comparison with a defined tolerance, a record of how many checks passed
+and failed, and a guarantee that it terminates with a verdict even when the
+\DUT{} misbehaves.
+
+\subsection{The reference model must describe the specification}
+
+\index{reference model}\index{golden model}The reference model, also called the
+golden model or the predictor, computes what the output \emph{should} be. There
+is exactly one rule about how to write it, and it is not negotiable:
+
+\begin{ruleofthumb}
+Write the reference model from the specification, never from the \RTL{}. A
+model derived from the implementation reproduces the implementation's bugs and
+proves nothing.
+\end{ruleofthumb}
+
+This rule is easy to state and constantly violated, because copying the \RTL{}
+is so much quicker. Consider the CORDIC. A tempting reference model would
+iterate the same micro-rotations the hardware performs:
+
+\begin{svcode}[caption={A worthless reference model: it is the RTL again},label={lst:tb:badmodel}]
+// DO NOT DO THIS
+function automatic void bad_predict(input cordic_txn t,
+                                    output data_t x_ref, output data_t y_ref);
+  idata_t  x = idata_t'(t.x0)      <<< GL;
+  idata_t  y = idata_t'(t.y0)      <<< GL;
+  iangle_t z = iangle_t'(t.theta)  <<< GL;
+  for (int i = 0; i < int'(N); i++)
+    if (z >= 0) begin
+      x = x - (y >>> i);  y = y + (x >>> i);  z = z - ATAN_ROM[i];
+    end else begin
+      x = x + (y >>> i);  y = y - (x >>> i);  z = z + ATAN_ROM[i];
+    end
+  x_ref = sat_narrow(x);  y_ref = sat_narrow(y);
+endfunction
+\end{svcode}
+
+If the \RTL{} uses the wrong \code{ATAN\_ROM} entry, so does this model, and
+they agree. If the \RTL{} folds the quadrant incorrectly, so does this model,
+and they agree. If \code{ATAN\_ROM} itself is wrong, both are wrong together.
+This model detects only typographical differences between two pieces of code
+you wrote on the same afternoon in the same frame of mind, and it will pass a
+design that computes something which is not a rotation at all.
+
+Compare the real one from \file{tb\_cordic\_pkg.sv}:
+
+\begin{svcode}[caption={The reference model from \file{tb\_cordic\_pkg.sv}: pure specification},label={lst:tb:goodmodel}]
+function automatic void predict(input cordic_txn t,
+                                output real x_ref, output real y_ref);
+  real th = q_to_real(t.theta, QA);
+  real xr = q_to_real(t.x0,    QF);
+  real yr = q_to_real(t.y0,    QF);
+  x_ref = K_GAIN * (xr * $cos(th) - yr * $sin(th));
+  y_ref = K_GAIN * (xr * $sin(th) + yr * $cos(th));
+endfunction
+\end{svcode}
+
+Six lines, and they say nothing about micro-rotations, guard bits, quadrant
+folding, saturation or the FSM. They say what the block computes: a rotation by
+$\theta$, scaled by the CORDIC processing gain $K$. Reimplement
+\code{cordic\_rot} as a lookup table, as a pipelined unrolled array, or as a
+multiply by a rotation matrix, and this model still checks it. That is the test
+for whether a reference model is any good: could you swap the \DUT{} for a
+completely different implementation of the same specification and keep the
+model unchanged?
+
+\begin{notebox}{Three legitimate places for a reference model}
+The model does not have to be written in \SV{}. In order of increasing
+independence: a \code{function} in the testbench package, as here; a C or
+C++ routine called through DPI-C (\refsimulationbook), which is what you
+do when the model already exists as part of the firmware; and a Python or
+MATLAB script that produced a vector file offline, which is the subject of
+\refsimulationbook. The third is the most independent, because the person who
+wrote the model was solving a mathematical problem and had never seen your
+\RTL{}.
+\end{notebox}
+
+\subsection{Tolerance: why zero is the wrong answer}
+
+\index{tolerance}For a control block, a checker compares for exact equality and
+that is correct. For a fixed-point arithmetic block, exact equality is almost
+always the wrong check, and demanding it produces one of two bad outcomes:
+either you weaken the reference model until it matches the \RTL{} bit for bit,
+which lands you back in \cref{lst:tb:badmodel}, or you spend a week chasing
+"failures" that are one least significant bit of rounding.
+\file{tb\_cordic\_pkg.sv} declares:
+
+\begin{svcode}
+// Comparison tolerance, in LSBs of the output format.  The theoretical
+// bound for N = 14 micro-rotations plus the guard-bit truncation is a
+// little under 5 LSB; 12 leaves margin without hiding a real bug.
+localparam int TOL_LSB = 12;
+\end{svcode}
+
+The number 12 is not arbitrary and it is not a knob you turn until the test
+passes. It comes from an error budget, and you must be able to write the budget
+down:
+
+\begin{itemize}
+\item \textbf{Angle quantisation.} The rotation stops after $N=14$
+  micro-rotations, so the residual angle is bounded by
+  $\arctan(2^{-13}) \approx \SI{1.2e-4}{\radian}$; times the maximum vector
+  magnitude, that is on the order of one external LSB.
+\item \textbf{Datapath truncation.} Each micro-rotation shifts right and
+  truncates. With $GL=2$ guard bits the accumulated truncation over 14
+  iterations is bounded by roughly $N \cdot 2^{-GL}$ internal LSBs, a few
+  external LSBs.
+\item \textbf{Output narrowing.} \code{sat\_narrow} drops the guard bits with
+  an arithmetic shift, which rounds towards $-\infty$: up to one more LSB.
+\item \textbf{The reference model's own error.} \code{\$cos} and \code{\$sin}
+  are double precision, so this term is negligible here, but in a fixed-point
+  model it would not be.
+\end{itemize}
+
+The total is a little under five LSB. \code{TOL\_LSB} is set to 12, about two
+and a half times the bound. That margin absorbs the corner cases the hand
+analysis did not cover, without being so loose that a real functional bug slips
+through: a bug that inverts a sign, uses the wrong ROM entry or folds the wrong
+quadrant produces an error of \emph{thousands} of LSB, not tens. There is a
+wide gap between the noise floor and the smallest real bug, and the tolerance
+is placed inside that gap.
+
+\begin{gotcha}{Tolerance is not a place to hide a bug}
+A tolerance is a claim about the numerical accuracy of the design and it
+belongs in the specification. If you have to raise \code{TOL\_LSB} to make a
+test pass, you have either found a bug or discovered that the accuracy claim
+was wrong, and someone must decide which, in writing. Raising the number until
+the regression turns green converts a failing test into a passing test that
+checks nothing. The scoreboard guards against this by tracking
+\code{worst\_err} and printing it: if the worst observed error creeps from 4 to
+11 LSB between two releases the test still passes, but the report says
+something changed.
+\end{gotcha}
+
+Here is the comparison itself, from the scoreboard:
+
+\begin{svcode}[caption={Tolerance-based comparison, in LSBs of the output format},label={lst:tb:tol}]
+real x_ref, y_ref, ex, ey;
+predict(t, x_ref, y_ref);
+
+ex = (q_to_real(t.x, QF) - x_ref) * (2.0 ** QF);   // error in LSB
+ey = (q_to_real(t.y, QF) - y_ref) * (2.0 ** QF);
+if (ex < 0.0) ex = -ex;
+if (ey < 0.0) ey = -ey;
+if (ex > worst_err) worst_err = ex;
+if (ey > worst_err) worst_err = ey;
+
+n_checked++;
+if (ex > real'(TOL_LSB) || ey > real'(TOL_LSB)) begin
+  n_failed++;
+  $error({"MISMATCH %s\n         got  x=%0d y=%0d\n",
+          "         want x=%.1f y=%.1f  (err %.2f / %.2f LSB)"},
+         t.convert2string(), t.x, t.y,
+         x_ref * (2.0 ** QF), y_ref * (2.0 ** QF), ex, ey);
+end
+\end{svcode}
+
+Note the braces around the two halves of the format string. \SV{} has no
+C-style adjacent string literal concatenation: \code{"a" "b"} is a syntax
+error. A long format string is split with the concatenation operator,
+\code{\{"a", "b"\}}, which is the same operator used on bit vectors.
+
+Note also that the error is converted into LSBs of the output format before being
+compared. That is what makes the tolerance a number a specification can state.
+Comparing raw real values against \code{1e-4} works too, but the number means
+nothing to a reader and has to be rederived whenever \code{QF} changes.
+
+\begin{tipbox}{Always print both values on a mismatch}
+A failure message that says \code{assertion failed} costs an hour. A failure
+message that prints the stimulus, the observed value, the expected value and
+the error in the natural unit costs a minute. \code{convert2string()} exists
+for precisely this, and it is the cheapest thing in the whole testbench.
+\end{tipbox}
+
+\subsection{Counting, and the \texttt{final} block}
+
+\index{final block}An error counter is a single integer, incremented on every
+mismatch, whose value at the end of simulation determines the verdict. Report
+it from a \code{final} block, a \SV{} construct with no \VHDL{} counterpart: it
+executes once, at the end, whether the simulation ended by \code{\$finish} or
+by running out of events.
+
+\begin{svcode}[caption={A verdict that cannot be missed},label={lst:tb:final}]
+int unsigned n_checked = 0, n_failed = 0;
+localparam int unsigned MIN_TXN = 50;
+
+final begin
+  $display(" transactions checked : %0d", n_checked);
+  $display(" mismatches           : %0d", n_failed);
+  if      (n_failed != 0)        $display(" *** TEST FAILED ***");
+  else if (n_checked < MIN_TXN)  $display(
+      " *** TEST FAILED: only %0d of %0d transactions ***", n_checked, MIN_TXN);
+  else                           $display(" *** TEST PASSED ***");
+end
+\end{svcode}
+
+\begin{gotcha}{A \texttt{final} block may not consume time}
+\code{final} runs in the last time slot, after the simulator has decided to
+stop, and it is a function-like context: no \code{\#}, no \code{@}, no
+\code{wait}, no time-consuming task calls. Drain queues and wait for
+outstanding transactions \emph{before} \code{\$finish}, and leave the
+\code{final} block to print.
+\end{gotcha}
+
+\subsection{\texttt{\$error} or \texttt{\$fatal}?}
+
+\index{\$fatal}\index{\$error}\code{\$error} prints, increments the error
+count, and \emph{continues}. \code{\$fatal} prints and terminates the
+simulation immediately, with an exit code taken from its first argument
+(\code{\$fatal(1, "...")} is the conventional form; the argument is a
+\code{\$finish}-style verbosity code, and a non-zero value is what your
+regression script tests).
+
+The choice is not about severity, it is about whether continuing produces
+useful information. Use \code{\$error} for a \emph{data} mismatch: one wrong
+result does not prevent the next thousand transactions from being checked, and
+the pattern of which ones fail is the most valuable debug information you will
+get. A run that stops on the first mismatch tells you one thing; a run
+reporting "917 of 1000 failed, all with $\theta < 0$" tells you where the bug
+is. Use \code{\$fatal} when the testbench itself can no longer function:
+randomisation failed, a configuration file is missing, the \DUT{} has hung.
+Continuing would then produce thousands of secondary failures that bury the
+real one. \file{tb\_cordic\_pkg.sv} follows exactly this split.
+
+Better than choosing once and for all is a switch: read a
+\code{+MAX\_ERRORS=n} plusarg (\cref{sec:tb:run}), default it to zero meaning
+"never stop", and call \code{\$fatal} when \code{n\_failed} reaches it. Run the
+regression with no limit and debug interactively with \code{+MAX\_ERRORS=1}.
+
+\subsection{The watchdog}
+
+\index{watchdog}A \DUT{} that hangs is not a passing test, but that is what a
+naive testbench reports: the driver blocks forever waiting for a
+\code{req\_ready} that never arrives, the simulation runs out of events (or
+runs until the grid job is killed), and no verdict is printed. Every testbench
+needs an independent timeout.
+
+\begin{svcode}[caption={An absolute watchdog},label={lst:tb:watchdog}]
+localparam time TIMEOUT = 500us;
+
+initial begin
+  #TIMEOUT;
+  $fatal(1, "WATCHDOG: no completion after %0t", TIMEOUT);
+end
+\end{svcode}
+
+That is the crude version, and it is better than nothing. The better version is
+an \emph{activity} watchdog: it fires not after a fixed simulated time but
+after a number of clock cycles with no progress, so it scales automatically
+with the size of the test.
+
+\begin{svcode}[caption={An activity watchdog that resets on progress},label={lst:tb:watchdog2}]
+localparam int unsigned MAX_IDLE = 5000;
+int unsigned idle = 0, last_checked = 0;
+
+initial forever begin
+  @(posedge clk);
+  if (sb.n_checked != last_checked) begin
+    last_checked = sb.n_checked;
+    idle         = 0;
+  end else begin
+    idle++;                       // not `++idle' inside the condition
+    if (idle > MAX_IDLE)
+      $fatal(1, "WATCHDOG: %0d cycles with no completed transaction",
+             MAX_IDLE);
+  end
+end
+\end{svcode}
+
+The increment is deliberately on a line of its own. \code{else if (++idle >
+MAX\_IDLE)} is legal \SV{} and Icarus runs it, but Verilator 5.020 aborts with
+an internal error on a pre-increment used inside a condition. Side effects
+buried in expressions are hard to read anyway, and in a testbench that must run
+on more than one tool they are not worth the two saved characters.
+
+\begin{gotcha}{A watchdog is not optional and it is not a debug aid}
+The failure mode a watchdog catches is the one that looks most like success. A
+hung simulation in a nightly regression produces no error message, no failing
+assertion and no exit code until the batch system kills it; the log then ends
+mid-sentence and the summary script records "no result" rather than "failed".
+Teams do discover months later that a block was never verified because its
+testbench had been timing out silently since the third week. Add the watchdog
+on day one, before the first check.
+\end{gotcha}
+
+\subsection{The test that passed because it checked nothing}
+\label{sec:tb:nocheck}
+
+This is the most dangerous failure mode in verification. Suppose the monitor's
+clocking block is mis-declared, or the mailbox between the monitor and the
+scoreboard is never connected, or a constraint is unsatisfiable so every
+transaction is one the \DUT{} never accepts. In each case \code{n\_failed} is
+zero at the end of the run, the verdict is \code{TEST PASSED}, and nothing was
+verified. \code{n\_failed == 0} is necessary for a pass; it is not sufficient.
+The sufficient condition is:
+
+\begin{svcode}
+if (n_failed == 0 && n_checked >= MIN_TXN) ... PASSED
+\end{svcode}
+
+\file{tb\_cordic\_pkg.sv} implements the weak version of this in
+\code{cordic\_sb::report()}:
+
+\begin{svcode}
+if (n_failed == 0 && n_checked > 0) $display(" *** TEST PASSED ***");
+else                                $display(" *** TEST FAILED ***");
+\end{svcode}
+
+and the strong version in \code{cordic\_env::wait\_drain()}, which knows how
+many transactions were sent and fails if fewer came back:
+
+\begin{svcode}[caption={Drain with a bound: the guard against a silent pass},label={lst:tb:drain}]
+task automatic wait_drain(int unsigned expected, int unsigned timeout_cyc);
+  int unsigned waited = 0;
+  while (sb.n_checked < expected && waited < timeout_cyc) begin
+    @(vif.mon_cb);
+    waited++;
+  end
+  if (sb.n_checked < expected)
+    $fatal(1, "timeout: only %0d of %0d transactions completed",
+           sb.n_checked, expected);
+endtask
+\end{svcode}
+
+\begin{ruleofthumb}
+Every testbench must be able to fail. Before you trust a new checker, break the
+\DUT{} on purpose -- invert a sign, delete a guard bit -- and confirm that the
+test goes red. A checker that has never failed has never been tested.
+\end{ruleofthumb}
+
+\begin{tipbox}{The five-minute sanity ritual}
+When a testbench first reports PASSED, do all five of these before believing
+it:
+\begin{enumerate}
+\item Comment out one term in the \DUT{} and check that it fails.
+\item Set \code{TOL\_LSB} to 0 and check that it fails.
+\item Check that \code{n\_checked} is the number you expected, not zero and
+  not one.
+\item Run with a different \code{-sv\_seed} and check that the stimulus
+  actually changed.
+\item Look at the waveform for exactly one transaction, and confirm the
+  handshake looks like the protocol document.
+\end{enumerate}
+\end{tipbox}
+% ===========================================================================
+\section{Vectors From a File}
+\label{sec:tb:vectors}
+% ===========================================================================
+
+Before the layered testbench, one intermediate step that is often enough on
+its own: keep the stimulus and the expected results in a file, and let the
+testbench read them. It is how you use a model written in another language
+without linking anything, and it is completely reproducible --- the file is
+the test.
+
+\Refsimulationbook covers the whole technique, including how to generate the
+file from a Python model and how to read it from \SV{}, from \VHDL{} and from
+C++. Two things belong here, because they are checking bugs rather than file
+format bugs.
+
+\begin{svcode}[caption={Reading a vector file the safe way},label={lst:tb:vecread}]
+int fd, n_read;
+logic [15:0] a, b, expect_q;
+
+fd = $fopen("vectors.txt", "r");
+if (fd == 0) $fatal(1, "cannot open vectors.txt");
+
+n_read = 0;
+while (!$feof(fd)) begin
+  // $fscanf returns the number of items it matched.  Ignoring it is how a
+  // truncated file turns into a test that quietly checks nothing.
+  if ($fscanf(fd, "%h %h %h\n", a, b, expect_q) == 3) begin
+    drive_and_check(a, b, expect_q);
+    n_read++;
+  end
+end
+$fclose(fd);
+
+// The vector count is part of the test.
+if (n_read != EXPECTED_VECTORS)
+  $fatal(1, "read %0d vectors, expected %0d", n_read, EXPECTED_VECTORS);
+\end{svcode}
+
+\begin{gotcha}{A short vector file is a silent pass}
+\code{\$readmemh} on a file with fewer lines than the array has entries
+fills what it finds and leaves the rest at their initial value, with no
+error. \code{\$fscanf} on a malformed line returns a count you did not check.
+Both produce a run that reports zero failures because it performed zero
+comparisons. Count what you read and assert the count --- this is the same
+failure as the one in \cref{sec:tb:nocheck}, arriving by a different route.
+\end{gotcha}
+
+
+% ===========================================================================
+\section{The Layered Testbench}
+\label{sec:tb:layered}
+% ===========================================================================
+
+Everything so far has been one \code{initial} block doing everything. That
+works until one of four things happens: you want to reuse the pin-level
+protocol code in a second test; you want stimulus and checking to run
+concurrently rather than in lockstep; you want random stimulus, so the checker
+can no longer know the answer in advance; or the \DUT{} pipelines, so that
+several transactions are in flight at once and "drive, wait, check" stops being
+a possible shape.
+
+The answer to all four is the same: split the testbench into components with
+one responsibility each, and let them communicate by passing \emph{transaction
+objects} rather than by sharing wires. \cref{fig:tb:layered} shows the result.
+Study it before the code, because every class that follows is one box in that
+picture.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\sffamily\scriptsize,
+      comp/.style={draw=codeframe,fill=codebg,line width=0.9pt,
+                   rounded corners=2pt,minimum width=23mm,minimum height=8mm,
+                   align=center,inner sep=2pt},
+      dutb/.style={comp,fill=svbg,draw=accentalt,line width=1.1pt,
+                   minimum width=20mm,minimum height=13mm},
+      vifb/.style={draw=codekey,fill=notebg,line width=1pt,
+                   rounded corners=1.5pt,minimum width=7mm,
+                   minimum height=42mm,align=center},
+      mbx/.style={draw=noteframe,fill=notebg,line width=0.7pt,
+                  minimum width=12mm,minimum height=5mm,align=center,
+                  font=\sffamily\tiny},
+      ar/.style={-{Stealth[length=1.9mm]},line width=0.8pt,draw=codekey},
+      ard/.style={-{Stealth[length=1.9mm]},line width=0.8pt,draw=accent,
+                  dashed},
+      lb/.style={font=\sffamily\tiny\itshape,text=codenumber}
+    ]
+    \node[comp,minimum width=50mm] (test) at (2.0, 4.1)
+      {\textbf{test} -- how many, which constraints, which directed cases};
+
+    \node[comp] (gen) at (-1.2, 2.3) {generator /\\sequence};
+    \node[mbx]  (m1)  at ( 2.0, 2.3) {\texttt{req\_mbx}};
+    \node[comp] (drv) at ( 5.2, 2.3) {driver};
+
+    \node[vifb] (vif) at ( 7.9, 0.2) {};
+    \node[font=\sffamily\tiny,rotate=90] at (7.9,0.2)
+      {\texttt{cordic\_if} + clocking};
+    \node[dutb] (dut) at (10.6, 0.2) {\textbf{DUT}\\\texttt{cordic\_rot}};
+
+    \node[comp] (mon) at ( 5.2,-1.3) {monitor\\(passive)};
+    \node[mbx]  (m2)  at ( 2.0,-1.3) {\texttt{obs\_mbx}};
+    \node[comp] (sb)  at (-1.2,-1.3) {scoreboard\\+ reference model};
+    \node[mbx]  (m3)  at ( 2.0,-2.9) {\texttt{cov\_mbx}};
+    \node[comp] (cov) at (-1.2,-2.9) {coverage\\collector};
+
+    \draw[ar] (gen) -- (m1);
+    \draw[ar] (m1)  -- (drv);
+    \draw[ar] (drv.east) -- (drv -| vif.west);
+    \draw[ar] (mon -| vif.west) -- (mon.east);
+    \draw[ar] (mon) -- (m2);
+    \draw[ar] (m2)  -- (sb);
+    \draw[ar] (mon.south) |- (m3.east);
+    \draw[ar] (m3)  -- (cov);
+    \draw[{Stealth[length=1.9mm]}-{Stealth[length=1.9mm]},line width=0.9pt,
+          draw=accentalt] (vif.east) -- (dut.west);
+
+    \draw[ard] (test.west) -| (gen.north);
+    \node[lb,anchor=south east] at (-0.2,3.0) {starts, configures};
+
+    \node[draw=accent,dashed,line width=0.9pt,rounded corners=3pt,
+          fit=(gen)(drv)(mon)(sb)(cov)(m1)(m3),inner sep=4pt] (env) {};
+    \node[font=\sffamily\tiny\bfseries,text=accent,anchor=north west]
+      at ([xshift=1mm,yshift=-0.5mm]env.south west) {environment};
+  \end{tikzpicture}
+  \caption{The layered testbench. Solid arrows carry transaction objects
+    through mailboxes; the double arrow is the only pin-level connection in the
+    whole picture. \cref{ch:uvm} replaces each box with a UVM base class and
+    each mailbox with an analysis port, and changes nothing else.}
+  \label{fig:tb:layered}
+\end{figure}
+
+Notice what the picture says. Only two components touch a wire: the driver and
+the monitor. Everything else works with objects, so everything else is
+independent of the pin-level protocol and survives a change to it unchanged.
+That is the entire point of the layering.
+
+\subsection{The transaction}
+
+\index{transaction}A transaction is a class holding what goes into the \DUT{}
+and what came out of it, for one unit of work. It is a \emph{value}, not a
+component: created, filled in, handed on, and eventually garbage collected.
+
+Why a class and not a set of signals? It travels through a mailbox as a single
+item, so producer and consumer never have to agree on timing. It carries its
+own randomisation constraints, so the rules about what constitutes a legal
+request live with the definition of a request. And it can print itself, which
+turns a failure message from a puzzle into a diagnosis.
+
+\begin{svcode}[caption={The transaction from \file{tb\_cordic\_pkg.sv}},label={lst:tb:txn}]
+class cordic_txn;
+
+  // ---- stimulus ------------------------------------------------------
+  rand data_t  x0;
+  rand data_t  y0;
+  rand angle_t theta;
+
+  // ---- observed result, filled in by the monitor ----------------------
+  data_t x;
+  data_t y;
+
+  // ---- bookkeeping ----------------------------------------------------
+  int unsigned id;
+  static int unsigned next_id = 0;
+
+  constraint c_theta {
+    theta inside {[-PI_EXT : PI_EXT]};
+  }
+  constraint c_magnitude {
+    x0 inside {[-6000 : 6000]};
+    y0 inside {[-6000 : 6000]};
+  }
+  constraint c_corners {
+    theta dist {
+      0                 :/ 1,
+      PI_EXT            :/ 1,
+      -PI_EXT           :/ 1,
+      PI_EXT / 2        :/ 1,
+      -PI_EXT / 2       :/ 1,
+      [-PI_EXT:PI_EXT]  :/ 20
+    };
+  }
+
+  function new();
+    id = next_id++;
+  endfunction
+
+  function string convert2string();
+    return $sformatf(
+      "txn#%0d  x0=%0d (%.4f)  y0=%0d (%.4f)  theta=%0d (%.4f rad)",
+      id, x0, q_to_real(x0, QF), y0, q_to_real(y0, QF),
+      theta, q_to_real(theta, QA));
+  endfunction
+
+endclass : cordic_txn
+\end{svcode}
+
+The \code{id} field and the \code{static next\_id} counter matter more than
+they look. \code{next\_id} is a \kw{static} member (\cref{sec:toolkit:class}), so
+\code{next\_id++} in the constructor gives every transaction a unique serial
+number. When transaction 4172 fails in a run of ten thousand, that number is
+how you find it in the waveform, in the log and in the coverage database.
+
+The three constraints deserve a note each. \code{c\_theta} states a legality
+rule taken straight from the specification: angles outside $\pm\pi$ are not
+accepted, and \code{cordic\_rot} has an immediate assertion that fires if you
+send one. \code{c\_magnitude} is a \emph{test} decision rather than a legality
+rule: it keeps $|(x,y)| \cdot K$ inside the output range so that saturation is
+exercised only by directed tests, where the expected behaviour is unambiguous.
+\code{c\_corners} uses \code{dist} to bias the distribution, because a uniform
+draw over $[-\pi, \pi]$ hits exactly zero, exactly $\pi$ and exactly $\pi/2$
+with probability approximately zero, and those are the three angles where the
+quadrant-folding logic changes behaviour.
+
+\begin{gotcha}{Reusing one transaction object for a whole run}
+This is what the handle-is-a-reference rule of \cref{sec:toolkit:class} looks like at
+the place it actually bites you. \code{mbx.put(t)} puts the \emph{handle} into
+the mailbox, not a copy of the object. If the generator then does
+\code{t.theta = ...; mbx.put(t);} again, both entries point at the same object
+and the consumer sees the second value twice. The fix is one line,
+\code{cordic\_txn t = new();} \emph{inside} the loop rather than above it;
+forgetting it produces a testbench that appears to send $N$ transactions and
+actually sends the same one $N$ times, at full speed, reporting a clean pass.
+The same rule applies downstream: a scoreboard that stores the handle it was
+given, rather than a copy, holds a value that the monitor can still change.
+\end{gotcha}
+
+\begin{notebox}{\texttt{convert2string} is not a UVM invention}
+The name comes from UVM, where \code{uvm\_object} declares
+\code{convert2string()} as a virtual method you override. There is nothing
+magical about it: it is an ordinary function returning a \code{string}. Write
+it now, and when you move to UVM in \cref{ch:uvm} the method is already there
+and the base class simply starts calling it for you.
+\end{notebox}
+
+\subsection{The generator}
+
+\index{generator}The generator produces transactions and puts them into a
+mailbox. That is all it does. It does not know how a transaction reaches the
+pins, how long one takes, or whether the \DUT{} is ready.
+
+\begin{svcode}[caption={Random and directed stimulus generation},label={lst:tb:gen}]
+task automatic send_random(int unsigned n);
+  repeat (n) begin
+    cordic_txn t = new();
+    if (!t.randomize()) $fatal(1, "randomization failed");
+    req_mbx.put(t);
+  end
+endtask
+
+task automatic send_directed(data_t x0, data_t y0, angle_t theta);
+  cordic_txn t = new();
+  t.x0 = x0; t.y0 = y0; t.theta = theta;
+  req_mbx.put(t);
+endtask
+\end{svcode}
+
+\begin{gotcha}{An unchecked \texttt{randomize()} turns a random test directed}
+\cref{sec:toolkit:random} explains why the return value must be tested. Here is what
+ignoring it costs. An over-constrained transaction keeps whatever values it
+had before the failed solve, which for a freshly constructed object is all
+zeros. The generator then pushes a thousand identical zero transactions, the
+driver drives them, the scoreboard checks them, and the run reports a thousand
+passing checks against one vector. Every number in the report looks healthy.
+\code{void'(t.randomize());} is worse than the bare call, because it documents
+that you meant to ignore the failure. When a solve does fail, use the tool's
+constraint debugger rather than deleting constraints at random.
+\end{gotcha}
+
+Randomisation changes the shape of the testbench because it decouples
+\emph{what} you test from \emph{how many} tests you run. A directed \VHDL{}
+testbench contains as many checks as you had patience for. A
+constrained-random testbench contains one check and a number that you raise
+from 100 to 100\,000 when the regression machine is idle overnight.
+\cref{sec:tb:closure} explains how you find out whether the extra runs buy
+anything.
+
+The constraint language itself is \cref{sec:toolkit:random}'s subject. What is new
+here is where the constraints live: on the transaction class, not in the
+generator. That is deliberate. A rule about what constitutes a legal request
+belongs with the definition of a request, so that every test inherits it and no
+test can forget it, while a rule about what \emph{this} test wants goes in an
+inline \code{with \{...\}} clause at the call site. Put a test's preference
+into a class constraint and you have made it everybody's preference.
+
+\subsection{The driver}
+
+\index{driver}The driver takes transactions out of the mailbox and turns them
+into pin wiggles. It knows the protocol: the handshake, the setup order, the
+reset sequence, and nothing else. It does not know what the values mean, does
+not check anything, and never looks at the response.
+
+\index{virtual interface}One declaration in \cref{lst:tb:drv} needs a word
+before you read the rest of it. \code{virtual cordic\_if vif} is a
+\emph{handle} to an interface instance, not an instance: a class object lives
+on the heap and has no position in the module hierarchy, so it cannot name
+\code{tb\_cordic\_top.intf} the way one module names another. The handle is
+\kw{null} until the top-level module hands the real instance to the
+constructor, which is the whole of the argument \code{new(intf)} in
+\cref{lst:tb:top}. Until \cref{sec:tb:mech} takes the mechanism apart, read
+\code{vif.drv\_cb.req\_valid} as ``the \code{req\_valid} signal of whichever
+interface instance this driver was given, driven through the \code{drv\_cb}
+clocking block''.
+
+\begin{svcode}[caption={The driver from \file{tb\_cordic\_pkg.sv}},label={lst:tb:drv}]
+class cordic_drv;
+
+  virtual cordic_if vif;
+  mailbox #(cordic_txn) req_mbx;      // from the generator
+  int unsigned stall_pct = 25;        // random back-pressure
+
+  function new(virtual cordic_if vif, mailbox #(cordic_txn) req_mbx);
+    this.vif     = vif;
+    this.req_mbx = req_mbx;
+  endfunction
+
+  task automatic reset();
+    vif.rst_n              <= 1'b0;
+    vif.drv_cb.req_valid   <= 1'b0;
+    vif.drv_cb.req_x       <= '0;
+    vif.drv_cb.req_y       <= '0;
+    vif.drv_cb.req_theta   <= '0;
+    vif.drv_cb.rsp_ready   <= 1'b0;
+    repeat (5) @(vif.drv_cb);
+    vif.rst_n <= 1'b1;
+    @(vif.drv_cb);
+  endtask
+
+  task automatic send(cordic_txn t);
+    vif.drv_cb.req_valid <= 1'b1;
+    vif.drv_cb.req_x     <= t.x0;
+    vif.drv_cb.req_y     <= t.y0;
+    vif.drv_cb.req_theta <= t.theta;
+    do @(vif.drv_cb); while (vif.drv_cb.req_ready !== 1'b1);
+    vif.drv_cb.req_valid <= 1'b0;
+  endtask
+
+endclass : cordic_drv
+\end{svcode}
+
+Read \code{send()} with the protocol in mind. The payload and
+\code{req\_valid} are driven together through the clocking block, so they
+appear \SI{1}{\nano\second} after a clock edge. The loop then advances one
+clock at a time and inspects the \emph{sampled} \code{req\_ready}. Because the
+sample is taken in Preponed, the value tested at edge $n$ is the value
+\code{req\_ready} held during cycle $n-1$, so the loop exits on the first edge
+that follows a cycle in which both valid and ready were high. That is the
+valid/ready contract exactly. Note also what \code{send()} does \emph{not} do:
+it never changes the payload while \code{req\_valid} is high, which is required
+by the concurrent assertion \code{a\_req\_stable} inside \code{cordic\_rot}.
+
+The second thread is back-pressure. A response channel that is always ready is
+never stalled, so the \DUT{}'s \code{ST\_DONE} state lasts exactly one cycle in
+every transaction and any bug in holding the result is invisible. The driver
+therefore runs a second, independent process that randomly de-asserts
+\code{rsp\_ready}:
+
+\begin{svcode}[caption={Two independent driver threads},label={lst:tb:drvrun}]
+task automatic run();
+  fork
+    forever begin
+      cordic_txn t;
+      req_mbx.get(t);
+      send(t);
+    end
+    forever begin
+      if ($urandom_range(99) < stall_pct) begin
+        vif.drv_cb.rsp_ready <= 1'b0;
+        repeat ($urandom_range(3) + 1) @(vif.drv_cb);
+      end
+      vif.drv_cb.rsp_ready <= 1'b1;
+      @(vif.drv_cb);
+    end
+  join_none
+endtask
+\end{svcode}
+
+\code{fork ... join\_none} (\cref{sec:toolkit:fork}) starts both branches and returns
+immediately, so \code{run()} does not block its caller. That is the property
+being used here, and it is the reason every component in this testbench
+exposes a \code{run()} that starts threads instead of a task that does work:
+the environment can start five components in five statements and still have
+control afterwards. The two branches are genuinely concurrent and independent,
+neither knowing the other exists. There is no way to express this in \VHDL{},
+where the number of processes is fixed at elaboration and a subprogram cannot
+create one.
+
+\begin{ruleofthumb}
+Random back-pressure on every ready signal, from the first test. A protocol bug
+that only appears under stall is the most common bug in a valid/ready design
+and the least likely to be found by hand-written stimulus.
+\end{ruleofthumb}
+
+\begin{tipbox}{Make the stall percentage a knob}
+\code{stall\_pct} is a plain public variable, so the test can set
+\code{env.drv.stall\_pct = 0} for a throughput measurement, \code{= 90} for a
+stress run, and leave it at the default for regressions. Anything a test might
+want to vary should be a variable on the component, not a literal buried in a
+task.
+\end{tipbox}
+
+\subsection{The monitor}
+
+\index{monitor}The monitor watches the pins and reconstructs transactions. It
+is \emph{strictly passive}: it never drives anything, and its clocking block
+\code{mon\_cb} lists every signal as an input precisely so that it cannot.
+
+The temptation, always, is to have the driver tell the monitor what it sent.
+That saves code and destroys the testbench: the checking is then against what
+the testbench \emph{intended} to send, not against what appeared on the wires,
+so a driver bug becomes invisible, because the same wrong information reaches
+the checker from both sides. Valid asserted for two cycles, a payload changed
+mid-handshake, a transaction dropped when \code{req\_ready} deasserts: none of
+those is detectable by a checker that was told the answer. There are three
+further, practical reasons: a passive monitor can
+be attached to a gate-level netlist where no driver exists, to the same block
+instantiated inside a larger system and driven by real neighbouring logic, and
+to an emulation or formal flow, all unchanged.
+
+\begin{svcode}[caption={The monitor from \file{tb\_cordic\_pkg.sv}},label={lst:tb:mon}]
+class cordic_mon;
+
+  virtual cordic_if vif;
+  mailbox #(cordic_txn) obs_mbx;      // to the scoreboard
+  mailbox #(cordic_txn) cov_mbx;      // to the coverage collector
+
+  // Requests accepted but whose result has not come back.
+  protected cordic_txn pending[$];
+
+  task automatic run();
+    forever begin
+      @(vif.mon_cb);
+      if (vif.rst_n !== 1'b1) continue;
+
+      // Request accepted -> remember what went in.
+      if (vif.mon_cb.req_valid === 1'b1 &&
+          vif.mon_cb.req_ready === 1'b1) begin
+        cordic_txn t = new();
+        t.x0    = vif.mon_cb.req_x;
+        t.y0    = vif.mon_cb.req_y;
+        t.theta = vif.mon_cb.req_theta;
+        pending.push_back(t);
+      end
+
+      // Response accepted -> complete the oldest outstanding request.
+      if (vif.mon_cb.rsp_valid === 1'b1 &&
+          vif.mon_cb.rsp_ready === 1'b1) begin
+        cordic_txn t;
+        if (pending.size() == 0) begin
+          $error("monitor: response with no outstanding request");
+        end else begin
+          t   = pending.pop_front();
+          t.x = vif.mon_cb.rsp_x;
+          t.y = vif.mon_cb.rsp_y;
+          obs_mbx.put(t);
+          cov_mbx.put(t);
+        end
+      end
+    end
+  endtask
+
+endclass : cordic_mon
+\end{svcode}
+
+The \code{pending} queue is the part worth studying. \code{cordic\_rot} takes
+$N+2$ cycles per transaction, and with back-pressure the response can be held
+arbitrarily long, so the request going in and the response coming out are
+separated in time. The monitor therefore cannot form a complete transaction in
+one place: it records the request when the request handshake completes, holds
+it in a queue, and completes it when the response handshake completes. For a
+deeply pipelined \DUT{} with several transactions in flight this is not an
+optimisation, it is the only way the monitor can work at all.
+
+\code{cordic\_txn pending[\$]} is a queue (\cref{sec:toolkit:dyn}), and the choice
+of container is a statement about the protocol. A queue with
+\code{push\_back}/\code{pop\_front} models \emph{in-order} completion, which
+is what \code{cordic\_rot} guarantees. A design that can reorder its responses
+needs an associative array indexed by the transaction tag,
+\code{cordic\_txn pending[int];}, and nothing else in the monitor changes. If
+you pick the wrong one, the monitor will happily pair every response with the
+wrong request and the scoreboard will report a design that computes nonsense.
+
+\begin{gotcha}{\texttt{===} and \texttt{!==}, not \texttt{==} and \texttt{!=}}
+With \code{==}, a comparison involving \code{x} or \code{z} returns
+\code{1'bx}, and \code{if (1'bx)} takes the false branch. Where that bites is
+the negative test: \code{if (sig != 1'b1)} is \emph{false} when \code{sig} is
+\code{x}, so an unknown signal passes a check meant to catch it. \code{===} and
+\code{!==} compare \code{x} as itself and always give a clean 0 or 1. In
+\VHDL{} the trap does not exist, because \code{'X' = '1'} is ordinary equality
+on an enumeration and is simply \code{false}. Use \code{===} and \code{!==}
+everywhere in a monitor.
+\end{gotcha}
+
+\begin{gotcha}{A monitor that skips reset must skip it correctly}
+\code{if (vif.rst\_n !== 1'b1) continue;} discards everything seen while reset
+is asserted. That is right, but it also discards the cycle in which reset
+releases, and it does \emph{not} clear \code{pending}. If the \DUT{} can be
+reset mid-transaction, the queue still holds the orphaned request afterwards
+and it is matched against the first response of the next test, producing a
+mismatch that looks like an arithmetic bug and is a testbench bug. Clear the
+queue on the reset edge.
+\end{gotcha}
+
+\subsection{The scoreboard}
+
+\index{scoreboard}The scoreboard receives observed transactions, computes what
+they should have been, compares, and keeps the statistics. Its reference model
+and its tolerance were the subject of \cref{sec:tb:selfcheck}; what remains is
+the shape of the component.
+
+\begin{svcode}[caption={The scoreboard from \file{tb\_cordic\_pkg.sv}},label={lst:tb:sb}]
+class cordic_sb;
+
+  mailbox #(cordic_txn) obs_mbx;
+  int unsigned n_checked = 0;
+  int unsigned n_failed  = 0;
+  real         worst_err = 0.0;
+
+  function new(mailbox #(cordic_txn) obs_mbx);
+    this.obs_mbx = obs_mbx;
+  endfunction
+
+  task automatic run();
+    forever begin
+      cordic_txn t;
+      real x_ref, y_ref, ex, ey;
+      obs_mbx.get(t);
+      predict(t, x_ref, y_ref);
+      // ... tolerance comparison, exactly as shown earlier ...
+    end
+  endtask
+
+  function void report();
+    $display(" scoreboard: %0d transactions checked, %0d failed",
+             n_checked, n_failed);
+    $display(" worst error: %.2f LSB (tolerance %0d LSB)",
+             worst_err, TOL_LSB);
+    if (n_failed == 0 && n_checked > 0) $display(" *** TEST PASSED ***");
+    else                                $display(" *** TEST FAILED ***");
+  endfunction
+
+endclass : cordic_sb
+\end{svcode}
+
+Two structural observations. First, \code{run()} is an infinite loop that
+blocks on \code{obs\_mbx.get(t)}. It never terminates and it never polls; the
+mailbox suspends the thread until something arrives. This is the standard shape
+for every consumer component in a layered testbench. Second, \code{report()} is
+a \code{function}, not a task, so it consumes no time and can be called from a
+\code{final} block.
+
+For a \DUT{} whose outputs are exact rather than approximate, a scoreboard is
+usually a queue of expected transactions, a queue of observed ones, and a
+comparison of the two fronts. Here the expected value is instead computed on
+demand from the observed stimulus, which works because the model is pure and
+immediate. A reference model with state -- a memory model, a protocol with
+modes -- must be driven by the same transaction stream in the same order, and
+the scoreboard is then also the place where that ordering is enforced.
+
+\subsection{The coverage collector}
+
+\index{functional coverage}\index{covergroup}\cref{sec:toolkit:cov} explains what a
+covergroup declares and why functional coverage answers a different question
+from code coverage. The component here answers a third question: where in a
+testbench does the sampling happen. The scoreboard reports "was the answer
+right?"; the coverage collector reports "what did I actually try?", and a
+regression can be green for weeks while exercising a third of the design.
+
+\begin{svcode}[caption={The coverage collector from \file{tb\_cordic\_pkg.sv}},label={lst:tb:cov}]
+class cordic_cov;
+
+  mailbox #(cordic_txn) cov_mbx;
+
+  angle_t sampled_theta;
+  data_t  sampled_x0;
+
+  covergroup cg_stimulus;
+    option.per_instance = 1;
+
+    cp_quadrant : coverpoint sampled_theta {
+      bins q3_neg = {[-PI_EXT     : -PI_EXT/2 - 1]};
+      bins q4_neg = {[-PI_EXT/2   : -1]};
+      bins zero   = {0};
+      bins q1_pos = {[1           :  PI_EXT/2 - 1]};
+      bins q2_pos = {[PI_EXT/2    :  PI_EXT]};
+    }
+    cp_sign_x : coverpoint sampled_x0 {
+      bins neg  = {[-32768 : -1]};
+      bins zero = {0};
+      bins pos  = {[1 : 32767]};
+    }
+    x_quadrant_sign : cross cp_quadrant, cp_sign_x;
+  endgroup
+
+  function new(mailbox #(cordic_txn) cov_mbx);
+    this.cov_mbx = cov_mbx;
+    cg_stimulus  = new();
+  endfunction
+
+  task automatic run();
+    forever begin
+      cordic_txn t;
+      cov_mbx.get(t);
+      sampled_theta = t.theta;
+      sampled_x0    = t.x0;
+      cg_stimulus.sample();
+    end
+  endtask
+
+endclass : cordic_cov
+\end{svcode}
+
+\begin{gotcha}{A covergroup inside a class is built in the constructor, or not at all}
+\cref{sec:toolkit:cov} notes that a covergroup must be constructed. Inside a class
+there is a further restriction that catches people: the instance may be created
+\emph{only} in that class's \code{function new()}. Forget
+\code{cg\_stimulus = new();} and every \code{sample()} call does nothing, the
+coverage report shows 0\%, and you spend an afternoon convinced the stimulus is
+broken.
+\end{gotcha}
+
+Now the distinction the heading promised. \code{cg\_stimulus} covers
+\emph{stimulus}: it records what the testbench sent, which tells you whether
+the constraints produce the variety you assumed. It says nothing about what the
+\DUT{} did internally. A design can receive every quadrant and still never have
+its saturation logic activate, never stall in \code{ST\_DONE}, and never see
+two requests back to back.
+
+Covering \DUT{} state means sampling signals inside the design, which needs a
+second covergroup in a module, usually clocked and usually bound to the \DUT{}
+(\cref{sec:tb:sva}):
+
+\begin{svcode}[caption={Covering DUT state rather than stimulus},label={lst:tb:covstate}]
+covergroup cg_dut_state @(posedge clk_i);
+  cp_state : coverpoint dut.state_q {
+    bins idle   = {dut.ST_IDLE};
+    bins rotate = {dut.ST_ROTATE};
+    bins done   = {dut.ST_DONE};
+    bins stalled_in_done = (dut.ST_DONE => dut.ST_DONE);
+  }
+  cp_sat : coverpoint (dut.x_q[IW-1:GL] > MAX_DATA ||
+                       dut.x_q[IW-1:GL] < MIN_DATA) {
+    bins saturating = {1'b1};
+    bins normal     = {1'b0};
+  }
+  x_state_sat : cross cp_state, cp_sat;
+endgroup
+\end{svcode}
+
+The \code{(ST\_DONE => ST\_DONE)} bin is a \emph{transition bin}: it is hit
+only when the FSM stays in \code{ST\_DONE} for two consecutive samples, which
+happens only when \code{rsp\_ready} is low. If that bin is empty at the end of
+a regression, the back-pressure thread never actually stalled anything and you
+have not verified the stall path, no matter how green the scoreboard was.
+
+\begin{ruleofthumb}
+Stimulus coverage tells you your constraints work. \DUT{}-state coverage tells
+you your verification works. Write both, and never sign off on stimulus
+coverage alone.
+\end{ruleofthumb}
+
+\subsection{The environment}
+
+\index{environment}The environment owns the components, owns the mailboxes,
+connects them and starts them. It contains no stimulus and no protocol
+knowledge, which is what makes it reusable across every test.
+
+\begin{svcode}[caption={The environment: build, connect, run},label={lst:tb:env}]
+class cordic_env;
+
+  virtual cordic_if vif;
+
+  mailbox #(cordic_txn) req_mbx;
+  mailbox #(cordic_txn) obs_mbx;
+  mailbox #(cordic_txn) cov_mbx;
+
+  cordic_drv drv;
+  cordic_mon mon;
+  cordic_sb  sb;
+  cordic_cov cov;
+
+  function new(virtual cordic_if vif);
+    this.vif = vif;
+    // "build"
+    req_mbx = new();
+    obs_mbx = new();
+    cov_mbx = new();
+    // "connect": the mailboxes are passed to the constructors
+    drv     = new(vif, req_mbx);
+    mon     = new(vif, obs_mbx, cov_mbx);
+    sb      = new(obs_mbx);
+    cov     = new(cov_mbx);
+  endfunction
+
+  task automatic run();
+    fork
+      mon.run();
+      sb.run();
+      cov.run();
+    join_none
+    drv.run();
+  endtask
+
+  function void report();
+    sb.report();
+    cov.report();
+  endfunction
+
+endclass : cordic_env
+\end{svcode}
+
+Three steps happen here, in a strict order. \textbf{Build}: every object is
+constructed, nothing is connected and nothing runs. \textbf{Connect}: the
+mailboxes are handed to the components that use them, which here is done by
+passing them to the constructors, so build and connect are textually merged; in
+a larger testbench with optional components you separate them, because you
+cannot connect two components until both exist. \textbf{Run}: the consumer
+threads are started with \code{join\_none} so they run in the background, and
+the driver is started last.
+
+Those three steps, done by hand here, are exactly what UVM automates. UVM's
+\code{build\_phase} constructs components top-down, its \code{connect\_phase}
+wires analysis ports bottom-up, its \code{run\_phase} starts the threads. The
+mechanism is different, being a factory, a configuration database and a phasing
+engine, but the structure is the one you are reading. When \cref{ch:uvm} introduces
+those three method names, you will already know what belongs in each.
+
+\begin{notebox}{Why the phases have to be separate}
+Two components cannot be connected until both have been constructed, and a
+component cannot be constructed after another component has already started
+running and begun looking for it. A single-phase design therefore only works
+when the component graph happens to be a tree that you can build in dependency
+order by hand. As soon as there is a cycle -- a scoreboard that needs a handle
+to the coverage collector and vice versa -- you need construction to be
+complete before connection begins. That, and nothing more mysterious, is why
+UVM has phases.
+\end{notebox}
+
+\subsection{The test}
+
+\index{test}The test is the top of the pyramid: it decides what varies from
+run to run. Number of transactions, which constraints are active, which
+directed corner cases to add, how much back-pressure, which seed.
+
+\begin{svcode}[caption={The top-level module and one test},label={lst:tb:top}]
+`timescale 1ns/1ps
+
+module tb_cordic_top;
+
+  import cordic_pkg::*;
+  import tb_cordic_pkg::*;
+
+  logic clk = 1'b0;
+  always #5ns clk = ~clk;
+
+  cordic_if intf (.clk(clk));
+
+  cordic_rot dut (
+    .clk_i (clk),                  .rst_ni      (intf.rst_n),
+    .req_valid_i (intf.req_valid), .req_ready_o (intf.req_ready),
+    .req_x_i (intf.req_x),         .req_y_i     (intf.req_y),
+    .req_theta_i (intf.req_theta),
+    .rsp_valid_o (intf.rsp_valid), .rsp_ready_i (intf.rsp_ready),
+    .rsp_x_o (intf.rsp_x),         .rsp_y_o     (intf.rsp_y)
+  );
+
+  cordic_env  env;
+  int unsigned n_txn = 200;
+
+  initial begin
+    if (!$value$plusargs("NTXN=%d", n_txn)) n_txn = 200;
+
+    env = new(intf);
+    env.drv.reset();
+    env.run();
+
+    // directed corners first: they are the ones you can reason about
+    env.send_directed(X0_UNIT,  0,  angle_t'(0));
+    env.send_directed(X0_UNIT,  0,  angle_t'(PI_EXT));
+    env.send_directed(X0_UNIT,  0,  angle_t'(-PI_EXT));
+    env.send_directed(X0_UNIT,  0,  angle_t'(PI_EXT/2));
+    env.send_directed(0,        0,  angle_t'(1234));
+
+    // then the random bulk
+    env.send_random(n_txn);
+
+    env.wait_drain(n_txn + 5, 200 * (n_txn + 5));
+    env.report();
+    $finish;
+  end
+
+  // independent watchdog
+  initial begin
+    #5ms;
+    $fatal(1, "WATCHDOG: test did not finish");
+  end
+
+endmodule : tb_cordic_top
+\end{svcode}
+
+The stimulus is in the test, not in the environment, and that separation is not
+stylistic. The environment is the part you reuse: the same driver, monitor,
+scoreboard and coverage collector serve every test of this block, and serve it
+again when the block is instantiated inside a larger system. The stimulus is
+different in every test, by definition. Put a \code{send\_random(1000)} call
+inside the environment and you have welded one particular test into the
+reusable part; the next test then has to accept it or copy the whole
+environment.
+
+Note the directed cases coming first. Random stimulus finds bugs you did not
+think of; directed stimulus proves the cases you can reason about by hand.
+Start with a handful of vectors whose correct answer you can compute on paper,
+so that when the random bulk fails you already know the basic path works.
+
+% ===========================================================================
+\section{The Mechanics That Hold It Together}
+\label{sec:tb:mech}
+% ===========================================================================
+
+\cref{ch:toolkit} gave you the constructs the layered testbench is built from:
+handles, mailboxes, semaphores, events, dynamic threads and the lifetime
+rules that govern them. This section is about the four decisions the testbench
+makes with them, and about the one mechanism \cref{ch:toolkit} could not
+cover, because it belongs to neither the class world nor the module world but
+to the join between them.
+
+\subsection{The virtual interface}
+
+\index{virtual interface}Start with that join, because it is a genuine
+problem. \code{cordic\_if} is an \emph{interface instance}:
+elaborated, present in the module hierarchy, with a static name
+\code{tb\_cordic\_top.intf}. \code{cordic\_drv} is a \emph{class}: created at
+run time, living on the heap, with no position in the hierarchy at all. A class
+cannot hold a hierarchical reference to something that might not exist, and
+there might be two instances of the interface, or none.
+
+A \code{virtual interface} is the bridge. It is a \emph{handle} to an interface
+instance, of type \code{virtual cordic\_if}, and it can be stored in a class
+member, passed to a function, and assigned at run time.
+
+\begin{svcode}[caption={How the interface handle reaches the classes},label={lst:tb:vif}]
+// in the top-level module: a static instance, elaborated at time 0
+cordic_if intf (.clk(clk));
+
+// in the class: a handle, null until someone assigns it
+class cordic_drv;
+  virtual cordic_if vif;
+  function new(virtual cordic_if vif, mailbox #(cordic_txn) req_mbx);
+    this.vif = vif;             // the handle is copied in here
+  endfunction
+endclass
+
+// back in the module: the assignment
+initial env = new(intf);        // `intf' converts to `virtual cordic_if'
+\end{svcode}
+
+The whole mechanism is that one argument. \code{new(intf)} passes the static
+interface instance where a virtual interface handle is expected, and the tool
+performs the conversion. The environment stores it and passes it on to the
+driver and the monitor. Nothing else is needed for a testbench of this size.
+
+\begin{gotcha}{A null virtual interface fails at run time, not compile time}
+\code{virtual cordic\_if vif;} initialises to \code{null}. If you forget to
+assign it, the first \code{vif.drv\_cb.req\_valid <= 1'b1;} is a null-handle
+dereference: a fatal run-time error with a message like "Illegal reference
+through a null virtual interface", pointing at a line that looks perfectly
+correct. This is one of the two most common first-day errors in a class-based
+testbench (the other is forgetting \code{cg = new()}). If a driver appears to
+do nothing at all, check the handle first.
+\end{gotcha}
+
+\begin{notebox}{Virtual interfaces, modports and the configuration database}
+Two refinements you will meet later. A virtual interface can be typed to a
+modport: \code{virtual cordic\_if.drv vif;} restricts the handle to the
+driver's view, so an accidental write to a monitor-only signal is a compile
+error; tool support is good but not universal, which is why
+\file{tb\_cordic\_pkg.sv} uses the plain form. And UVM replaces the constructor argument with a lookup in a configuration
+database (\cref{ch:uvm}), so that a deeply nested component can find its
+interface without every component above it passing the handle down. For four
+components, the constructor argument is clearer.
+\end{notebox}
+
+\subsection{Why the components talk through mailboxes}
+
+\index{mailbox}The mailbox itself is \cref{sec:toolkit:fork}'s business. What belongs
+here is why there is one at all, because the obvious alternative looks
+simpler: the monitor could call \code{sb.check(t)} directly and save an object,
+a thread and a blocking call.
+
+The reason is that a direct call is a \emph{dependency}. A monitor that calls
+\code{sb.check()} needs a handle to the scoreboard, needs the scoreboard to
+exist before the monitor starts, and cannot be attached to a testbench that has
+no scoreboard, or two of them, or a scoreboard that wants to think for a while
+before answering. A monitor that calls \code{obs\_mbx.put(t)} needs none of
+those things. It needs a mailbox handle, which it was given at construction,
+and it does not care who is on the other end, whether anyone is, or how long
+they take. That is the whole of what makes the monitor reusable: it is the
+\emph{connection} that is configurable, not the monitor.
+
+Look back at \cref{lst:tb:env} with that in mind: three mailboxes created and
+passed to four constructors are the entire wiring diagram of the testbench.
+When \cref{ch:uvm} replaces the mailbox with an analysis port it takes the same
+idea one step further, letting the monitor broadcast once to any number of
+subscribers without naming one of them.
+
+Bounded or unbounded is a real decision, and it is the one mailbox question
+this chapter answers rather than \cref{ch:toolkit}. An unbounded mailbox never
+blocks the producer, so \code{send\_random(10000)} in \cref{lst:tb:top} returns
+almost immediately with ten thousand objects queued in memory. A bounded one
+applies natural back-pressure to the generator, which then produces
+transactions at the rate the \DUT{} consumes them. For a testbench of this size
+either is fine; for a long random run with large transactions, bound it.
+
+\begin{gotcha}{An unbounded mailbox turns a deadlock into a memory leak}
+If the driver thread dies, from a null handle, a fatal error or a
+\code{disable} that caught more than you meant, a bounded mailbox blocks the
+generator almost immediately and you notice. An unbounded one lets the
+generator run to completion, so the test proceeds to \code{wait\_drain}, sits
+there until the timeout, and reports a drain failure that gives no hint that
+the driver is dead. Bounding the request mailbox to four or eight entries makes
+a dead consumer visible within a few transactions.
+\end{gotcha}
+
+The other two primitives of \cref{sec:toolkit:fork} have narrower jobs here. A
+\code{semaphore} belongs where two stimulus threads want the same physical
+resource, a named \code{event} where one thread announces a one-off milestone
+such as reset completion. Neither appears in \file{tb\_cordic\_pkg.sv}, because
+one driver owns the interface and the reset is sequential with the stimulus. If
+you reach for a semaphore in a block-level testbench, check first whether the
+real answer is a second mailbox.
+
+\subsection{Threads, and where \texttt{disable} bites}
+
+\index{fork!join\_none}The layered testbench uses two of the fork endings from
+\cref{sec:toolkit:fork} and no others. \code{join\_none} is what every component's
+\code{run()} uses: start a background thread and give control back to the
+caller, which is what lets \code{cordic\_env::run()} start three consumers and
+then the driver without ever blocking. \code{join\_any} with \code{disable fork} is the timeout
+idiom, and it is the one that needs a warning at the point of use.
+
+\begin{gotcha}{\texttt{disable fork} kills every descendant, not just the last fork}
+\code{disable fork} terminates all active descendants of the \emph{current}
+thread, which includes threads started by a \code{join\_none} several calls
+ago. The classic damage: a task uses the timeout idiom, and the
+\code{disable fork} silently kills the monitor that an earlier
+\code{env.run()} left running. The scoreboard then receives nothing, the test
+finishes with \code{n\_checked == 0}, and the naive verdict logic reports a
+pass. Contain the damage by wrapping the timeout in its own
+\code{fork ... join}, so the \code{disable} only sees that block's children:
+
+\begin{svcode}
+fork begin : timeout_scope
+  fork
+    wait_for_response();
+    #1us;
+  join_any
+  disable fork;          // only kills children of timeout_scope
+end join
+\end{svcode}
+\end{gotcha}
+
+\subsection{Static versus automatic, at the fork}
+
+\index{automatic lifetime}\index{static lifetime}\cref{sec:toolkit:lifetime} states the
+rule: a task declared in a module, interface or package has \emph{static}
+lifetime unless you write \kw{automatic}, so one copy of its locals is shared
+by every concurrent call. The rule is easy to read and easy to forget. Here is
+what it does the first time you fork in a loop, which is where a testbench
+meets it.
+
+\begin{svcode}[caption={The bug: all four threads print 4},label={lst:tb:staticbug}]
+task print_after(int n);      // `int n' is STATIC here
+  #(n * 10ns);
+  $display("thread %0d at %0t", n, $time);
+endtask
+
+initial begin
+  for (int i = 1; i <= 4; i++) begin
+    fork
+      print_after(i);         // four concurrent calls, ONE copy of n
+    join_none
+  end
+end
+\end{svcode}
+
+All four calls share the single static \code{n}. The first sets it to 1 and
+suspends at the delay, the second sets it to 2 and suspends, and by the time
+any of them wakes up \code{n} is 4. The output is four identical lines, all
+saying \code{thread 4}, all at the same time, and the testbench appears to have
+started one thread instead of four. There are two fixes and you want both.
+
+\begin{svcode}[caption={The fix: automatic task, automatic loop variable},label={lst:tb:staticfix}]
+task automatic print_after(int n);   // each call gets its own n
+  #(n * 10ns);
+  $display("thread %0d at %0t", n, $time);
+endtask
+
+initial begin
+  for (int i = 1; i <= 4; i++) begin
+    automatic int k = i;             // a fresh k per iteration
+    fork
+      print_after(k);
+    join_none
+  end
+end
+\end{svcode}
+
+\kw{automatic} on the task gives every invocation its own arguments and locals;
+\code{automatic int k = i;} inside the loop body gives every \emph{iteration}
+its own variable to capture the counter into. Both are needed, because without
+the second the forked thread reads \code{i} after the loop has advanced and you
+get the same symptom for a different reason.
+
+\begin{gotcha}{Forking in a loop without \texttt{automatic}}
+The symptom is always the same and always misleading: $N$ threads that all
+behave as if they had received the last value. If you ever see "my four drivers
+are all sending transaction 4", this is it, and it is worth recognising on
+sight because nothing in the log points at the loop. Note that everything
+declared inside a \code{class} is already automatic, which is why the layered
+testbench is far less exposed to this than the flat one you started with.
+\end{gotcha}
+
+\subsection{Ending a test that contains \texttt{forever} loops}
+
+\index{drain}The monitor, the scoreboard and the coverage collector all run
+\code{forever}. None of them will ever finish. So what decides that the test is
+over?
+
+The answer, in a hand-built testbench, is a two-part protocol: a
+\emph{drain} condition and a \emph{timeout}. The drain condition is a
+statement about the testbench's own bookkeeping, "every transaction I sent has
+been checked", and the timeout is the guarantee that the wait terminates
+even when the condition never becomes true. That is precisely
+\code{wait\_drain()} in \cref{lst:tb:drain}: it polls \code{sb.n\_checked}
+against the number sent, on every clock, up to a cycle limit, and calls
+\code{\$fatal} if the limit is reached.
+
+Once \code{wait\_drain()} returns, the test calls \code{report()} and
+\code{\$finish}, which terminates every remaining thread including the three
+\code{forever} loops. The \code{final} block, if there is one, still runs.
+
+Be careful with the limit. \code{wait\_drain(n, 200*n)} allows 200 cycles per
+transaction, which is generous for a CORDIC that takes 16. Add a test that
+stalls \code{rsp\_ready} for a thousand cycles, or raise \code{ITER} to 32, and
+the same limit becomes marginal: the test starts failing intermittently with a
+drain timeout that reads exactly like a \DUT{} bug. Derive the limit from the
+design's real latency, or use the activity watchdog of
+\cref{lst:tb:watchdog2}.
+
+\begin{notebox}{This is the problem UVM's objections solve}
+Every component in a UVM testbench can \code{raise\_objection} when it starts
+something that must not be interrupted and \code{drop\_objection} when it is
+done; the phase ends when the count reaches zero. That is a distributed version
+of \code{wait\_drain}: instead of one place in the test knowing how many
+transactions are outstanding, each component states its own condition and the
+framework computes the conjunction. \code{set\_drain\_time()} adds a settling
+period, and a global timeout makes a stuck objection fail instead of hang. Same
+two-part protocol, bookkeeping moved into the library.
+\end{notebox}
+
+% ===========================================================================
+\section{Assertions In and Around the Testbench}
+\label{sec:tb:sva}
+% ===========================================================================
+
+\index{assertion!immediate}\index{assertion!concurrent}\cref{sec:toolkit:sva}
+covered the syntax of SystemVerilog Assertions, the sampling semantics and the
+operator set. This section answers the question that follows: given a working
+testbench and a set of properties, where does each one belong. The answer is
+not ``in the \RTL{}'', and it is not ``all in one checker file'' either.
+
+\subsection{Immediate assertions: checking code}
+
+An immediate assertion belongs in checking code, and its most valuable use is
+one nobody teaches: checking the testbench.
+
+\begin{svcode}
+// inside a scoreboard or a monitor
+a_no_orphan : assert (pending.size() > 0)
+  else $error("response with no outstanding request");
+
+a_range : assert (t.theta >= -PI_EXT && t.theta <= PI_EXT)
+  else $fatal(1, "generator produced an illegal angle: %0d", t.theta);
+\end{svcode}
+
+The second one is worth a comment. It checks the \emph{testbench}, not the
+\DUT{}: if a constraint is wrong and the generator produces an out-of-range
+angle, the \DUT{}'s own assertion will fire and you will spend an hour
+suspecting the design. An assertion on your own stimulus, at the point where
+the stimulus is produced, turns that hour into a line number.
+
+\subsection{Concurrent assertions: protocol properties}
+
+A concurrent assertion belongs wherever a rule about the \emph{protocol} is
+stated, which is usually not in the testbench at all. \code{cordic\_rot}
+carries one, because the rule is part of its published contract:
+
+\begin{svcode}[caption={The request-stability property from \file{cordic\_rot.sv}},label={lst:tb:prop}]
+property p_req_stable;
+  @(posedge clk_i) disable iff (!rst_ni)
+    (req_valid_i && !req_ready_o) |=>
+      $stable(req_x_i) && $stable(req_y_i) && $stable(req_theta_i);
+endproperty
+
+a_req_stable : assert property (p_req_stable)
+  else $error("cordic_rot: request payload changed while stalled");
+\end{svcode}
+
+Read it as a sentence: on every rising edge of \code{clk\_i}, ignoring anything
+that happens while reset is asserted, if \code{req\_valid\_i} is high and
+\code{req\_ready\_o} is low in this cycle, then in the \emph{next} cycle
+(\code{|=>}, the non-overlapping implication) the three payload signals must be
+unchanged. That is the valid/ready stability rule, stated once, checked on
+every cycle of every simulation.
+
+Checking the same thing procedurally needs a process, a set of shadow
+registers, a condition and the discipline to keep all of it in step with the
+protocol:
+
+\begin{rosetta}
+\begin{rleft}
+-- VHDL-2008: a process, by hand
+stab : process (clk) is
+  variable px : unsigned(15 downto 0);
+begin
+  if rising_edge(clk) then
+    if req_valid = '1' and
+       req_ready = '0' then
+      assert req_x = px
+        report "payload changed"
+        severity error;
+    end if;
+    px := req_x;
+  end if;
+end process stab;
+\end{rleft}
+\begin{rright}
+// SVA: one property
+property p_stable;
+  @(posedge clk)
+    disable iff (!rst_n)
+    (req_valid && !req_ready)
+      |=> $stable(req_x);
+endproperty
+a_stable : assert property
+  (p_stable)
+  else $error("payload changed");
+\end{rright}
+\end{rosetta}
+
+\subsection{\texttt{bind}: checkers without touching the RTL}
+
+\index{bind}Assertions inside the \DUT{} are right when they are part of the design
+contract, as \code{a\_req\_stable} is. They are wrong when they belong to
+verification: they clutter the source, they need an \code{`ifndef SYNTHESIS}
+guard, and a designer will eventually delete them. \refdesignbook
+introduced \code{bind}, which attaches a module instance to another module from
+the outside without editing the target. This is its main use.
+
+\begin{svcode}[caption={A protocol checker bound to the DUT},label={lst:tb:bind}]
+// ---- a standalone checker module, in its own file ---------------------
+module cordic_checker
+  import cordic_pkg::*;
+(
+  input logic   clk_i, rst_ni,
+  input logic   req_valid_i, req_ready_o,
+  input logic   rsp_valid_o, rsp_ready_i,
+  input angle_t req_theta_i
+);
+
+  // valid must never drop before ready
+  a_valid_held : assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (req_valid_i && !req_ready_o) |=> req_valid_i)
+    else $error("req_valid dropped before req_ready");
+
+  // a response must eventually arrive after an accepted request
+  a_eventual_rsp : assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (req_valid_i && req_ready_o) |-> ##[1:100] rsp_valid_o)
+    else $error("no response within 100 cycles");
+
+  // prove that the interesting corner really happened
+  c_theta_pi : cover property (@(posedge clk_i) disable iff (!rst_ni)
+      (req_valid_i && req_ready_o && req_theta_i == angle_t'(PI_EXT)));
+
+endmodule : cordic_checker
+
+// ---- attach it, from the testbench file, without editing the DUT ------
+bind cordic_rot cordic_checker u_chk (
+  .clk_i       (clk_i),
+  .rst_ni      (rst_ni),
+  .req_valid_i (req_valid_i),
+  .req_ready_o (req_ready_o),
+  .rsp_valid_o (rsp_valid_o),
+  .rsp_ready_i (rsp_ready_i),
+  .req_theta_i (req_theta_i)
+);
+\end{svcode}
+
+The \code{bind} statement names a target module \emph{type}, so every instance
+of \code{cordic\_rot} anywhere in the design gets a checker, including instances
+buried inside a system-level testbench you have not written yet; you can also
+bind to a single instance by naming it. The port connections are written in the
+scope of the target, so \code{clk\_i} refers to the target's own \code{clk\_i}.
+
+Because the port expressions are elaborated in the target's scope, a
+mismatched width is silently truncated or extended exactly as an ordinary port
+connection would be. Write every connection by name and check the widths.
+
+\subsection{\texttt{cover property}: proving a corner happened}
+
+\index{cover property}The \code{c\_theta\_pi} statement in \cref{lst:tb:bind}
+is a \code{cover property}, and it exists to answer a question the assertions
+cannot: did the corner they guard ever happen? If the count is zero, no
+assertion about that corner ever got the chance to fail, and a green run means
+nothing. This is the cheapest form of coverage in the language and it is
+criminally underused:
+
+\begin{svcode}
+// did back-pressure ever actually stall a response?
+c_rsp_stalled : cover property (
+  @(posedge clk_i) disable iff (!rst_ni)
+    rsp_valid_o && !rsp_ready_i);
+
+// did two requests ever arrive back to back?
+c_back_to_back : cover property (
+  @(posedge clk_i) disable iff (!rst_ni)
+    (req_valid_i && req_ready_o) ##1 (req_valid_i && req_ready_o));
+\end{svcode}
+
+\begin{ruleofthumb}
+For every \code{assert property}, ask whether its antecedent ever becomes true.
+If you cannot prove it from the log, write the matching \code{cover property}.
+\end{ruleofthumb}
+
+% ===========================================================================
+\section{Running It}
+\label{sec:tb:run}
+% ===========================================================================
+
+\index{QuestaSim}A testbench you cannot run reproducibly is not finished. This
+section gives the commands for \tool{QuestaSim}, which is what the department
+licenses, and one line each for the two other commercial simulators.
+\refsimulationbook covers the open-source route, which has different
+constraints: no constrained random, no functional coverage, and a compile-then-run
+model rather than an interpreted one.
+
+\subsection{The four commands}
+
+\begin{shcode}
+# 1. create and map a working library (once per project)
+vlib work
+vmap work work
+
+# 2. compile.  Order matters: packages before the things that import them.
+vlog -sv -work work \
+     +incdir+../rtl \
+     ../rtl/cordic_pkg.sv \
+     ../rtl/cordic_if.sv \
+     ../rtl/cordic_rot.sv \
+     ../tb/tb_cordic_pkg.sv \
+     ../tb/tb_cordic_top.sv
+
+# 3. optimise, keeping visibility for debug
+vopt -o tb_opt +acc=rnb work.tb_cordic_top
+
+# 4. run, batch mode, fixed seed
+vsim -c -sv_seed 12345 +NTXN=500 -do run.do work.tb_opt
+\end{shcode}
+
+Four things in that sequence are not obvious if your only \tool{QuestaSim}
+experience is \code{vcom} and \code{vsim} on \VHDL{}. \code{-sv} tells
+\code{vlog} to compile as \SV{}
+rather than Verilog-2001; without it, \code{logic}, \code{always\_ff} and every
+class is a syntax error. \code{vopt} with \code{+acc=rnb} keeps registers, nets
+and blocks visible: \tool{QuestaSim} optimises aggressively by default and
+removes signals that no longer need to exist, which makes them invisible in the
+waveform and unreachable from a \code{bind} or a hierarchical reference. It
+costs simulation speed, so a regression that does not need waveforms should
+drop it. \code{-c} runs without the GUI, and \code{-sv\_seed} sets the seed for
+the constraint solver and for \code{\$urandom}; \code{-sv\_seed random} picks a
+different one each run and prints it, which is what a nightly regression wants.
+Finally, \code{+NTXN=500} is a \emph{plusarg}: a command-line argument the
+simulation itself can read.
+
+\subsection{Plusargs}
+
+\index{plusarg}\index{\$value\$plusargs}A plusarg is how you change a test's
+behaviour without recompiling. \SV{} provides two system functions.
+
+\begin{svcode}[caption={Reading the command line from inside the simulation},label={lst:tb:plusargs}]
+int unsigned n_txn      = 200;
+int unsigned stall      = 25;
+string       vector_file = "";
+bit          verbose    = 0;
+
+initial begin
+  void'($value$plusargs("NTXN=%d",   n_txn));
+  void'($value$plusargs("STALL=%d",  stall));
+  void'($value$plusargs("VEC=%s",    vector_file));
+  verbose = $test$plusargs("VERBOSE");
+  $display("config: NTXN=%0d STALL=%0d VEC=%s VERBOSE=%0b",
+           n_txn, stall, vector_file, verbose);
+end
+\end{svcode}
+
+\code{\$test\$plusargs} returns 1 if the named argument appeared on the command
+line at all. \code{\$value\$plusargs} looks for an argument starting
+\code{+NTXN=}, parses the rest with the given format, writes it into
+\code{n\_txn} and returns 1; if the argument is absent it returns 0 and leaves
+the variable alone, which is why initialising the variable at its declaration
+is essential.
+
+\begin{gotcha}{\texttt{\$value\$plusargs} leaves the variable untouched on failure}
+If the plusarg is missing, or present but unparseable, the target variable
+keeps whatever it had. Declare it with a sensible default on the same line, and
+print the resulting configuration at the start of every run. A run whose log
+does not state its own configuration cannot be reproduced, and a regression
+result you cannot reproduce is worth very little.
+\end{gotcha}
+
+\begin{notebox}{UVM's plusargs are the same mechanism}
+\code{+UVM\_TESTNAME=my\_test}, \code{+UVM\_VERBOSITY=UVM\_HIGH} and
+\code{+uvm\_set\_config\_int=...} are ordinary plusargs read with
+\code{\$value\$plusargs} inside the UVM library, exactly as in
+\cref{lst:tb:plusargs}. There is no simulator support for UVM specifically; it
+is a package that reads the same command line you can read.
+\end{notebox}
+
+\subsection{A minimal \texttt{.do} file}
+
+\begin{tclcode}
+# run.do -- batch execution with a non-zero exit code on failure
+onerror {quit -code 3}
+
+# log everything recursively so a failure can be debugged from the WLF
+log -r /*
+
+run -all
+
+# TESTSTATUS: 0 = no errors, 1 = warning, 2 = error, 3 = fatal
+quit -code [expr {[coverage attribute -name TESTSTATUS -concise] > 1 ? 1 : 0}]
+\end{tclcode}
+
+The last line matters more than it looks. A simulation that printed a hundred
+\code{\$error} messages still exits with status 0 unless you make it do
+otherwise, and a regression script that only checks the exit code records it as
+a pass. Either translate the simulator's error count into an exit code as
+above, or have your script grep the log for your own \code{*** TEST FAILED ***}
+marker. Do both.
+
+\subsection{Waveforms: the dump file is not the viewer}
+\label{sec:tb:waves}
+
+\index{waveform}\index{VCD}\index{GTKWave}\index{Surfer}Two separate things are
+involved in looking at a waveform, and confusing them is the reason students
+ask why their \code{.vcd} will not open. One is the \emph{dump file}, written
+by the simulator, which records who changed and when. The other is the
+\emph{viewer}, a separate program that draws it.
+
+\tool{QuestaSim} writes its own format, a \file{.wlf} file, and shows it in its
+own wave window. \code{log -r /*} in the \code{do} file above is what fills it;
+\code{add wave -r /*} is what puts signals on the screen. Run interactively
+with \code{vsim -voptargs="+acc=rnb"} and the whole loop stays inside one tool,
+which is the fastest way to debug and the reason the department licenses it.
+
+The portable route is a \index{\$dumpfile}\code{\$dumpfile}/\code{\$dumpvars}
+pair in the testbench itself. It is plain IEEE 1800, so it works in every
+simulator, \tool{QuestaSim} included, and it writes \emph{VCD}: the IEEE 1364
+text format that every tool on earth can read. Gate it behind a plusarg,
+because a VCD is enormous:
+
+\begin{svcode}
+initial if ($test$plusargs("DUMP")) begin
+  $dumpfile("tb_cordic.vcd");
+  $dumpvars(1, tb_cordic_top.dut);   // this scope only, not everything
+end
+\end{svcode}
+
+The first argument to \code{\$dumpvars} is a depth: \code{1} means the named
+scope only, \code{2} adds its children, and \code{0} means everything below it,
+recursively. \code{\$dumpvars(0, tb\_cordic\_top)} on a toy accumulator costs
+nothing. The same line on a real design, run for a few million cycles, produces
+a file measured in gigabytes, and you will spend longer waiting for the viewer
+to index it than you spent on the simulation. Name the scope you care about.
+
+A VCD opens in \tool{GTKWave}, the long-standing open-source viewer, and in
+\tool{Surfer}, which is newer, has a modern interface and runs in a browser as
+well as natively. \tool{QuestaSim} will also read a VCD if somebody hands you
+one. Where the flow allows it, prefer \emph{FST}, a compressed binary format
+that is far smaller than VCD and far faster to open; \tool{Verilator} writes it
+with \code{-{}-trace-fst} (\refsimulationbook) and both viewers read it. For
+anything longer than a few thousand cycles, FST is what you want.
+
+\begin{ruleofthumb}
+Dump selectively and dump late. A plusarg-gated \code{\$dumpvars} on one scope,
+turned on only for the seed that failed, beats a nightly regression that writes
+a gigabyte per run and is never looked at.
+\end{ruleofthumb}
+
+\subsection{Coverage, and the other simulators}
+
+\begin{shcode}
+# collect coverage: same flags on vlog, vopt and vsim
+vlog -sv +cover=bcefsx -work work ../rtl/*.sv ../tb/*.sv
+vopt -o tb_opt +cover=bcefsx +acc=rnb work.tb_cordic_top
+vsim -c -coverage -sv_seed random work.tb_opt \
+     -do "run -all; coverage save run1.ucdb; quit"
+vcover merge merged.ucdb run*.ucdb
+vcover report -details -html -htmldir covhtml merged.ucdb
+\end{shcode}
+
+\code{+cover=bcefsx} asks for branch, condition, expression, FSM, statement and
+extended toggle coverage. Those are the \emph{code} coverage metrics of
+\cref{sec:toolkit:cov}, computed from the \RTL{} without any help from you. The
+functional coverage from \cref{lst:tb:cov} lands in the same UCDB, and the
+merge report shows both. Read them as answers to different questions.
+
+The other two commercial simulators use a single compile-and-run command.
+\tool{Cadence Xcelium}: \code{xrun -sv -access +rwc -seed 12345 +NTXN=500
+*.sv}. \tool{Synopsys VCS}: \code{vcs -sverilog -full64 -debug\_access+all -o
+simv *.sv} followed by \code{./simv +ntb\_random\_seed=12345 +NTXN=500}. The
+plusarg spelling for the seed is the only genuinely tool-specific thing in this
+chapter.
+
+\begin{tipbox}{Put all of this in a Makefile on day one}
+Nobody remembers \code{+acc=rnb} at eleven at night. A four-target Makefile
+(\code{comp}, \code{sim}, \code{wave}, \code{cov}) that hides the flags is
+twenty minutes of work and it is the difference between a testbench that gets
+run and one that gets run once. \refsimulationbook gives a complete one.
+\end{tipbox}
+
+% ===========================================================================
+\section{The Coverage-Closure Loop}
+\label{sec:tb:closure}
+% ===========================================================================
+
+\index{coverage closure}\cref{ch:toolkit} names this loop in a sentence. It is
+worth a section, because it is the daily working rhythm of the whole activity
+and because every step of it has a way of going wrong. A constrained-random
+testbench is not a test, it is a \emph{machine for producing tests}. Running it
+once proves almost nothing. Running it correctly is a loop:
+
+\begin{enumerate}
+\item \textbf{Run with $N$ different seeds.} Ten seeds of a thousand
+  transactions is a better use of an hour than one seed of ten thousand,
+  because a bug that depends on a rare ordering is more likely to appear in ten
+  independent sequences.
+\item \textbf{Merge the coverage databases} from all the runs into one.
+\item \textbf{Look at the holes.} Which bins are empty? Which crosses have zero
+  hits? Which \code{cover property} never fired?
+\item \textbf{Classify each hole.} Reachable but never produced by the
+  constraints: adjust the constraints or add a directed test. Unreachable by
+  construction: exclude it with \code{ignore\_bins} and a comment saying why.
+  Reachable and \emph{should not be}: you have found a bug in the
+  specification or in your understanding of it, which is the most valuable
+  outcome available.
+\item \textbf{Repeat} until the remaining holes are all excluded with reasons.
+\end{enumerate}
+
+What this looks like in practice, honestly, is less tidy. The first run
+typically reaches 60 to 80\% functional coverage almost immediately, because
+the constraints were written by someone thinking about the interesting cases.
+The next 15\% takes a day of adjusting distributions. The last few percent are
+individually painful: each is a corner the constraints cannot reach without
+being rewritten, and the usual resolution is a small directed test that forces
+it, added to the test list with a comment.
+
+Two failure modes are worth naming, because both feel like progress. The first
+is chasing coverage instead of bugs: it is entirely possible to reach 100\%
+functional coverage on a design with a serious bug, if the covergroups describe
+the stimulus you sent rather than the behaviour you needed. Coverage measures
+what you tried; the scoreboard measures whether it worked, and a green coverage
+report with a weak scoreboard is worse than a red one because it stops people
+looking. The second is excluding holes to close the report.
+\code{ignore\_bins} exists for genuinely unreachable states, and every use of
+it should carry a comment a reviewer can check. An exclusion added the week
+before tape-out, with no comment, is how a bug ships.
+
+\begin{ruleofthumb}
+Coverage tells you where you have not looked. It never tells you that the
+design is correct. Only the checker does that, and only if you have proved the
+checker can fail.
+\end{ruleofthumb}
+
+\begin{tipbox}{A regression script in five lines}
+\begin{shcode}
+for seed in $(seq 1 20); do
+  vsim -c -sv_seed $seed +NTXN=1000 \
+       -do "run -all; coverage save cov_$seed.ucdb; quit" work.tb_opt \
+    | tee log_$seed.txt
+done
+grep -l "TEST FAILED" log_*.txt
+vcover merge merged.ucdb cov_*.ucdb && vcover report -details merged.ucdb
+\end{shcode}
+That is the whole methodology. Everything a commercial regression manager adds
+is bookkeeping on top of these three commands.
+\end{tipbox}
+
+\begin{notebox}{Where this chapter stops and \cref{ch:uvm} starts}
+Nothing in \file{tb\_cordic\_pkg.sv} needs UVM. It is about 470 lines and does
+everything described in this chapter. What UVM adds is standardisation: the
+same six components with agreed names and base classes, a factory so a test can
+substitute one component without editing the environment, a configuration
+database so a handle can reach a deeply nested component, phasing, and
+objections. Every one of those solves a problem you have now met by hand. That
+is why this chapter comes first.
+\end{notebox}
+
+% ===========================================================================
+\section{Checklist}
+\label{sec:tb:checklist}
+% ===========================================================================
+
+\textbf{Translating a \VHDL{} testbench}
+
+\begin{itemize}
+\item \code{`timescale 1ns/1ps} at the top of every file, or \code{timeunit} in
+  every module and package. Never inherit it.
+\item A \VHDL{} process ending in \code{wait;} becomes an \code{initial} block.
+  A process that loops forever becomes \code{always} or \code{forever}.
+\item \code{clk <= not clk after 5 ns;} becomes \code{always \#5ns clk =
+  \textasciitilde clk;}. Blocking assignment, and initialise \code{clk} at
+  declaration.
+\item \code{report ... severity note} becomes \code{\$display}; \code{severity
+  error} becomes \code{\$error}; \code{severity failure} becomes
+  \code{\$fatal(1, ...)}.
+\item \code{assert c report m severity error} becomes \code{a\_name: assert (c)
+  else \$error(m)}. Always label it, always give a message with values in it.
+\item End with \code{\$finish}, not by starving the event queue.
+\end{itemize}
+
+\textbf{Never do this}
+
+\begin{itemize}
+\item Never drive a \DUT{} input with \code{=} from a block triggered by the
+  same clock edge the \DUT{} samples on. Use \code{<=}, or better, a clocking
+  block.
+\item Never mix \code{=} and \code{<=} on the same signal.
+\item Never call \code{randomize()} without testing its return value.
+\item Never let the driver hand transactions to the monitor or the scoreboard.
+  The monitor reconstructs from the pins or the testbench proves nothing.
+\item Never write a reference model by copying the \RTL{}.
+\item Never raise a tolerance to make a test pass without recording why.
+\item Never declare a testbench task without \code{automatic}, and never fork
+  in a loop without copying the loop variable into an \code{automatic} local.
+\item Never trust a \code{TEST PASSED} that does not also state how many
+  transactions were checked.
+\end{itemize}
+
+\textbf{Always do this}
+
+\begin{itemize}
+\item Drive and sample through a clocking block with \code{default input
+  \#1step output \#1ns}.
+\item Use \code{===} and \code{!==} in a monitor.
+\item Give every transaction a unique \code{id} and a
+  \code{convert2string()}.
+\item Add a watchdog before the first check, and prefer one that times out on
+  lack of progress.
+\item Assert a minimum transaction count as part of the pass condition.
+\item Apply random back-pressure to every ready signal from the first test.
+\item Write both stimulus coverage and \DUT{}-state coverage, and a
+  \code{cover property} for every assertion whose antecedent might never occur.
+\item Bind protocol checkers rather than editing the \RTL{}.
+\item Break the design on purpose once, and confirm the testbench goes red.
+\item Print the run's full configuration, including the seed, in the first
+  lines of the log.
+\item Gate \code{\$dumpfile}/\code{\$dumpvars} behind a plusarg and name the
+  scope. \code{\$dumpvars(0, top)} on a real design writes gigabytes.
+\end{itemize}
+
+\textbf{Structure}
+
+\begin{itemize}
+\item Transaction: data plus constraints plus \code{convert2string()}. No
+  behaviour.
+\item Generator: makes transactions, puts them in a mailbox. Knows nothing
+  about pins.
+\item Driver: mailbox to pins. Knows the protocol only.
+\item Monitor: pins to mailbox. Passive, and independent of the driver.
+\item Scoreboard: reference model plus comparison plus statistics.
+\item Coverage: what did we actually exercise?
+\item Environment: build, connect, run. No stimulus.
+\item Test: stimulus, constraints, counts, seed. The only thing that changes
+  between runs.
+\end{itemize}

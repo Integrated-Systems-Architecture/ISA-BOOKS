@@ -1,0 +1,180 @@
+\chapter{Everyday Commands}
+\label{ch:commands}
+
+\chapabstract{The commands you will type dozens of times a day, grouped
+by task, with the flags that actually matter. Everything here is meant
+to be looked up, not memorised in one sitting.}
+
+\section{One-time setup}
+
+Run once per machine, so every commit is correctly attributed.
+
+\begin{shcode}
+git config --global user.name  "Luigi Giuffrida"
+git config --global user.email "luigi.giuffrida@polito.it"
+git config --global init.defaultBranch main
+git config --global core.editor "nano"   # or vim, code --wait, ...
+\end{shcode}
+
+\section{Starting a repository}
+
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Command} & \textbf{What it does}\\
+\midrule
+\code{git init} & Turns the current folder into a new, empty repository.\\
+\code{git clone <url>} & Copies an existing remote repository, including
+  its full history, into a new local folder.\\
+\code{git clone <url> <dir>} & Same, but names the local folder
+  \code{<dir>} instead of using the remote's default name.\\
+\bottomrule
+\end{tabularx}
+
+\section{The basic loop: status, add, commit}
+
+\begin{shcode}
+git status                 # what changed, what is staged
+git diff                   # unstaged changes, line by line
+git diff --staged          # staged changes, line by line
+git add file1.sv file2.sv  # stage specific files
+git add .                  # stage everything in and below the current dir
+git commit -m "Fix reset polarity in cordic_rot"
+git commit -am "message"   # stage all tracked, modified files, then commit
+\end{shcode}
+
+\begin{tipbox}{Write commit messages that will help future-you}
+Use the imperative mood ("Fix", not "Fixed" or "Fixes") and keep the
+first line under about 50 characters. If you need to explain why, leave
+a blank line and write a longer body below. \code{git log} then shows a
+clean one-line summary per commit.
+\end{tipbox}
+
+\begin{gotcha}{\code{git add .} adds everything, including junk}
+Untracked build artefacts, editor swap files and simulator logs get
+staged along with real changes. Add a \file{.gitignore} before your
+first commit (\cref{sec:commands:gitignore}), and check \code{git
+status} before every commit.
+\end{gotcha}
+
+\section{Inspecting history}
+
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Command} & \textbf{What it does}\\
+\midrule
+\code{git log} & Full commit history, newest first.\\
+\code{git log --oneline --graph --all} & Compact view with the branch
+  topology; the single most useful \code{log} incantation.\\
+\code{git show <commit>} & The full diff introduced by one commit.\\
+\code{git blame <file>} & Which commit last touched each line.\\
+\code{git diff <a>..<b>} & Everything that changed between two commits
+  or branches.\\
+\bottomrule
+\end{tabularx}
+
+\section{Branching and merging}
+
+\begin{shcode}
+git branch                    # list local branches
+git branch feature/uart       # create a branch (does not switch to it)
+git switch feature/uart       # switch to it
+git switch -c feature/uart    # create and switch in one step
+git switch main
+git merge feature/uart        # bring feature/uart's commits into main
+git branch -d feature/uart    # delete, once merged
+\end{shcode}
+
+\begin{notebox}{\code{switch}/\code{restore} vs. \code{checkout}}
+\code{git checkout} used to do both "switch branch" and "discard a
+file's changes", which was a frequent source of accidents. Modern
+\Git{} (2.23+) splits these into \code{git switch} (branches) and
+\code{git restore} (files). Both forms work; prefer the new ones.
+\end{notebox}
+
+\subsection*{Merge conflicts}
+
+A conflict happens when the same lines were changed differently on both
+branches. \Git{} stops the merge and marks the file:
+
+\begin{txtcode}
+<<<<<<< HEAD
+q <= d;
+=======
+q <= d_reg;
+>>>>>>> feature/uart
+\end{txtcode}
+
+Edit the file to the version you want, remove the marker lines, then:
+
+\begin{shcode}
+git add conflicted_file.sv
+git commit          # completes the merge
+\end{shcode}
+
+\section{Undoing things}
+
+Pick the row that matches how far the change has gone.
+
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Situation} & \textbf{Command}\\
+\midrule
+Discard unstaged edits to a file & \code{git restore <file>}\\
+Unstage a file, keep the edits & \code{git restore --staged <file>}\\
+Fix the message of the last commit & \code{git commit --amend}\\
+Undo the last commit, keep the changes staged &
+  \code{git reset --soft HEAD\textasciitilde 1}\\
+Undo the last commit, discard the changes &
+  \code{git reset --hard HEAD\textasciitilde 1}\\
+Undo a commit that is already pushed & \code{git revert <commit>}\\
+Set aside unfinished work temporarily & \code{git stash} /
+  \code{git stash pop}\\
+\bottomrule
+\end{tabularx}
+
+\begin{gotcha}{\code{reset --hard} deletes work, permanently}
+\code{git reset --hard} rewrites the working directory to match the
+target commit and discards uncommitted changes with no confirmation.
+\code{git revert} is the safe alternative once a commit has been shared
+with anyone else: it adds a new commit that undoes the old one, instead
+of rewriting history.
+\end{gotcha}
+
+\section{\file{.gitignore}}
+\label{sec:commands:gitignore}
+
+A plain text file, one pattern per line, listing what \Git{} should
+never track: build products, logs, editor files, credentials.
+
+\begin{txtcode}
+# simulation and build output
+*.log
+*.vcd
+work/
+obj_dir/
+
+# editor and OS clutter
+.vscode/
+.DS_Store
+\end{txtcode}
+
+Patterns are read from every \file{.gitignore} in the tree; a leading
+\code{/} anchors a pattern to that folder, and a trailing \code{/}
+matches directories only. A file already tracked before it was added to
+\file{.gitignore} keeps being tracked; remove it once with
+\code{git rm --cached <file>}.
+
+\section{Checklist}
+\label{sec:commands:checklist}
+
+\begin{itemize}
+  \item \code{status} and \code{diff} before every \code{add}; know
+        what you are about to commit.
+  \item Small, focused commits with an imperative-mood message beat one
+        giant commit at the end of the day.
+  \item \code{switch}/\code{restore} for everyday work; save
+        \code{checkout} for detached-HEAD or older scripts.
+  \item \code{revert} once a commit is shared; \code{reset --hard} only
+        on commits nobody else has seen.
+  \item Add a \file{.gitignore} before the first commit, not after.
+\end{itemize}

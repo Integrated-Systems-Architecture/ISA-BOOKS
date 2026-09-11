@@ -1,0 +1,75 @@
+% ---------------------------------------------------------------------------
+% titlepage.tex
+% ---------------------------------------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\begin{center}
+
+\vspace*{1.5cm}
+
+{\sffamily\Large\color{codenumber} AN INTRODUCTION TO SYSTEMVERILOG}
+
+\vspace{1.2cm}
+
+{\sffamily\fontsize{34}{40}\selectfont\bfseries\color{codekey}
+ SystemVerilog\\[4pt] for VHDL Designers}
+
+\vspace{0.4cm}
+
+{\sffamily\Large\color{accentalt} The Example Cookbook}
+
+\vspace{0.8cm}
+
+{\color{codeframe}\rule{0.8\textwidth}{1.4pt}}
+
+\vspace{0.8cm}
+
+{\sffamily\large
+ One CORDIC Rotator $\cdot$ Two Languages $\cdot$ Six Testbenches}
+
+\vspace{2.2cm}
+
+% --- a small decorative figure: the CORDIC datapath, schematically ---------
+\begin{tikzpicture}[font=\sffamily\small,
+    box/.style={draw=codekey,fill=svbg,line width=1pt,rounded corners=3pt,
+                minimum width=2.6cm,minimum height=1.1cm,align=center}]
+  \node[box] (in) {$x, y, \theta$};
+  \node[box,draw=accentalt,right=1.6cm of in] (rot) {\bfseries cordic\_rot};
+  \node[box,right=1.6cm of rot] (out) {$x', y'$};
+  \draw[-{Latex[length=3mm]},line width=1.1pt,codekey] (in) -- (rot);
+  \draw[-{Latex[length=3mm]},line width=1.1pt,codekey] (rot) -- (out);
+\end{tikzpicture}
+
+\vfill
+
+{\sffamily\large Luigi Giuffrida, Alessandra Dolmeta}
+
+\vspace{4pt}
+
+{\sffamily\small Department of Electronics and Telecommunications\\
+ Politecnico di Torino}
+
+\vspace{1.0cm}
+
+{\sffamily\footnotesize\color{codenumber}
+ Draft --- \today}
+
+\end{center}
+\end{titlepage}
+
+\cleardoublepage
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+\begin{minipage}{0.78\textwidth}
+\small\itshape
+This booklet is one of four companions: Design, Verification, Simulation,
+and this worked Example. A CORDIC rotator, small enough to read in one
+sitting, is developed in VHDL and in SystemVerilog and verified with six
+testbenches in three languages. Every source file is reproduced in full and
+distributed alongside this document under \file{code/cordic/}; every one of
+them has been analysed and simulated before being typeset.
+\end{minipage}
+\end{center}
+\vspace*{\fill}
+\cleardoublepage

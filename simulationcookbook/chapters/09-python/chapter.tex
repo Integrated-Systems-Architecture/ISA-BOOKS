@@ -1,0 +1,2351 @@
+\chapter{Python and the Testbench}
+\label{ch:python}
+
+\chapabstract{Your golden model is easier to write in Python than in \SV{} or
+\VHDL{}, and you already know how to write it. This chapter answers the
+question that follows: how do you connect it to a simulation? It gives a
+taxonomy of four coupling styles -- offline vectors, generated source,
+in-process calls, and out-of-process co-simulation -- and works through each
+one with code that has actually been run against the CORDIC rotator. At the
+end you will be able to pick the right style for a homework exercise, a
+thesis accelerator or an industrial block, and to build the flow that goes
+with it.}
+
+\section{Why Python belongs in a verification flow}
+\label{sec:python:why}
+
+A CORDIC reference model is three lines of \code{numpy}. A fixed point
+reference model of the same rotator, bit for bit, is about thirty lines of
+Python and about a hundred lines of \SV{}. That asymmetry is the whole
+argument, and it is worth being precise about where it comes from rather than
+repeating it as a slogan.
+
+Python is good at five things a verification engineer needs:
+
+\begin{itemize}
+\item \textbf{Golden models.} Arbitrary-precision integers, real
+      arithmetic, \code{numpy} arrays and \code{scipy} transforms are all one
+      import away. Nothing in a Python model has a width, so the model never
+      accidentally truncates. You add the truncation deliberately, which is
+      exactly what a fixed point reference model is: a floating point
+      algorithm plus a set of explicit rounding and saturation decisions.
+\item \textbf{Stimulus generation and corner-case enumeration.} Generating
+      every angle that lands exactly on a quadrant boundary is a list
+      comprehension. Enumerating the \(2^{16}\) angles of a 16-bit input and
+      filtering the interesting ones takes one line and a second of CPU time.
+\item \textbf{Post-processing.} A simulation produces numbers. Deciding
+      whether those numbers are acceptable often means computing an error
+      spectrum, a histogram or a plot -- work that no HDL is designed for.
+\item \textbf{Code generation.} Register maps, ROM contents, decode tables,
+      testbench skeletons, constant packages. Anything you would otherwise
+      compute by hand and paste into a file.
+\item \textbf{Glue.} Makefiles, CI jobs, log parsing, result aggregation
+      across a regression.
+\end{itemize}
+
+\index{golden model}\index{reference model}
+None of this is new. Verification teams have used Perl, Tcl and C for the same
+purposes for thirty years. What changed is that the numerical libraries moved
+to Python, and with them the people who write DSP and machine-learning
+hardware.
+
+\subsection{The honest counter-argument}
+
+The in-language model is sometimes the better choice, and a chapter that
+pretends otherwise would be selling something. \SV{} has \kw{real}
+arithmetic, the \code{\$atan}/\code{\$sin}/\code{\$exp} family of real-valued
+system functions, and, since IEEE 1800-2005, \code{shortreal} as well.
+\VHDL{} has \code{ieee.math\_real}, which is older and arguably better
+specified. Both are perfectly capable of expressing a reference model.
+
+\index{math\_real}\index{\$atan}
+Here is the arctangent table of the CORDIC computed at elaboration time in
+each language. The left pane is the real \file{cordic\_pkg.vhd}; the right
+pane is the real \file{cordic\_pkg.sv}.
+
+\begin{rosetta}
+\begin{rleft}
+use ieee.math_real.all;
+
+type atan_rom_t is
+  array (0 to N-1) of iangle_t;
+
+function build_atan_rom
+  return atan_rom_t is
+  variable r : atan_rom_t;
+begin
+  for i in 0 to N-1 loop
+    r(i) := to_signed(integer(round(
+      arctan(2.0 ** (-i))
+        * 2.0 ** IQA)), IA);
+  end loop;
+  return r;
+end function;
+
+constant ATAN_ROM : atan_rom_t
+  := build_atan_rom;
+\end{rleft}
+\begin{rright}
+typedef iangle_t atan_rom_t [N];
+
+function automatic atan_rom_t
+    build_atan_rom();
+  atan_rom_t rom;
+  for (int i = 0; i < int'(N); i++)
+    rom[i] = iangle_t'($rtoi(
+      $atan(2.0 ** (-i))
+        * (2.0 ** IQA) + 0.5));
+  return rom;
+endfunction
+
+localparam atan_rom_t ATAN_ROM =
+  build_atan_rom();
+\end{rright}
+\end{rosetta}
+
+The two are the same idea: a pure function, called once by the tool, whose
+result becomes a constant. \VHDL{} has \code{round}, so the intent is
+explicit; \SV{} has only \code{\$rtoi}, which truncates towards zero, so the
+\code{+ 0.5} is doing the rounding by hand. That is the kind of detail that
+decides whether your model and your \RTL{} agree in the last bit.
+
+When the model is this small, keeping it in the \RTL{} language is better:
+there is one source file, no build step, no generated artefact to go stale,
+and the constants are visible in the waveform viewer under their own names.
+Reach for Python when at least one of the following is true.
+
+\begin{ruleofthumb}
+Write the model in the \RTL{} language if it fits on one screen and uses only
+arithmetic. Write it in Python as soon as it needs arrays, a transform, a
+file, or a plot.
+\end{ruleofthumb}
+
+There is a second, quieter reason to prefer Python once the algorithm is more
+than trivial: the model becomes the specification. \file{cordic\_model.py}
+is thirty lines that anybody in the group can read, run and modify, including
+the person who has not yet learned \SV{}. When the architect changes the
+number of guard bits, the change happens in one file, the model is rerun in a
+second, the new error figure is printed, and only then does anybody touch
+\RTL{}. A model buried inside a testbench package cannot play that role,
+because running it requires a simulator.
+
+\begin{tipbox}{Make the model runnable on its own}
+Give every Python model a \code{\_\_main\_\_} block that prints its
+parameters and its worst-case error. \file{cordic\_model.py} does exactly
+that, and \code{python3 cordic\_model.py} is the fastest sanity check in the
+whole flow -- no simulator, no build, one second. When somebody reports that
+the hardware is wrong, run the model first.
+\end{tipbox}
+
+\begin{notebox}{Tool support for real-valued constant functions}
+Constant functions that call real-valued system functions are legal in IEEE
+1800-2017 and IEEE 1076-2008, but support is uneven. \tool{Verilator} 5.020
+elaborates the \code{\$atan} table above correctly. \tool{Icarus Verilog}
+12.0 does not: it cannot evaluate a constant function that returns an
+unpacked array, and it does not accept an unpacked array \kw{localparam} at
+all. Synthesis tools vary more widely still; several accept
+\code{ieee.math\_real} in a constant expression but reject the same
+expression inside a function used to initialise a ROM. This is the single
+strongest practical argument for generating such tables from Python:
+generated integer literals are accepted by everything.
+\end{notebox}
+
+\section{Four ways to couple Python to a testbench}
+\label{sec:python:taxonomy}
+
+There are exactly four places where the two worlds can meet: in a file, at
+compile time, inside the simulator process, or across a process boundary.
+\Cref{fig:python:coupling} shows all four.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\small\sffamily,
+      py/.style={draw=codekey,fill=notebg,rounded corners=2pt,
+                 minimum width=21mm,minimum height=8mm,align=center},
+      hdl/.style={draw=accentalt,fill=svbg,rounded corners=2pt,
+                 minimum width=21mm,minimum height=8mm,align=center},
+      art/.style={draw=codeframe,fill=codebg,minimum width=17mm,
+                 minimum height=7mm,align=center,font=\scriptsize\sffamily},
+      ar/.style={-{Latex[length=2mm]},thick,draw=codenumber},
+      lbl/.style={font=\scriptsize\bfseries\sffamily,color=accent}]
+
+    % (a) offline
+    \node[lbl] at (0,1.5) {(a) offline vectors};
+    \node[py]  (pa) at (0,0.7) {Python};
+    \node[art] (fa) at (0,-0.2) {\file{.txt} file};
+    \node[hdl] (ha) at (0,-1.1) {simulator};
+    \draw[ar] (pa) -- (fa);
+    \draw[ar] (fa) -- (ha);
+
+    % (b) generated source
+    \node[lbl] at (4.4,1.5) {(b) generated source};
+    \node[py]  (pb) at (4.4,0.7) {Python};
+    \node[art] (fb) at (4.4,-0.2) {\file{.sv} / \file{.h}};
+    \node[hdl] (hb) at (4.4,-1.1) {compiler};
+    \draw[ar] (pb) -- (fb);
+    \draw[ar] (fb) -- (hb);
+
+    % (c) in-process
+    \node[lbl] at (8.8,1.5) {(c) in-process};
+    \node[py]  (pc) at (8.8,0.7) {Python};
+    \node[hdl] (hc) at (8.8,-1.1) {simulator};
+    \draw[ar] (pc.south west) ++(2mm,0) -- ++(0,-1.0)
+      node[midway,left,font=\scriptsize] {call};
+    \draw[ar] (hc.north east) ++(-2mm,0) -- ++(0,1.0)
+      node[midway,right,font=\scriptsize] {call};
+    \node[art,draw=none,fill=none] at (8.8,-0.2) {one process};
+
+    % (d) out-of-process
+    \node[lbl] at (13.2,1.5) {(d) co-simulation};
+    \node[py]  (pd) at (13.2,0.7) {Python server};
+    \node[hdl] (hd) at (13.2,-1.1) {simulator};
+    \draw[ar] (pd) -- (hd);
+    \draw[ar] (hd.north west) ++(3mm,0) -- ++(0,1.0);
+    \node[art,draw=none,fill=none] at (13.2,-0.2)
+      {\scriptsize socket};
+
+    \begin{scope}[on background layer]
+      \node[draw=codeframe,dashed,rounded corners=3pt,
+            fit=(pc)(hc),inner sep=3.5mm] {};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{The four ways to couple a Python model to a simulation. They
+  differ in \emph{when} the coupling happens: (a) before the run, (b) before
+  the build, (c) during the run in one process, (d) during the run across a
+  process boundary.}
+  \label{fig:python:coupling}
+\end{figure}
+
+\index{coupling!offline vectors}\index{coupling!generated source}
+\index{coupling!in-process}\index{coupling!co-simulation}
+\Cref{tab:python:tradeoffs} is the summary you should keep. The column that
+usually decides is the last one: can the Python side react to what the \DUT
+does, cycle by cycle? Styles (a) and (b) cannot. That is not a defect; it is
+the reason they are cheap.
+
+\begin{table}[htbp]
+\centering
+\caption{Trade-offs of the four coupling styles.}
+\label{tab:python:tradeoffs}
+\small
+\begin{tabularx}{\linewidth}{@{}lXXXX@{}}
+\toprule
+ & \textbf{(a) offline} & \textbf{(b) generated} & \textbf{(c) in-process}
+ & \textbf{(d) sockets} \\
+\midrule
+Run-time cost      & none & none & \(\mu\)s per call & \(\mu\)s to ms per call \\
+Debuggability      & excellent: the file is the evidence & excellent: the
+                     output is source & mixed: two debuggers & poor \\
+Reproducibility    & excellent, if the file is archived & excellent & good,
+                     if versions are pinned & fragile \\
+Setup complexity   & lowest & low & high (DPI) or medium (cocotb) & high \\
+Simulator portability & total & total & DPI: good; VPI: good; cocotb: good
+                     & total \\
+Reacts cycle by cycle & no & no & yes & yes, slowly \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Offline vectors}
+\label{sec:python:vectors}
+
+This is the workhorse. Master it first: it works with every simulator you
+will ever meet, it needs no libraries, it survives a change of tool vendor,
+and the intermediate file is a debugging artefact you can read with your
+eyes.
+
+The flow has three steps. Python generates stimulus and expected responses
+into a file. The simulation reads the file, drives the \DUT and writes what
+it observed into a second file. Python reads the second file and decides
+whether the design passed.
+
+\subsection{The generator}
+
+\index{stimulus generation}
+\Cref{lst:python:gen} is the generator used throughout this chapter. It
+imports the golden model from \file{cordic\_model.py} -- the same module the
+cocotb testbench will import later, which is the point -- and writes two
+files.
+
+\begin{pycode}[caption={The vector generator (extract from
+\file{gen\_vectors.py}).},label={lst:python:gen}]
+import argparse, math, random, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cordic_model as m
+
+def hexw(value, width):
+    """Two's complement hex, `width` bits, no sign, no 0x prefix."""
+    return f"{value & ((1 << width) - 1):0{(width + 3) // 4}x}"
+
+def corner_cases():
+    """Directed vectors: the angles a random generator will not hit."""
+    angs = [0.0, math.pi/2, -math.pi/2, math.pi, -math.pi,
+            math.pi/4, -math.pi/4, 1e-4, -1e-4]
+    out = [(m.X0_UNIT, 0, m.float_to_q(a, m.QA, m.AW)) for a in angs]
+    return out + [(32767, 0, 0), (-32768, 0, 0), (0, 0, 0)]
+
+def random_cases(n, rng):
+    lim = m.float_to_q(math.pi, m.QA, m.AW)
+    return [(rng.randint(-6000, 6000), rng.randint(-6000, 6000),
+             rng.randint(-lim, lim)) for _ in range(n)]
+
+def main():
+    args = parse_args()                 # --seed, --count, --outdir
+    rng = random.Random(args.seed)
+    cases = corner_cases() + random_cases(args.count, rng)
+
+    hdr = [f"seed={args.seed} count={len(cases)}",
+           f"DW={m.DW} QF={m.QF} AW={m.AW} QA={m.QA} N={m.N} "
+           f"GL={m.GL} GM={m.GM}",
+           f"model=cordic_model.py rev={model_version()} "
+           f"python={sys.version.split()[0]}",
+           "columns: x0 y0 theta xexp yexp  (hex, 2's complement, 16 bit)"]
+
+    out = Path(args.outdir); out.mkdir(parents=True, exist_ok=True)
+    ftxt = open(out / "cordic_vec.txt", "w")
+    fhex = open(out / "cordic_vec.hex", "w")
+    for line in hdr:
+        ftxt.write("// " + line + "\n")
+        fhex.write("// " + line + "\n")
+    for (x0, y0, th) in cases:
+        xe, ye = m.cordic_rot(x0, y0, th)
+        cols = [hexw(v, 16) for v in (x0, y0, th, xe, ye)]
+        ftxt.write(" ".join(cols) + "\n")
+        fhex.write("".join(cols) + "\n")   # one 80-bit word per line
+    ftxt.close(); fhex.close()
+    # $readmemh cannot report how many entries it filled: say so explicitly.
+    (out / "cordic_vec.n").write_text(f"{len(cases)}\n")
+\end{pycode}
+
+Running it produces this:
+
+\begin{shcode}
+$ python3 py/gen_vectors.py --seed 20250905 --count 200 --outdir vec
+\end{shcode}
+
+\begin{txtcode}
+wrote 212 vectors to vec/cordic_vec.{txt,hex}
+
+$ head -6 vec/cordic_vec.txt
+// seed=20250905 count=212
+// DW=16 QF=14 AW=16 QA=13 N=14 GL=2 GM=2
+// model=cordic_model.py rev=no-git python=3.11.15
+// columns: x0 y0 theta xexp yexp   (hex, two's complement, 16 bits)
+26dd 0000 0000 3fff 0001
+26dd 0000 3244 0001 3fff
+\end{txtcode}
+
+\subsection{Deciding the file format}
+
+Four decisions, and each of them will bite somebody if you get it wrong.
+
+\index{vector file!format}
+\textbf{Hex or decimal?} Hex. A hex field has a fixed width, which makes the
+file column-aligned and diffable, and it maps one to one onto the bit pattern
+on the wire. Decimal forces you to decide, in the file, whether the value is
+signed -- and then to make the reader agree. Write hex, and treat the file as
+a picture of the pins.
+
+\textbf{One transaction per line.} Never split a transaction across lines and
+never put two on one line. Line number equals transaction number is the most
+useful invariant a vector file can have: when the simulation reports a
+mismatch on transaction 137 you open the file at line 141 (137 plus the
+four-line header) and look at it.
+
+\textbf{A header.} The first lines must record the seed, the parameter set
+and the model revision that produced the file. A vector file without a header
+is a liability: six months later nobody can tell whether it was generated for
+\code{N = 14} or \code{N = 16}, and a testbench that reads it will happily
+report thousands of mismatches that mean nothing.
+
+\textbf{A comment convention.} Use \code{//}. It is what \code{\$readmemh}
+accepts, it is what a C++ \code{ifstream} loop can skip with two characters
+of test, and \code{std.textio} can skip it with one \code{read} of a
+character. A \code{\#} convention would be more Pythonic and would break
+\code{\$readmemh}.
+
+\subsection{Stimulus only, or stimulus and expected response?}
+
+The generator above writes both: the three inputs and the two expected
+outputs, on the same line. That is the right default, and it is worth being
+clear about why, because the alternative is common and defensible.
+
+If the file contains only stimulus, the checking has to happen somewhere
+else -- either in the HDL testbench, which then needs a model, or in Python
+afterwards, which then needs the results file and the stimulus file to be
+correlated by line number. If the file contains both, the HDL testbench is a
+pure comparator: it drives, it samples, it compares two integers. It needs no
+model, no real arithmetic and no knowledge of what a CORDIC is. That is a
+testbench a second-year student can maintain, and it is the same testbench
+whatever the design computes.
+
+The cost is that the file is bigger and that it is now tied to one version of
+the model. Regenerate it whenever the model changes -- which is what the Make
+rule in \cref{sec:python:vectors} is for.
+
+Two refinements are worth knowing. First, when the response is large
+(an image, a block of samples) put it in a separate file and keep the index
+in the stimulus file; a vector file you cannot open in an editor has lost
+most of its value. Second, when the transaction has optional fields, put a
+one-character command at the start of the line -- \code{W} for write,
+\code{R} for read, \code{\#} would clash with the comment convention -- and
+dispatch on it in the reader. That turns the vector file into a small
+instruction stream, and it is how most directed-test frameworks start.
+
+\begin{tipbox}{The vector file header}
+Put the seed, every parameter the model depends on, the model file's revision
+and the Python version in the header, each on its own \code{//} line. Then
+make the testbench print the header it read at time zero. A regression log
+that contains the header of the vector file it consumed is self-documenting.
+\end{tipbox}
+
+\subsection{Reading it in \SV{}: \code{\$readmemh}}
+
+\index{\$readmemh}
+\code{\$readmemh} loads whitespace-separated hex tokens into successive
+entries of an array. It is the fastest thing to write and the easiest thing
+to get subtly wrong. The version below packs the five 16-bit fields of one
+transaction into a single 80-bit word, so that one array entry is one
+transaction.
+
+\begin{svcode}[caption={Loading vectors with \code{\$readmemh}
+(\file{tb\_vec\_readmem.sv}).},label={lst:python:readmem}]
+module tb_vec_readmem;
+  import cordic_pkg::*;
+
+  localparam int MAXV = 4096;
+  localparam int VW   = 5*DW;          // 80 bits: x0 y0 theta xexp yexp
+
+  logic [VW-1:0] vec [0:MAXV-1];
+  int            nvec;
+
+  // How many entries did $readmemh actually fill?  It will not tell us, so
+  // the generator writes the count into a companion file.
+  function automatic int read_count(input string name);
+    int fd, n;
+    fd = $fopen(name, "r");
+    if (fd == 0) $fatal(1, "cannot open %s", name);
+    if ($fscanf(fd, "%d", n) != 1) $fatal(1, "bad count file %s", name);
+    $fclose(fd);
+    return n;
+  endfunction
+
+  initial begin
+    if (!$value$plusargs("VEC=%s", vecfile)) vecfile = "vec/cordic_vec.hex";
+    nvec = read_count({vecfile.substr(0, vecfile.len()-5), ".n"});
+    $readmemh(vecfile, vec, 0, nvec-1);
+    $display("[tb] loaded %0d vectors from %s", nvec, vecfile);
+    ...
+    for (int i = 0; i < nvec; i++) begin
+      data_t  x0, y0, xe, ye;
+      angle_t th;
+      {x0, y0, th, xe, ye} = vec[i];      // unpack one 80-bit word
+
+      @(negedge clk);
+      req_x = x0; req_y = y0; req_theta = th; req_valid = 1'b1;
+      do @(posedge clk); while (!req_ready);
+      @(negedge clk); req_valid = 1'b0;
+      do @(posedge clk); while (!rsp_valid);
+
+      if (rsp_x !== xe || rsp_y !== ye) errors++;
+    end
+    $display("[tb] %0d vectors, %0d mismatches", nvec, errors);
+    $display("[tb] %s", errors == 0 ? "PASS" : "FAIL");
+    $finish;
+  end
+endmodule
+\end{svcode}
+
+Built and run with \tool{Verilator}:
+
+\begin{shcode}
+$ verilator --binary --timing --top-module tb_vec_readmem \
+      sv/cordic_pkg.sv sv/cordic_rot.sv sv/tb_vec_readmem.sv \
+      -o Vtb_readmem --Mdir obj_readmem
+$ ./obj_readmem/Vtb_readmem
+\end{shcode}
+
+\begin{txtcode}
+[tb] loaded 212 vectors from vec/cordic_vec.hex
+[tb] 212 vectors, 0 mismatches
+[tb] PASS
+- sv/tb_vec_readmem.sv:73: Verilog $finish
+\end{txtcode}
+
+Note the unpacking line, \code{\{x0, y0, th, xe, ye\} = vec[i];}. A
+concatenation on the left-hand side is a \SV{} idiom with no \VHDL{}
+equivalent: it splits a vector across several targets by width, left to
+right. It is the natural partner of a packed vector file.
+
+\begin{gotcha}{\code{\$readmemh} reads a short file in silence}
+The first version of this testbench filled the array with \code{'x} and then
+counted how many entries \code{\$readmemh} had overwritten. Under
+\tool{Verilator} that count came back as 4096 -- the size of the array, not
+the size of the file -- because \tool{Verilator} is a two-state simulator and
+the \code{'x} initialisation had become zero. The run then drove 3884
+all-zero transactions, which the \DUT dutifully turned into all-zero
+responses, and reported:
+
+\begin{txtcode}
+[tb] loaded 4096 vectors from vec/cordic_vec.hex
+[tb] 4096 vectors, 0 mismatches
+[tb] PASS
+\end{txtcode}
+
+A green result from a testbench that ran almost nothing. \code{\$readmemh}
+does not report how many entries it filled, and if the file is shorter than
+the array the remaining entries simply keep their old value. In a four-state
+simulator they stay \code{'x} and you will usually notice; under
+\tool{Verilator} they are zero and you will not. The fix is the one in
+\cref{lst:python:readmem}: have the generator write the count into a
+companion file and pass an explicit address range,
+\code{\$readmemh(file, vec, 0, nvec-1)}.
+\end{gotcha}
+
+Two more traps in the same system task. First, the address arguments are
+\emph{addresses}, not counts, and they are inclusive: \code{\$readmemh(f, m,
+0, 9)} loads ten entries. Second, the file may contain \code{@} directives --
+a line \code{@1F} sets the load address to \code{'h1F} -- and a stray
+\code{@} in a comment your generator wrote will silently relocate everything
+that follows. Generate the file, never hand-edit it, and never let a
+free-text field into it.
+
+\subsection{Reading it line by line}
+
+\index{\$fgets}\index{\$sscanf}\index{\$feof}
+When the file has structure -- several columns, optional fields, a per-line
+command -- read it a line at a time. This is also the version to reach for
+when you want the file to stream: \code{\$readmemh} loads everything into
+memory before the simulation starts, which is fine for a thousand vectors and
+not fine for ten million.
+
+\begin{svcode}[caption={Line-by-line reading with
+\code{\$fgets}/\code{\$sscanf} (\file{tb\_vec\_file.sv}).},%
+label={lst:python:fgets}]
+  int    fd_in, fd_out, code, nline = 0, nvec = 0, errors = 0;
+  string line, dir;
+
+  initial begin
+    if (!$value$plusargs("DIR=%s", dir)) dir = "vec";
+    fd_in  = $fopen({dir, "/cordic_vec.txt"}, "r");
+    if (fd_in == 0) $fatal(1, "cannot open the vector file");
+    fd_out = $fopen({dir, "/cordic_res.txt"}, "w");
+    ...
+    while (!$feof(fd_in)) begin
+      logic [15:0] x0, y0, th, xe, ye;
+      code = $fgets(line, fd_in);
+      nline++;
+      if (code <= 0) break;                       // short read or EOF
+      if (line.len() < 2 || line.substr(0,1) == "//") continue;
+      code = $sscanf(line, "%h %h %h %h %h", x0, y0, th, xe, ye);
+      if (code != 5) begin
+        $display("[tb] line %0d: expected 5 fields, got %0d -- skipped",
+                 nline, code);
+        continue;
+      end
+      nvec++;
+      ... drive the DUT, wait for the response ...
+      $fdisplay(fd_out, "%04h %04h %04h %04h %04h",
+                x0, y0, th, rsp_x, rsp_y);
+      if (rsp_x !== xe || rsp_y !== ye) errors++;
+    end
+    $fclose(fd_in); $fclose(fd_out);
+    $display("[tb] %0d lines, %0d vectors, %0d mismatches",
+             nline, nvec, errors);
+  end
+\end{svcode}
+
+\begin{txtcode}
+$ ./obj_file/Vtb_file +DIR=vec
+[tb] 217 lines, 212 vectors, 0 mismatches
+[tb] PASS
+\end{txtcode}
+
+\code{\$sscanf} returns the number of fields it successfully converted, and
+that return value is the only line-format check you get. Test it. A file
+whose last line is truncated because the generator was interrupted will
+otherwise be read as a valid transaction with three of five fields left at
+their previous values.
+
+\begin{gotcha}{\code{\$feof} is not a look-ahead}
+\code{\$feof} returns non-zero only \emph{after} a read has hit the end of
+the file, exactly as in C. A \code{while (!\$feof(fd))} loop therefore
+executes one extra iteration on an empty last read. That is why
+\cref{lst:python:fgets} also checks the return value of \code{\$fgets} and
+breaks. \VHDL{}'s \code{endfile} is a true look-ahead and does not have this
+problem, which is precisely why a \VHDL{} designer forgets to add the check.
+\end{gotcha}
+
+\subsection{The same file in \VHDL{}}
+
+\index{textio}\index{hread}
+For comparison, and because you will still be writing \VHDL{} testbenches for
+some time, here is the same loop with \code{std.textio}. \VHDL{}-2008's
+\code{hread} reads a hex value into a \code{std\_logic\_vector} of matching
+width; before 2008 you needed \code{ieee.std\_logic\_textio} from a vendor
+library.
+
+\begin{vhdlcode}[caption={The same vector file read with \code{std.textio}
+(\file{tb\_vec\_vhdl.vhd}).},label={lst:python:textio}]
+  stim : process
+    file     f      : text;
+    variable l      : line;
+    variable status : file_open_status;
+    variable c      : character;
+    variable ok     : boolean;
+    variable x0, y0, xe, ye : std_logic_vector(DW-1 downto 0);
+    variable th             : std_logic_vector(AW-1 downto 0);
+    variable nvec, errors   : natural := 0;
+  begin
+    file_open(status, f, VEC, read_mode);
+    assert status = open_ok report "cannot open " & VEC severity failure;
+
+    wait for 33 ns;
+    rst_n <= '1';
+
+    while not endfile(f) loop
+      readline(f, l);
+      next when l'length = 0;
+      read(l, c, ok);                       -- peek at the first character
+      next when not ok or c = '/';          -- skip '//' comments
+      l := new string'(c & l.all);          -- put the character back
+
+      hread(l, x0, ok); next when not ok;
+      hread(l, y0);
+      hread(l, th);
+      hread(l, xe);
+      hread(l, ye);
+      nvec := nvec + 1;
+
+      drive_and_wait(x0, y0, th);          -- the usual handshake
+
+      if std_logic_vector(rsp_x) /= xe or std_logic_vector(rsp_y) /= ye then
+        errors := errors + 1;
+      end if;
+    end loop;
+    file_close(f);
+    report "vectors = " & integer'image(nvec) &
+           "  mismatches = " & integer'image(errors);
+    assert errors = 0 report "FAIL" severity failure;
+    report "PASS";
+    wait;
+  end process;
+\end{vhdlcode}
+
+\begin{shcode}
+$ vlib work
+$ vcom -2008 vhdl/cordic_pkg.vhd vhdl/cordic_rot.vhd vhdl/tb_vec_vhdl.vhd
+$ vsim -c -do "run -all; quit" tb_vec_vhdl
+\end{shcode}
+
+Everything the testbench prints comes from \code{report}, so the two lines
+that matter read the same whatever tool ran it, once the per-simulator prefix
+is stripped off:
+
+\begin{txtcode}
+vectors = 212  mismatches = 0
+PASS
+\end{txtcode}
+
+The interesting difference is not the syntax but the type discipline.
+\code{hread} knows how many hex digits to consume because the target has a
+width; \code{\$sscanf} does not, and will happily read six digits into a
+16-bit variable and throw the top away. \VHDL{} makes the format explicit and
+\SV{} makes it your problem -- the same trade you meet everywhere else
+between the two languages.
+
+\subsection{The same file in a \tool{Verilator} C++ testbench}
+
+\index{Verilator!C++ testbench}
+If your testbench is C++ (\cref{ch:verilator}), the reader is an
+\code{ifstream} loop and the file format does not change at all. That is the
+whole point of the style: one file, four readers.
+
+\begin{cppcode}[caption={The vector file in a \tool{Verilator} C++
+testbench.},label={lst:python:cppread}]
+struct Vec { int16_t x0, y0, th, xe, ye; };
+
+static int16_t hex16(const std::string& s) {
+  return static_cast<int16_t>(std::stoul(s, nullptr, 16));
+}
+
+static std::vector<Vec> load(const char* path) {
+  std::vector<Vec> v;
+  std::ifstream f(path);
+  if (!f) { std::fprintf(stderr, "cannot open %s\n", path); std::exit(2); }
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.size() >= 2 && line[0] == '/' && line[1] == '/') continue;
+    std::istringstream is(line);
+    std::string a, b, c, d, e;
+    if (!(is >> a >> b >> c >> d >> e)) continue;
+    v.push_back({hex16(a), hex16(b), hex16(c), hex16(d), hex16(e)});
+  }
+  return v;
+}
+
+  // The driving loop is the same handshake as before: assert req_valid_i,
+  // tick until req_ready_o, tick once more, then tick until rsp_valid_o.
+  for (const Vec& v : vecs) {
+    dut->req_x_i = v.x0; dut->req_y_i = v.y0; dut->req_theta_i = v.th;
+    dut->req_valid_i = 1;
+    dut->eval();
+    while (!dut->req_ready_o) tick();   // stall until the DUT accepts
+    tick();                            // the accepting clock edge
+    dut->req_valid_i = 0;
+    dut->eval();
+    while (!dut->rsp_valid_o) tick();
+    if (static_cast<int16_t>(dut->rsp_x_o) != v.xe ||
+        static_cast<int16_t>(dut->rsp_y_o) != v.ye) ++errors;
+  }
+\end{cppcode}
+
+\begin{txtcode}
+$ ./obj_cpp/Vtb_cpp vec/cordic_vec.txt
+[cpp] 212 vectors, 0 mismatches, 6788 half-cycles
+[cpp] PASS
+\end{txtcode}
+
+\begin{gotcha}{Signed values in a hex vector file}
+\code{26dd 0000 cdbc 0001 c000} contains three negative numbers, and nothing
+in the file says so. Every reader must be told the width and must sign-extend
+itself. In C++ the cast is \code{static\_cast<int16\_t>(...)}; in Python it is
+an explicit \code{v - 65536 if v \& 0x8000 else v}; in \SV{} it is
+\code{\$signed(...)} or an assignment to a \kw{logic} \kw{signed} variable;
+in \VHDL{} it is the \code{signed(...)} type conversion. Get it wrong on
+\emph{one} side and the mismatch report will show you \code{52668} where you
+expected \code{-12868}, which at least is obvious. Get it wrong on
+\emph{both} sides in the same way and the comparison still passes -- and your
+tolerance check on the floating point reference will be the only thing that
+catches it. Always print at least one negative expected value at time zero
+and check it by eye.
+\end{gotcha}
+
+\subsection{Checking the other direction}
+
+\index{post-processing}
+The simulation wrote \file{cordic\_res.txt}. Python now reads it, compares
+against the \emph{floating point} reference (not the bit-exact one -- the
+bit-exact comparison already happened inside the simulation) and reports the
+error in LSBs.
+
+\begin{pycode}[caption={Post-processing and plotting
+(\file{check\_results.py}).},label={lst:python:check}]
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")            # no display in CI
+import matplotlib.pyplot as plt
+import cordic_model as m
+
+def s16(v):
+    return v - 65536 if v & 0x8000 else v
+
+def load(path):
+    rows = []
+    for line in Path(path).read_text().splitlines():
+        line = line.split("//")[0].strip()
+        if not line:
+            continue
+        rows.append([s16(int(t, 16)) for t in line.split()])
+    return np.array(rows, dtype=np.int64)
+
+def main():
+    r = load(args.results)
+    x0, y0, th, xd, yd = (r[:, i] for i in range(5))
+
+    theta = th / float(1 << m.QA)
+    xf = m.K * (x0 * np.cos(theta) - y0 * np.sin(theta))
+    yf = m.K * (x0 * np.sin(theta) + y0 * np.cos(theta))
+
+    ex, ey = xd - xf, yd - yf            # error in LSB of the output format
+    err = np.maximum(np.abs(ex), np.abs(ey))
+
+    # The float reference does not saturate; the DUT does.  Exclude the
+    # vectors that hit a rail, and say how many they were.
+    hi, lo = (1 << (m.DW - 1)) - 1, -(1 << (m.DW - 1))
+    sat = (xd >= hi) | (xd <= lo) | (yd >= hi) | (yd <= lo)
+    err = np.where(sat, 0.0, err)
+
+    print(f"vectors        : {len(r)}")
+    print(f"saturated      : {int(sat.sum())} (excluded)")
+    print(f"worst |error|  : {err.max():.3f} LSB")
+    print(f"tolerance      : {args.tol_lsb} LSB")
+    bad = np.flatnonzero(err > args.tol_lsb)
+    print(f"outside tol    : {len(bad)}")
+
+    if args.plot:
+        fig, ax = plt.subplots(figsize=(7, 3.2))
+        ax.plot(theta[~sat], ex[~sat], lw=0.8, label="x error")
+        ax.plot(theta[~sat], ey[~sat], lw=0.8, label="y error")
+        for s in (args.tol_lsb, -args.tol_lsb):
+            ax.axhline(s, ls="--", lw=0.7, color="0.4")
+        ax.set_xlabel("theta [rad]")
+        ax.set_ylabel("error [LSB of Q1.14]")
+        ax.legend(loc="upper right", fontsize=8); ax.grid(alpha=0.3)
+        fig.tight_layout(); fig.savefig(args.plot, dpi=150)
+
+    return 1 if len(bad) else 0
+\end{pycode}
+
+Run over a 721-point sweep of the unit circle:
+
+\begin{txtcode}
+$ python3 py/check_results.py sweep/cordic_res.txt --plot sweep/err.png
+vectors        : 721
+saturated      : 0 (excluded)
+worst |error|  : 3.597 LSB
+rms   error    : 1.115 LSB
+tolerance      : 12.0 LSB
+outside tol    : 0
+plot           : sweep/err.png
+\end{txtcode}
+
+\placeholder{6cm}{The error-versus-angle plot produced by
+\file{check\_results.py}: two traces, x error and y error in LSBs of Q1.14,
+against theta from -pi to +pi. Both stay inside a band of about
+\(\pm 3.6\) LSB, with the largest excursions near \(\pm \pi/2\) and
+\(\pm \pi\) where the coarse rotation stage runs and the residual angle is
+largest. The dashed lines at \(\pm 12\) LSB are the acceptance tolerance;
+the traces never approach them.}
+
+\index{tolerance}
+That number, 3.597 LSB, is the whole reason to keep the floating point
+reference around. The bit-exact model told you the \RTL{} matches the model.
+The floating point reference tells you the \emph{model} is a good enough
+approximation of a rotation -- which is a different question, and the one
+your supervisor will actually ask.
+
+\begin{gotcha}{A floating point golden model cannot be compared exactly}
+A bit-exact Python model and the \RTL{} must agree exactly: any difference is
+a bug in one of them, and the check is \code{==}. A floating point reference
+and a fixed point \DUT{} will \emph{never} agree exactly, and comparing them
+needs a tolerance. Choosing that tolerance is a design decision, not a
+testbench detail:
+\begin{itemize}
+\item Derive it. For an \(N\)-step CORDIC the angle quantisation contributes
+      about \(2^{-N}\) radian and the datapath truncation about one LSB per
+      stage in the worst case; for \(N = 14\) with two guard bits the bound is
+      a little under 5 LSB. The testbench in \refverificationbook uses 12 LSB, which
+      leaves margin without hiding a real bug.
+\item Never tune it upward until the test passes. If you must, write down in
+      the commit message why the bound moved.
+\item Exclude the cases the reference cannot model. The float reference does
+      not saturate; the \DUT{} does. Before that exclusion was added, two
+      directed vectors with \code{x0 = 32767} produced a reported worst error
+      of \(21193\) LSB and a red build. The vectors were fine; the comparison
+      was wrong.
+\end{itemize}
+\end{gotcha}
+
+\subsection{Reproducibility}
+
+\index{reproducibility}\index{seed}
+A vector file is data, and data in a verification flow has to be
+reproducible. Four rules.
+
+\textbf{The seed is an input, not a constant.} Pass it on the command line,
+default it to something fixed, print it, and put it in the file header. A
+regression that finds a bug with \code{--seed 4711} must be repeatable by
+typing \code{--seed 4711}.
+
+\textbf{Pin the versions.} \code{random.Random(seed)} in CPython is stable
+across versions in practice, but \code{numpy}'s legacy \code{np.random.seed}
+is explicitly not guaranteed to be, and \code{set} iteration order is not
+either. If a vector file must be byte-identical next year, use
+\code{random.Random}, sort anything that came out of a set or a dict, and
+record the Python version in the header.
+
+\textbf{Store the file, or store the generator -- decide.} Committing the
+vector file makes the repository self-contained and the history readable, at
+the cost of a binary-ish blob in every diff. Regenerating it keeps the
+repository small but means a broken generator breaks every historical commit.
+The usual compromise: commit a small directed set (a few hundred vectors,
+reviewable) and regenerate the large random set in CI.
+
+\textbf{Make the build depend on the generator.} This is the one people
+forget.
+
+\begin{makecode}
+# The vector file depends on the generator AND on the model: change either
+# one and the vectors are rebuilt.
+vec/cordic_vec.txt vec/cordic_vec.hex vec/cordic_vec.n: \
+        py/gen_vectors.py py/cordic_model.py
+	$(PYTHON) py/gen_vectors.py --seed $(SEED) --count $(COUNT) \
+	    --outdir vec
+\end{makecode}
+
+\begin{ruleofthumb}
+Every generated artefact must have a Make rule whose prerequisites include
+both the generator and everything the generator imports. Otherwise the day
+you fix the model is the day your regression starts lying to you.
+\end{ruleofthumb}
+
+\section{Generated source}
+\label{sec:python:generated}
+
+\index{code generation}
+The second style moves the coupling one step earlier: Python writes source
+code, and the compiler consumes it. The advantage over offline vectors is
+that the result becomes a constant in the compiled design, so there is no
+run-time file access and no timing at all. The cost is a build step and a
+generated file that can go stale.
+
+\subsection{One generator, two outputs}
+
+\index{jinja2}
+\Cref{lst:python:gentbl} emits the CORDIC constants both as a C++ header for
+the \tool{Verilator} testbench and as a \SV{} package for the \RTL{}. It uses
+\code{jinja2}, which is worth the dependency as soon as the template has more
+than one loop in it: the alternative is a function full of string
+concatenation that nobody can read.
+
+\begin{pycode}[caption={Emitting a C++ header and a \SV{} package from one
+model (\file{gen\_tables.py}).},label={lst:python:gentbl}]
+from datetime import date
+from jinja2 import Template
+import cordic_model as m
+
+BANNER = ("// GENERATED by gen_tables.py on {date} -- DO NOT EDIT.\n"
+          "// Source of truth: cordic_model.py (N={N}, IQA={IQA}).\n")
+
+CPP = Template("""{{banner}}
+#pragma once
+#include <array>
+#include <cstdint>
+
+namespace cordic_ref {
+
+constexpr int    kN = {{N}}, kDW = {{DW}}, kQF = {{QF}};
+constexpr int    kAW = {{AW}}, kQA = {{QA}}, kX0Unit = {{X0}};
+constexpr double kGain = {{K}};
+
+constexpr std::array<int32_t, kN> kAtan = {
+{%- for v in atan %}
+    {{ v }}{{ "," if not loop.last }}
+{%- endfor %}
+};
+
+}  // namespace cordic_ref
+""")
+
+SV = Template("""{{banner}}
+package cordic_tbl_pkg;
+  localparam int unsigned N   = {{N}};
+  localparam int unsigned IQA = {{IQA}};
+  localparam int signed   X0_UNIT = {{X0}};
+
+  localparam int signed ATAN_ROM [{{N}}] = '{
+{%- for v in atan %}
+    {{ v }}{{ "," if not loop.last }}
+{%- endfor %}
+  };
+endpackage : cordic_tbl_pkg
+""")
+
+def main():
+    out = Path(sys.argv[1] if len(sys.argv) > 1 else "gen")
+    out.mkdir(parents=True, exist_ok=True)
+    ctx = dict(banner=BANNER.format(date=date.today(), N=m.N, IQA=m.IQA),
+               N=m.N, DW=m.DW, QF=m.QF, AW=m.AW, QA=m.QA, IQA=m.IQA,
+               K=repr(m.K), X0=m.X0_UNIT, atan=m.ATAN)
+    (out / "cordic_tbl.h").write_text(CPP.render(**ctx))
+    (out / "cordic_tbl_pkg.sv").write_text(SV.render(**ctx))
+\end{pycode}
+
+The output is boring, which is the point:
+
+\begin{txtcode}
+$ python3 py/gen_tables.py gen && head -20 gen/cordic_tbl.h
+// GENERATED by gen_tables.py on 2026-09-05 -- DO NOT EDIT.
+// Source of truth: cordic_model.py (N=14, IQA=15).
+
+#pragma once
+#include <array>
+#include <cstdint>
+
+namespace cordic_ref {
+
+constexpr int    kN      = 14;
+constexpr int    kDW     = 16, kQF = 14;
+constexpr int    kAW     = 16, kQA = 13;
+constexpr double kGain   = 1.6467602540312922;
+constexpr int    kX0Unit = 9949;
+
+constexpr std::array<int32_t, kN> kAtan = {
+    25736,
+    15193,
+    8027,
+...
+\end{txtcode}
+
+\subsection{A package, not an include}
+
+\index{package!generated}\index{\`{}include}
+You can emit either a \SV{} package or a \file{.svh} file that gets
+\code{`include}d into a module. Emit the package.
+
+An \code{`include} is textual substitution done by the preprocessor. Include
+it in two modules and you get two copies of the constants, with no
+guarantee -- and no check -- that both compiled from the same generation.
+Include it twice into the same scope by accident and you get a duplicate
+declaration error whose message points at a line number in a file you did not
+write. A package is a named scope with a single elaboration: import it in ten
+places and there is still exactly one \code{ATAN\_ROM}, and the tool will
+tell you if two versions of the package are in the compilation library. This
+is the same argument you already accept in \VHDL{}, where nobody would dream
+of using textual inclusion instead of a package.
+
+The one case for an \code{`include} is a fragment that is not a legal
+compilation unit on its own -- a list of port connections, a block of
+declarations that must land inside a module. If you find yourself generating
+those, consider whether the thing you actually want is a parameterised module
+or an interface.
+
+\subsection{The arctangent ROM: generate or elaborate?}
+
+\index{ROM!arctangent}
+\file{cordic\_pkg.sv} computes the arctangent table at elaboration with
+\code{\$atan}, as shown at the start of this chapter. \file{gen\_tables.py}
+computes the same table in Python and writes integer literals. Both are
+correct. Which one you should use depends entirely on your tools.
+
+\tool{Verilator} 5.020 handles the elaborated version:
+
+\begin{txtcode}
+$ ./obj_atan/Vtb_atan
+ATAN_ROM = 25736 15193 8027 4075 2045 1024 512 256 128 64 32 16 8 4
+X0_UNIT = 9949, HALF_PI = 51472
+\end{txtcode}
+
+which is exactly the Python table:
+
+\begin{txtcode}
+$ python3 py/cordic_model.py
+N = 14, K = 1.646760, 1/K = 0.607253, X0_UNIT = 9949
+HALF_PI = 51472, PI = 102944
+atan table: [25736, 15193, 8027, 4075, 2045, 1024, 512, 256, 128, 64, 32,
+             16, 8, 4]
+worst |error| over [-pi, pi] = 0.000233  (3.82 LSB)
+\end{txtcode}
+
+\tool{Icarus Verilog} 12.0 does not:
+
+\begin{txtcode}
+$ iverilog -g2012 -DSYNTHESIS -o /dev/null sv/cordic_pkg.sv sv/cordic_rot.sv
+sv/cordic_pkg.sv:106: error: Array rom needs an array index here.
+sv/cordic_pkg.sv:109: error: Unable to evaluate parameter ATAN_ROM value:
+                             cordic_pkg.build_atan_rom()
+2 error(s) during elaboration.
+\end{txtcode}
+
+That is the deciding factor, and it is a mundane one. Keep the constant
+function if every tool in your flow -- simulator, linter, synthesiser,
+formal tool -- accepts it, because it removes a build step and keeps the
+design self-contained. Generate the table the moment one of them does not.
+
+\begin{gotcha}{The generated file that nobody regenerated}
+The failure mode of style (b) is always the same. Somebody changes \code{N}
+in the model, runs the simulation, sees it pass, and ships. The generated
+package still holds the old table, because nothing forced it to be rebuilt.
+Two defences, and you want both:
+\begin{itemize}
+\item a Make rule with the generator and the model as prerequisites, as in
+      \cref{sec:python:vectors};
+\item a CI job that regenerates into a scratch directory and diffs.
+\end{itemize}
+\begin{txtcode}
+$ make gen-check
+python3 py/gen_tables.py .gencheck
+diff -r gen .gencheck || (echo "generated files are stale: run 'make gen'"; \
+                          exit 1)
+Files gen/cordic_tbl_pkg.sv and .gencheck/cordic_tbl_pkg.sv differ
+generated files are stale: run 'make gen'
+make: *** [Makefile:30: gen-check] Error 1
+\end{txtcode}
+Also put \code{GENERATED -- DO NOT EDIT} and the name of the generator in the
+first line of every emitted file. Somebody will edit it anyway, but at least
+the diff will show that they did.
+\end{gotcha}
+
+\subsection{In version control, or not?}
+
+Both answers are defensible and the argument is old. Keeping generated files
+out of the repository is cleaner in principle: one source of truth, no
+possibility of a stale artefact, no noisy diffs. Keeping them in makes the
+repository buildable by somebody who does not have your Python environment,
+makes code review of the generated \RTL{} possible, and makes \code{git
+blame} on a constant meaningful.
+
+For a thesis or a course project, commit them, and add the \code{gen-check}
+job above. Your reviewer will not have \code{jinja2}. For a large industrial
+flow with a curated build environment, generate them.
+
+\begin{notebox}{Register-map generation}
+\index{IP-XACT}\index{PeakRDL}
+Generating a constant table is the toy version of an idea the industry runs
+at scale. A register map -- addresses, fields, access types, reset values --
+is written once in a machine-readable form and everything else is generated
+from it: the \RTL{} register file, the C header for firmware, the UVM
+register model (\refverificationbook), the documentation, and the address decoder in
+the testbench. The formats you will meet are IP-XACT (IEEE 1685, XML,
+heavyweight, universally supported by commercial tools) and SystemRDL
+(Accellera, far more readable). On the open-source side, \code{peakrdl} reads
+SystemRDL and emits \SV{}, VHDL, C headers, HTML and a UVM model;
+\code{corsair} does something similar from JSON or YAML. If your design has
+more than about ten registers, learn one of these instead of maintaining four
+copies of the same table by hand.
+\end{notebox}
+
+\section{In-process, part 1: DPI-C}
+\label{sec:python:dpi}
+
+\index{DPI-C}
+The Direct Programming Interface is the standard way for \SV{} to call C and
+for C to call \SV{}. It is defined in IEEE 1800-2017 clauses 35 and H, it is
+supported by every commercial simulator and by \tool{Verilator}, and it is
+the mechanism underneath most of the Python integrations you will meet.
+\VHDL{} has no equivalent in the standard: VHPI (IEEE 1076-2008 clause 22) is
+a procedural interface, not a foreign-function interface, and the practical
+route in \VHDL{} is the vendor-specific \code{foreign} attribute, whose
+spelling, calling convention and capabilities differ from one tool to the
+next.
+
+\subsection{Declaring an import}
+
+\begin{svcode}[caption={DPI import and export declarations.},%
+label={lst:python:dpidecl}]
+  // Pure: same inputs give the same result, no side effects, no access to
+  // the design.  The tool may cache the result or elide the call.
+  import "DPI-C" pure function real c_cordic_k();
+
+  // Context: the function needs to know which SystemVerilog scope called
+  // it, because it will call back in (or use svGetScope).
+  import "DPI-C" context function void c_cordic_ref(
+      input  int x0, input int y0, input int theta,
+      output real xr, output real yr);
+
+  // Neither: the default.  The function may have side effects but may not
+  // call back into SystemVerilog.
+  import "DPI-C" function void c_show_types(
+      input logic [31:0] l, input bit [31:0] b);
+
+  // Export: make a SystemVerilog function callable from C.
+  export "DPI-C" function sv_note;
+  function void sv_note(input string msg);
+    $display("[SV] note from C: %s", msg);
+  endfunction
+\end{svcode}
+
+\index{DPI-C!pure}\index{DPI-C!context}
+\kw{pure} and \kw{context} are the two qualifiers that matter. A \kw{pure}
+function must depend only on its arguments, must not touch the design, must
+not do I/O, and must not call back into \SV{}. In exchange, the simulator may
+call it once and reuse the answer, or skip the call entirely if the result is
+unused. A \kw{context} function is given the calling scope, which it needs if
+it wants to call an exported task or read a signal through
+\code{svGetScope}/\code{svSetScope}. Marking something \kw{pure} that is not
+is a genuinely nasty bug, because the symptom is a stale value rather than a
+crash.
+
+\index{svGetScope}\index{DPI-C!open array}
+Two parts of the interface deserve a sentence each because they are where the
+examples in vendor documentation stop. \code{svGetScope()} returns an opaque
+handle to the \SV{} scope a \kw{context} function was called from, and
+\code{svSetScope(h)} makes that scope current before you call an exported
+task. You need the pair when the C side must call back into a \emph{specific}
+instance -- a driver in one agent rather than another -- and the usual
+pattern is to have each instance register its scope in an \code{initial}
+block, store the handle in a C table, and set it before each callback. Open
+arrays are the other gap: an argument declared \code{input int arr []} on the
+\SV{} side arrives as an \code{svOpenArrayHandle}, and you must call
+\code{svSize}, \code{svLow}, \code{svHigh} and \code{svGetArrElemPtr1} to get
+at the elements rather than indexing a C array. Sized arrays
+(\code{input int arr [8]}) arrive as an ordinary pointer and are far simpler;
+prefer them unless the size genuinely varies.
+
+\begin{table}[htbp]
+\centering
+\caption{DPI type mapping (IEEE 1800-2017, Annex H). \code{svBitVecVal} and
+\code{svLogicVecVal} are arrays of 32-bit chunks.}
+\label{tab:python:dpitypes}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{\SV{}} & \textbf{C} & \textbf{Notes} \\
+\midrule
+\code{byte}                & \code{char}                & 8-bit, two-state \\
+\code{shortint}            & \code{short int}           & 16-bit \\
+\code{int}                 & \code{int}                 & 32-bit \\
+\code{longint}             & \code{long long}           & 64-bit \\
+\code{real}                & \code{double}              & \\
+\code{shortreal}           & \code{float}               & \\
+\code{string}              & \code{const char*}         & read-only, borrowed \\
+\code{chandle}             & \code{void*}               & opaque pointer \\
+\code{bit}                 & \code{svBit}               & one two-state bit \\
+\code{logic}, \code{reg}   & \code{svLogic}             & one four-state bit \\
+\code{bit [N-1:0]}         & \code{svBitVecVal*}        & packed, 2-state \\
+\code{logic [N-1:0]}       & \code{svLogicVecVal*}      & packed, 4-state:
+                                                          \code{aval}+\code{bval} \\
+\code{open array} \code{[]} & \code{svOpenArrayHandle}   & use the
+                                                          \code{svSize}/\code{svGetArrElemPtr} API \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{A working example}
+
+The C side computes the CORDIC reference in double precision and calls back
+into \SV{} once, to prove that \kw{context} and \code{export} work.
+
+\begin{cppcode}[caption={The C reference model (\file{cordic\_dpi.c}).},%
+label={lst:python:dpic}]
+#include <math.h>
+#include <stdio.h>
+#include "svdpi.h"
+
+/* The simulator may compile this file with a C++ compiler (Verilator does),
+   so every DPI symbol must have C linkage in both cases. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern void sv_note(const char* msg);   /* exported from SystemVerilog */
+
+#define QF 14
+#define QA 13
+#define NIT 14
+
+static double cordic_gain(void) {          /* K = prod sqrt(1 + 2^-2i) */
+  double k = 1.0;
+  for (int i = 0; i < NIT; i++) k *= sqrt(1.0 + pow(2.0, -2.0 * i));
+  return k;
+}
+double c_cordic_k(void) { return cordic_gain(); }
+
+void c_cordic_ref(int x0, int y0, int theta, double* xr, double* yr) {
+  static int first = 1;
+  double th = (double)theta / (double)(1 << QA);
+  double k  = cordic_gain();
+  *xr = k * ((double)x0 * cos(th) - (double)y0 * sin(th));
+  *yr = k * ((double)x0 * sin(th) + (double)y0 * cos(th));
+  if (first) {
+    char buf[128];
+    snprintf(buf, sizeof buf, "C reference active, K = %.9f", k);
+    sv_note(buf);                 /* needs `context' on the import */
+    first = 0;
+  }
+}
+
+/* 4-state vs 2-state: `logic' arrives as svLogicVecVal (aval + bval),
+   `bit' as svBitVecVal (one word).  Getting this wrong is silent. */
+void c_show_types(const svLogicVecVal* l, const svBitVecVal* b) {
+  printf("[C] logic: aval=0x%08x bval=0x%08x   bit: 0x%08x\n",
+         (unsigned)l->aval, (unsigned)l->bval, (unsigned)*b);
+}
+
+#ifdef __cplusplus
+}
+#endif
+\end{cppcode}
+
+\tool{Verilator} compiles the C file as part of the build:
+
+\begin{shcode}
+$ verilator --binary --timing --top-module tb_dpi \
+      sv/cordic_pkg.sv sv/tb_dpi.sv cpp/cordic_dpi.cpp \
+      -o Vtb_dpi --Mdir obj_dpi
+$ ./obj_dpi/Vtb_dpi
+\end{shcode}
+
+\begin{txtcode}
+[SV] K from C = 1.646760254
+[C] logic: aval=0xdeadbeef bval=0x00000000   bit: 0xdeadbeef
+[C] logic: aval=0x0000beef bval=0x00000000   bit: 0x0000beef
+[SV] note from C: C reference active, K = 1.646760254
+[SV] worst |model - C reference| = 3.597 LSB over 361 angles
+\end{txtcode}
+
+\begin{gotcha}{\kw{logic} and \kw{bit} are different C types}
+The two \code{c\_show\_types} calls in the run above passed
+\code{32'hDEAD\_BEEF} and then \code{32'hXXXX\_BEEF}. A \kw{logic} argument
+arrives as an \code{svLogicVecVal}, a struct with an \code{aval} and a
+\code{bval} word: \code{bval} bits mark the positions that are \code{X} or
+\code{Z}. A \kw{bit} argument arrives as a plain \code{svBitVecVal}, one
+word, with no way to represent \code{X}. If you declare the C parameter as
+\code{svBitVecVal*} but the \SV{} side passes a \kw{logic}, you will read the
+\code{aval} word and silently treat every \code{X} as whatever the simulator
+happened to leave there.
+
+Note also what \tool{Verilator} printed: \code{bval} is zero in both calls,
+and the second call shows \code{aval=0x0000beef}. \tool{Verilator} is a
+two-state simulator, so the \code{X} nibbles became zeros before the call was
+made. On a four-state simulator the second line would show a non-zero
+\code{bval}. Do not use \tool{Verilator} to test four-state DPI behaviour.
+\end{gotcha}
+
+\subsection{The same thing on \tool{QuestaSim}}
+
+\index{QuestaSim}
+\tool{QuestaSim} is not installed on the machine this chapter was written on,
+so the following command lines are given as reference and are \emph{not}
+verified here. They are the standard three steps: compile the \SV{}, build a
+shared object, load it at elaboration.
+
+\begin{shcode}
+# Not executed for this book -- QuestaSim was unavailable.
+vlib work
+vlog -sv sv/cordic_pkg.sv sv/tb_dpi.sv
+gcc -shared -fPIC -I$QUESTA_HOME/include \
+    cpp/cordic_dpi.c -o cordic_dpi.so -lm
+vsim -c -sv_lib cordic_dpi tb_dpi -do "run -all; quit"
+\end{shcode}
+
+Note that \code{-sv\_lib} takes the library name \emph{without} the
+\file{.so} suffix; passing \code{cordic\_dpi.so} is the most common first
+mistake. \code{vsim} also accepts \code{-dpicpppath} to select the compiler
+it uses when it builds the shim itself.
+
+\subsection{Embedding CPython in the shim}
+
+\index{CPython!embedding}
+Now the step that motivates this section: instead of reimplementing the model
+in C, have the C shim call the Python one. CPython can be embedded in any
+process. \Cref{lst:python:pydpi} is a working shim.
+
+\begin{cppcode}[caption={A DPI shim with CPython embedded
+(\file{py\_dpi.cpp}).},label={lst:python:pydpi}]
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#include "svdpi.h"
+
+extern "C" {
+
+static PyObject* g_fn = nullptr;   /* cordic_model.cordic_rot */
+
+void py_ref_open(const char* module, const char* func) {
+  if (!Py_IsInitialized()) {
+    PyConfig cfg;
+    PyConfig_InitPythonConfig(&cfg);
+    Py_InitializeFromConfig(&cfg);
+    PyConfig_Clear(&cfg);
+    PyRun_SimpleString("import sys; sys.path.insert(0, 'py')");
+  }
+  PyObject* m = PyImport_ImportModule(module);
+  if (!m) { PyErr_Print(); return; }
+  g_fn = PyObject_GetAttrString(m, func);
+  Py_DECREF(m);
+  if (!g_fn || !PyCallable_Check(g_fn)) { PyErr_Print(); g_fn = nullptr; }
+}
+
+void py_ref_call(int x0, int y0, int th, int* xo, int* yo) {
+  *xo = 0; *yo = 0;
+  if (!g_fn) return;
+  PyGILState_STATE gil = PyGILState_Ensure();   /* one interpreter, one GIL */
+  PyObject* r = PyObject_CallFunction(g_fn, "iii", x0, y0, th);
+  if (!r) { PyErr_Print(); PyGILState_Release(gil); return; }
+  *xo = (int)PyLong_AsLong(PyTuple_GetItem(r, 0));
+  *yo = (int)PyLong_AsLong(PyTuple_GetItem(r, 1));
+  Py_DECREF(r);
+  PyGILState_Release(gil);
+}
+
+void py_ref_close(void) { Py_XDECREF(g_fn); g_fn = nullptr; Py_FinalizeEx(); }
+
+}  /* extern "C" */
+\end{cppcode}
+
+Built against the system CPython and run under \tool{Verilator}:
+
+\begin{shcode}
+$ verilator --binary --timing --top-module tb_pydpi \
+      -CFLAGS "$(python3.11-config --includes)" \
+      -LDFLAGS "$(python3.11-config --embed --ldflags)" \
+      sv/cordic_pkg.sv sv/tb_pydpi.sv cpp/py_dpi.cpp \
+      -o Vtb_pydpi --Mdir obj_pydpi
+$ ./obj_pydpi/Vtb_pydpi
+\end{shcode}
+
+\begin{txtcode}
+[SV] theta=0 -> python says (16383, 1)
+[SV] theta=2458 -> python says (15651, 4841)
+[SV] theta=4915 -> python says (13521, 9251)
+[SV] theta=7373 -> python says (10183, 12834)
+[SV] theta=9830 -> python says (5936, 15270)
+\end{txtcode}
+
+It works. Now the costs, measured on the same machine, 50\,000 calls of each:
+
+\begin{txtcode}
+[bench] 50000 calls: embedded Python 0.818 s, C 0.018 s, ratio 46.7
+\end{txtcode}
+
+About \SI{16}{\micro\second} per Python call against \SI{0.36}{\micro\second}
+for the C one -- between one and two orders of magnitude, and that is for a
+model whose body is a fourteen-iteration integer loop. The gap is mostly
+call overhead: argument marshalling, tuple allocation, the GIL. A model doing
+real \code{numpy} work per call would look better in relative terms and worse
+in absolute ones.
+
+The other costs are not measurable but matter more:
+
+\begin{itemize}
+\item \textbf{Interpreter start-up} happens once, but it happens inside the
+      simulator, and if it fails the simulator dies with a stack trace nobody
+      can read.
+\item \textbf{The GIL.} One interpreter per process. If your simulator is
+      multi-threaded (\tool{Verilator} with \code{--threads}, or a
+      commercial simulator running a multi-core partition) every DPI call
+      into Python serialises.
+\item \textbf{One process, one crash.} A segfault in a C extension module
+      takes the simulation with it, mid-run, with no waveform flushed.
+\item \textbf{Fragile builds.} The simulator, the Python interpreter and
+      every extension module must agree on the C++ ABI and the C runtime.
+      Mixing a conda Python with a vendor simulator's bundled libstdc++ is a
+      well-known way to lose an afternoon.
+\end{itemize}
+
+\subsection{The pragmatic alternative}
+
+If you already have the Python model and you want it in the loop, a
+long-lived Python worker process talking to the simulator over a pipe or a
+socket avoids every one of those problems except speed. The shim in C stays
+tiny, the interpreter lives in its own process with its own crash domain, and
+you can restart or debug the model independently. That is coupling style (d),
+and \cref{sec:python:socket} shows it.
+
+\begin{ruleofthumb}
+Do not embed CPython in a simulator for a student project or a thesis. Use
+offline vectors, generated source, or cocotb. Embed CPython only when you
+have an existing Python model that must be in the loop, no cocotb-supported
+simulator, and a build engineer.
+\end{ruleofthumb}
+
+\section{In-process, part 2: \tool{Verilator} and \code{pybind11}}
+\label{sec:python:pybind}
+
+\index{pybind11}
+\tool{Verilator} compiles your design into a C++ class. A C++ class can be
+wrapped for Python with \code{pybind11} in about forty lines. The result is a
+testbench written entirely in Python, driving a compiled model directly, with
+no VPI, no DPI and no simulator kernel in between.
+
+\begin{cppcode}[caption={A \code{pybind11} wrapper around the Verilated model
+(\file{pybind\_cordic.cpp}).},label={lst:python:pybind}]
+#include <pybind11/pybind11.h>
+#include "Vcordic_rot.h"
+#include "verilated.h"
+
+namespace py = pybind11;
+
+class Cordic {
+ public:
+  Cordic() : ctx_(new VerilatedContext), dut_(new Vcordic_rot(ctx_)) {}
+  ~Cordic() { dut_->final(); delete dut_; delete ctx_; }
+
+  // One half cycle: set the clock, evaluate, advance simulation time.
+  void half_tick(int level) {
+    dut_->clk_i = level;
+    dut_->eval();
+    ctx_->timeInc(5000);   // 5 ns; timeInc counts timeprecision units
+  }
+  void tick() { half_tick(0); half_tick(1); }
+
+  void set_rst(int v)   { dut_->rst_ni = v; }
+  void set_valid(int v) { dut_->req_valid_i = v; }
+  void set_ready(int v) { dut_->rsp_ready_i = v; }
+  void set_req(int x, int y, int th) {
+    dut_->req_x_i     = static_cast<uint16_t>(x);
+    dut_->req_y_i     = static_cast<uint16_t>(y);
+    dut_->req_theta_i = static_cast<uint16_t>(th);
+  }
+  void eval() { dut_->eval(); }
+  bool req_ready() const { return dut_->req_ready_o; }
+  bool rsp_valid() const { return dut_->rsp_valid_o; }
+  int  rsp_x() const { return static_cast<int16_t>(dut_->rsp_x_o); }
+  int  rsp_y() const { return static_cast<int16_t>(dut_->rsp_y_o); }
+  uint64_t time() const { return ctx_->time(); }
+
+ private:
+  VerilatedContext* ctx_;
+  Vcordic_rot* dut_;
+};
+
+PYBIND11_MODULE(vcordic, m) {
+  m.doc() = "Verilated cordic_rot, driven from Python";
+  py::class_<Cordic>(m, "Cordic")
+      .def(py::init<>())
+      .def("tick", &Cordic::tick).def("eval", &Cordic::eval)
+      .def("set_rst", &Cordic::set_rst)
+      .def("set_valid", &Cordic::set_valid)
+      .def("set_ready", &Cordic::set_ready)
+      .def("set_req", &Cordic::set_req)
+      .def_property_readonly("req_ready", &Cordic::req_ready)
+      .def_property_readonly("rsp_valid", &Cordic::rsp_valid)
+      .def_property_readonly("rsp_x", &Cordic::rsp_x)
+      .def_property_readonly("rsp_y", &Cordic::rsp_y)
+      .def_property_readonly("time", &Cordic::time);
+}
+\end{cppcode}
+
+\begin{tipbox}{Building the extension}
+\tool{Verilator} must be told to compile position-independent code, because
+the result goes into a shared object. Forgetting \code{-CFLAGS -fPIC} gives
+a linker error about \code{R\_X86\_64\_TPOFF32} relocations that looks far
+more alarming than it is.
+\begin{shcode}
+$ verilator --cc --top-module cordic_rot -CFLAGS -fPIC \
+      sv/cordic_pkg.sv sv/cordic_rot.sv --Mdir obj_pb
+$ make -C obj_pb -f Vcordic_rot.mk
+$ g++ -O2 -std=c++17 -shared -fPIC \
+      $(python3 -m pybind11 --includes) \
+      -I obj_pb -I /usr/share/verilator/include \
+      -I /usr/share/verilator/include/vltstd \
+      cpp/pybind_cordic.cpp obj_pb/libVcordic_rot.a obj_pb/libverilated.a \
+      -o vcordic.so
+\end{shcode}
+\end{tipbox}
+
+The driver is then ordinary Python, with \code{numpy} available and the
+golden model one import away.
+
+\begin{pycode}[caption={Driving the Verilated model from Python
+(\file{drive\_pybind.py}).},label={lst:python:pybinddrv}]
+import numpy as np
+import cordic_model as m
+import vcordic
+
+def run(dut, x0, y0, th):
+    dut.set_req(x0, y0, th)
+    dut.set_valid(1)
+    dut.eval()
+    while not dut.req_ready:
+        dut.tick()
+    dut.tick()                       # the accepting edge
+    dut.set_valid(0)
+    dut.eval()
+    while not dut.rsp_valid:
+        dut.tick()
+    return dut.rsp_x, dut.rsp_y
+
+dut = vcordic.Cordic()
+dut.set_rst(0); dut.set_ready(1)
+for _ in range(3):
+    dut.tick()
+dut.set_rst(1)
+
+angles = np.linspace(-np.pi, np.pi, 721)
+thetas = [m.float_to_q(a, m.QA, m.AW) for a in angles]
+got = [run(dut, m.X0_UNIT, 0, th) for th in thetas]
+exp = [m.cordic_rot(m.X0_UNIT, 0, th) for th in thetas]
+print("bit-exact misses  :",
+      sum(1 for g, e in zip(got, exp) if g != e))
+
+gx = np.array([g[0] for g in got]) / float(1 << m.QF)
+gy = np.array([g[1] for g in got]) / float(1 << m.QF)
+err = np.maximum(np.abs(gx - np.cos(angles)), np.abs(gy - np.sin(angles)))
+print(f"worst |err| vs sin/cos : {err.max() * (1 << m.QF):.2f} LSB")
+\end{pycode}
+
+\begin{txtcode}
+$ python3 py/drive_pybind.py
+transactions      : 721
+bit-exact misses  : 0
+worst |err| vs sin/cos : 3.82 LSB
+simulated time    : 115380000 ps  (115.38 us)
+wall time         : 8.0 ms (11.1 us per transaction)
+\end{txtcode}
+
+\code{ctx\_->time()} counts \code{timeprecision} units, and the design declares
+\code{`timescale 1ns/1ps}, so the raw number is picoseconds. That is why
+\code{half\_tick()} advances by 5000 and not by 5: see the discussion in
+\cref{ch:verilator}.
+
+\index{Verilator!limitations}
+This is attractive and it is genuinely useful for algorithmic blocks. The
+whole testbench is Python; \code{numpy} and \code{matplotlib} are right
+there; there is no VPI, no DPI, no simulator licence.
+
+The limits are equally real. You are restricted to \tool{Verilator}'s
+synthesisable subset, so no \code{initial} blocks with delays, no classes, no
+constrained random inside the design, and only partial four-state support.
+You are writing the clocking yourself: every \code{eval()} and every
+\code{timeInc()} is your responsibility, and a missing \code{eval()} after
+changing an input is a bug that looks like a design bug. There is no
+scheduler, so two "concurrent" drivers are two Python loops you have to
+interleave by hand. And the wrapper is code you maintain: add a port to the
+\DUT{} and you edit C++.
+
+For a single-clock, valid/ready block this is fine. For anything with more
+than two independent interfaces, use cocotb instead -- which gives you the
+same Python, plus a scheduler.
+
+\section{In-process, part 3: cocotb}
+\label{sec:python:cocotb}
+
+\index{cocotb}
+cocotb (coroutine co-simulation testbench) is the option most students should
+reach for. It is a Python library that drives a \DUT{} through the
+simulator's own procedural interface -- VPI for Verilog, VHPI or FLI for
+\VHDL{} -- and it replaces the HDL testbench entirely. There is no
+\code{tb\_top.sv}. The top level of the simulation \emph{is} the \DUT{}, and
+everything above it is Python.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\small\sffamily,
+      box/.style={draw,rounded corners=2pt,minimum height=9mm,
+                  minimum width=34mm,align=center},
+      ar/.style={-{Latex[length=2.2mm]},thick,draw=codenumber},
+      ar2/.style={{Latex[length=2.2mm]}-{Latex[length=2.2mm]},thick,
+                  draw=codenumber}]
+
+    \node[box,draw=codekey,fill=notebg] (test)
+      {\code{test\_cordic.py}\\[-1pt]{\scriptsize
+       \code{@cocotb.test()} coroutines}};
+    \node[box,draw=codekey,fill=notebg,below=7mm of test] (model)
+      {\code{cordic\_model.py}\\[-1pt]{\scriptsize the golden model}};
+    \node[box,draw=codekey,fill=notebg,right=16mm of test] (sched)
+      {cocotb scheduler\\[-1pt]{\scriptsize triggers, tasks}};
+    \node[box,draw=accent,fill=tipbg,below=7mm of sched] (gpi)
+      {GPI\\[-1pt]{\scriptsize C++ abstraction layer}};
+    \node[box,draw=accentalt,fill=svbg,below=7mm of gpi] (vpi)
+      {VPI / VHPI / FLI};
+    \node[box,draw=accentalt,fill=svbg,below=7mm of vpi] (sim)
+      {simulator kernel\\[-1pt]{\scriptsize Questa, Verilator,
+       Icarus, \dots}};
+    \node[box,draw=accentalt,fill=svbg,below=7mm of sim] (dut)
+      {\code{cordic\_rot}\\[-1pt]{\scriptsize the DUT -- the top level}};
+
+    \draw[ar2] (test) -- (sched);
+    \draw[ar]  (model) -- (test);
+    \draw[ar2] (sched) -- (gpi);
+    \draw[ar2] (gpi)   -- (vpi);
+    \draw[ar2] (vpi)   -- (sim);
+    \draw[ar2] (sim)   -- (dut);
+
+    \node[right=2mm of sched.east,font=\scriptsize,align=left,
+          text width=30mm]
+      {\code{await}\\\code{RisingEdge(clk)}\\suspends a task and\\registers a
+       callback};
+    \node[right=2mm of vpi.east,font=\scriptsize,align=left,text width=30mm]
+      {value read/write and callback registration, per IEEE 1800 clause 36};
+
+    \begin{scope}[on background layer]
+      \node[draw=codeframe,dashed,rounded corners=3pt,
+            fit=(test)(model)(sched),inner sep=3mm,
+            label={[font=\scriptsize\sffamily\bfseries,
+                    text=codekey]above:Python process}] {};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{cocotb architecture. The Python test and the simulator run in one
+  process; the scheduler suspends coroutines on simulator callbacks
+  registered through the GPI, which is a thin C++ layer over VPI, VHPI or
+  FLI. There is no HDL testbench.}
+  \label{fig:python:cocotbarch}
+\end{figure}
+
+\begin{notebox}{Why there is no HDL testbench}
+\index{VPI}\index{VHPI}
+VPI (the Verilog Procedural Interface, IEEE 1800-2017 clause 36) and VHPI
+(IEEE 1076-2008 clause 22) let an external C program walk the design
+hierarchy, read and write signal values, and register callbacks on events
+such as "value changed" or "end of time step". That is exactly what a driver
+and a monitor need, so a testbench written against VPI does not need to be
+instantiated inside the design at all. cocotb wraps VPI, VHPI and Mentor's
+FLI behind one C++ abstraction called the GPI, and exposes it to Python. The
+consequence for you is practical: the \code{TOPLEVEL} in a cocotb run is the
+\DUT{} itself, and there is no HDL file to write.
+\end{notebox}
+
+\subsection{The core API}
+
+\index{cocotb!triggers}
+Everything in cocotb is a coroutine that awaits a trigger.
+
+\begin{itemize}
+\item \code{@cocotb.test()} marks a coroutine as a test. Every marked
+      coroutine in the module named by \code{MODULE} is run, in order, and
+      each gets the \DUT{} handle as its only argument.
+\item \code{await Timer(10, unit="ns")} advances simulation time.
+\item \code{await RisingEdge(dut.clk\_i)} suspends until the next rising
+      edge. \code{FallingEdge}, \code{Edge} (either) and \code{ValueChange}
+      are the siblings.
+\item \code{await ClockCycles(dut.clk\_i, 5)} is five rising edges.
+\item \code{cocotb.start\_soon(coro())} launches a background task and
+      returns immediately -- this is how you get a driver and a monitor
+      running concurrently. It is the cocotb equivalent of \kw{fork} \dots
+      \kw{join\_none}.
+\item \code{Clock(dut.clk\_i, 10, unit="ns").start()} is a coroutine that
+      generates a clock; start it with \code{start\_soon}.
+\item \code{await Combine(a, b)} waits for all of several tasks;
+      \code{await First(a, b)} waits for the first of them --
+      \kw{join} and \code{join\_any} respectively.
+\item \code{await with\_timeout(task, 1000, "ns")} raises
+      \code{SimTimeoutError} if the task has not finished in time. Use it on
+      every driver: a hung handshake should fail the test, not hang the
+      regression.
+\item \code{dut.sig.value = 3} schedules a write; \code{dut.sig.value} reads.
+      The read gives a \code{LogicArray} with \code{.integer} (unsigned),
+      \code{.signed\_integer} (two's complement), \code{.binstr} (the string
+      of \code{0}, \code{1}, \code{x} and \code{z}) and \code{.is\_resolvable}.
+\end{itemize}
+
+\subsection{A complete testbench for the CORDIC}
+
+\Cref{lst:python:cocotbtb} is the whole thing: driver, monitor, scoreboard
+and three tests, importing the golden model directly. Compare it with the
+class-based \SV{} testbench of \refverificationbook: the structure is identical --
+transaction, driver, monitor, scoreboard -- and the line count is about a
+fifth.
+
+\begin{pycode}[caption={A complete cocotb testbench for \code{cordic\_rot}
+(\file{test\_cordic.py}).},label={lst:python:cocotbtb}]
+import math, os, random, sys
+from collections import deque
+from pathlib import Path
+
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import ClockCycles, RisingEdge, with_timeout
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "py"))
+import cordic_model as m
+
+TOL_LSB = 12
+
+
+class Txn:
+    """The transaction: stimulus in, observed response filled in later."""
+    def __init__(self, x0, y0, theta):
+        self.x0, self.y0, self.theta = x0, y0, theta
+        self.x = self.y = None
+
+    def __repr__(self):
+        return f"Txn(x0={self.x0}, y0={self.y0}, theta={self.theta})"
+
+
+async def reset(dut, cycles=5):
+    dut.rst_ni.value = 0
+    dut.req_valid_i.value = 0
+    dut.rsp_ready_i.value = 1
+    dut.req_x_i.value = dut.req_y_i.value = dut.req_theta_i.value = 0
+    await ClockCycles(dut.clk_i, cycles)
+    dut.rst_ni.value = 1
+    await RisingEdge(dut.clk_i)
+
+
+async def driver(dut, queue, stimulus):
+    """Push transactions into the request channel, honouring req_ready_o."""
+    for txn in stimulus:
+        await RisingEdge(dut.clk_i)
+        dut.req_x_i.value = txn.x0 & 0xFFFF
+        dut.req_y_i.value = txn.y0 & 0xFFFF
+        dut.req_theta_i.value = txn.theta & 0xFFFF
+        dut.req_valid_i.value = 1
+        while True:
+            await RisingEdge(dut.clk_i)
+            if dut.req_ready_o.value == 1:
+                break
+        dut.req_valid_i.value = 0
+        queue.append(txn)
+
+
+async def monitor(dut, queue, results, expected):
+    """Sample the response channel on every accepted handshake."""
+    while len(results) < expected:
+        await RisingEdge(dut.clk_i)
+        if dut.rsp_valid_o.value == 1 and dut.rsp_ready_i.value == 1:
+            txn = queue.popleft()
+            txn.x = dut.rsp_x_o.value.signed_integer
+            txn.y = dut.rsp_y_o.value.signed_integer
+            results.append(txn)
+
+
+def scoreboard(results, log):
+    """Bit-exact check against cordic_model, plus a float sanity check."""
+    errors, worst = 0, 0.0
+    for txn in results:
+        ex, ey = m.cordic_rot(txn.x0, txn.y0, txn.theta)
+        if (txn.x, txn.y) != (ex, ey):
+            errors += 1
+            if errors <= 5:
+                log.error("%r: got (%d, %d) expected (%d, %d)",
+                          txn, txn.x, txn.y, ex, ey)
+        fx, fy = m.cordic_float(txn.x0, txn.y0, txn.theta / (1 << m.QA))
+        worst = max(worst, abs(txn.x - fx), abs(txn.y - fy))
+    return errors, worst
+
+
+async def run(dut, stimulus):
+    cocotb.start_soon(Clock(dut.clk_i, 10, unit="ns").start())
+    await reset(dut)
+
+    queue, results = deque(), []
+    mon = cocotb.start_soon(monitor(dut, queue, results, len(stimulus)))
+    drv = cocotb.start_soon(driver(dut, queue, stimulus))
+    await with_timeout(drv, 200 * len(stimulus) + 1000, "ns")
+    await with_timeout(mon, 200 * len(stimulus) + 1000, "ns")
+
+    errors, worst = scoreboard(results, dut._log)
+    dut._log.info("%d transactions, %d bit-exact mismatches, "
+                  "worst float error %.2f LSB", len(results), errors, worst)
+    assert errors == 0, f"{errors} bit-exact mismatches"
+    assert worst <= TOL_LSB, f"worst float error {worst:.2f} > {TOL_LSB} LSB"
+
+
+@cocotb.test()
+async def test_directed(dut):
+    """Angles a random generator will not hit."""
+    angs = [0.0, math.pi/2, -math.pi/2, math.pi/4, -math.pi/4,
+            1e-4, -1e-4, 3.14, -3.14]
+    stim = [Txn(m.X0_UNIT, 0, m.float_to_q(a, m.QA, m.AW)) for a in angs]
+    stim += [Txn(0, 0, 0), Txn(6000, -6000, 0)]
+    await run(dut, stim)
+
+
+@cocotb.test()
+async def test_random(dut):
+    """Constrained random stimulus, seeded from the environment."""
+    seed = int(os.environ.get("SEED", "20250905"))
+    rng = random.Random(seed)
+    lim = m.float_to_q(math.pi, m.QA, m.AW)
+    stim = [Txn(rng.randint(-6000, 6000), rng.randint(-6000, 6000),
+                rng.randint(-lim, lim)) for _ in range(100)]
+    dut._log.info("seed = %d", seed)
+    await run(dut, stim)
+
+
+# test_sweep is the same shape: 181 angles spread over [-pi, pi].
+\end{pycode}
+
+The build is a \file{Makefile} of a dozen lines. Everything after
+\code{include} comes from cocotb.
+
+\begin{makecode}
+SIM           ?= icarus
+TOPLEVEL_LANG ?= verilog
+
+RTL := $(PWD)/../sv
+
+ifeq ($(TOPLEVEL_LANG),verilog)
+  VERILOG_SOURCES := $(RTL)/cordic_pkg.sv $(RTL)/cordic_rot.sv
+  ifeq ($(SIM),verilator)
+    EXTRA_ARGS += --timing -Wno-fatal
+  endif
+else
+  VHDL_SOURCES := $(RTL)/cordic_pkg.vhd $(RTL)/cordic_rot.vhd
+endif
+
+TOPLEVEL := cordic_rot
+MODULE   := test_cordic
+
+include $(shell cocotb-config --makefiles)/Makefile.sim
+\end{makecode}
+
+Four variables carry all the configuration. \code{SIM} names the simulator;
+\code{TOPLEVEL\_LANG} is \code{verilog} or \code{vhdl} and decides which of
+\code{VERILOG\_SOURCES} and \code{VHDL\_SOURCES} is used; \code{TOPLEVEL} is
+the name of the \DUT{} as the simulator sees it, which is where a
+case-sensitivity mismatch between \VHDL{} and the makefile usually bites; and
+\code{MODULE} is the Python module (not file) containing the tests. Two more
+are worth knowing: \code{COMPILE\_ARGS} goes to the analysis step and
+\code{EXTRA\_ARGS} to both analysis and elaboration, while \code{SIM\_ARGS}
+goes only to the run. The language-revision switch is an \emph{analysis}
+switch: \code{-2008} for \code{vcom} belongs in \code{COMPILE\_ARGS}, and a
+switch that a tool needs at both analysis and elaboration belongs in
+\code{EXTRA\_ARGS}. Put one of them in \code{SIM\_ARGS} by mistake and the run
+either rejects it as an unknown option or, worse, looks for a library built to
+a different revision and reports that it cannot find your entity --- a message
+that points at the design and not at the command line.
+
+\subsection{Running it}
+
+With \tool{Verilator} as the back end:
+
+\begin{shcode}
+$ make -C cocotb_tb SIM=verilator
+\end{shcode}
+
+\begin{txtcode}
+     0.00ns INFO  cocotb  Running on Verilator version 5.020 2024-01-01
+     0.00ns INFO  cocotb  Running tests with cocotb v1.9.2
+     0.00ns INFO  cocotb.regression  Found test test_cordic.test_directed
+     0.00ns INFO  cocotb.regression  Found test test_cordic.test_random
+     0.00ns INFO  cocotb.regression  Found test test_cordic.test_sweep
+     0.00ns INFO  cocotb.regression  running test_directed (1/3)
+  1820.00ns INFO  cocotb.cordic_rot  11 transactions, 0 bit-exact
+                                     mismatches, worst float error 1.07 LSB
+  1820.00ns INFO  cocotb.regression  test_directed passed
+  1820.00ns INFO  cocotb.regression  running test_random (2/3)
+  1820.00ns INFO  cocotb.cordic_rot  seed = 20250905
+ 17890.00ns INFO  cocotb.cordic_rot  100 transactions, 0 bit-exact
+                                     mismatches, worst float error 2.06 LSB
+ 17890.00ns INFO  cocotb.regression  test_random passed
+ 46920.00ns INFO  cocotb.cordic_rot  181 transactions, 0 bit-exact
+                                     mismatches, worst float error 3.60 LSB
+ 46920.00ns INFO  cocotb.regression  test_sweep passed
+ ** TEST                        STATUS  SIM TIME (ns)  REAL TIME (s)  RATIO **
+ ** test_cordic.test_directed    PASS        1820.00           0.02   79492 **
+ ** test_cordic.test_random      PASS       16070.00           0.18   89996 **
+ ** test_cordic.test_sweep       PASS       29030.00           0.32   90580 **
+ ** TESTS=3 PASS=3 FAIL=0 SKIP=0            46920.00           0.54   87526 **
+\end{txtcode}
+
+Now the part that matters most to a \VHDL{} student. The \emph{same Python
+file}, not one line changed, runs against the \VHDL{} implementation of the
+same core. Only the makefile variables change:
+
+\begin{shcode}
+$ make -C cocotb_tb SIM=questa TOPLEVEL_LANG=vhdl COMPILE_ARGS=-2008
+\end{shcode}
+
+\begin{txtcode}
+  1820.00ns INFO  cocotb.cordic_rot  11 transactions, 0 bit-exact
+                                     mismatches, worst float error 1.07 LSB
+  1820.00ns INFO  cocotb.regression  test_directed passed
+ 17890.00ns INFO  cocotb.cordic_rot  100 transactions, 0 bit-exact
+                                     mismatches, worst float error 2.06 LSB
+ 17890.00ns INFO  cocotb.regression  test_random passed
+ 46920.00ns INFO  cocotb.cordic_rot  181 transactions, 0 bit-exact
+                                     mismatches, worst float error 3.60 LSB
+ 46920.00ns INFO  cocotb.regression  test_sweep passed
+ ** TESTS=3 PASS=3 FAIL=0 SKIP=0                                            **
+\end{txtcode}
+
+Same test names, same transaction counts, same bit-exact result, same worst
+error. The wall-clock and the simulated-nanoseconds-per-second figures are the
+one thing that does change, and they change with the simulator rather than
+with the test, which is why they are left out above.
+
+That is the argument in one line: you can use cocotb on your \VHDL{}
+coursework today, and the testbench you write will still be valid when the
+design is rewritten in \SV{}. cocotb officially supports
+\tool{Questa}/\tool{ModelSim}, \tool{Xcelium}, \tool{VCS},
+\tool{Riviera-PRO}, \tool{Verilator} and \tool{Icarus Verilog}, so whichever
+tool your department has, the Python side is portable.
+
+\begin{gotcha}{\code{.value} on a multi-bit signal is unsigned}
+Reading a port gives you a bit pattern, and cocotb interprets it as an
+unsigned integer by default -- regardless of whether the \SV{} declared it
+\kw{logic} \kw{signed} or the \VHDL{} declared it \code{signed}. The extra
+test below reads \code{rsp\_x\_o} after a rotation by \(\pi\), where the
+answer should be \(-16384\):
+\begin{txtcode}
+binstr           = 1100000000000000
+int(v)           = 49152
+v.integer        = 49152
+v.signed_integer = -16384
+model says       = -16384
+\end{txtcode}
+Use \code{.signed\_integer} for any signed port; if you use \code{.integer}
+or \code{int()}, every negative result will read as a large positive one and
+your scoreboard will report a hundred per cent failure rate on a working
+design. When writing, the reverse applies: \code{dut.req\_x\_i.value = -1234}
+is accepted by recent cocotb, but masking explicitly
+(\code{value \& 0xFFFF}) is unambiguous and works everywhere.
+\end{gotcha}
+
+\begin{gotcha}{cocotb and simulator versions are coupled}
+cocotb talks to the simulator through VPI/VHPI, and both sides evolve. The
+first attempt at the run above used cocotb 2.1.0 and failed immediately:
+\begin{txtcode}
+Makefile.verilator:29: *** cocotb requires Verilator 5.036 or later,
+                           but using 5.020.  Stop.
+\end{txtcode}
+The run shown was produced with cocotb 1.9.2, which supports
+\tool{Verilator} 5.020. Note also that cocotb 2.0 changed the API in ways
+that matter for this chapter: \code{units=} became \code{unit=}, and the
+value accessors were reorganised. Pin cocotb in your
+\file{requirements.txt} together with the simulator version you tested
+against, and write the pair into the CI job.
+\end{gotcha}
+
+\subsection{The ecosystem}
+
+\index{pyuvm}\index{cocotb!cocotb-bus}\index{cocotb!cocotb-coverage}
+cocotb is deliberately small. Four packages sit on top of it and you should
+know they exist.
+
+\code{cocotb-test} (and, in cocotb 2.x, the built-in \code{pytest} support)
+replaces the \file{Makefile} with a \code{pytest} entry point. That gives you
+\code{pytest -k sweep}, parameterised tests, fixtures, parallel runs with
+\code{pytest-xdist} and a JUnit XML report that every CI system understands.
+For a regression of more than a handful of tests it is worth the change.
+
+\code{cocotb-bus} provides the \code{Driver}, \code{Monitor} and
+\code{Scoreboard} base classes that used to live in cocotb itself, plus
+ready-made verification IP for AXI4, AXI4-Lite, AXI-Stream, Avalon and
+Wishbone. If your \DUT{} has an AXI port, do not write the driver.
+
+\code{cocotb-coverage} adds constrained random generation and functional
+coverage in Python: \code{@CoverPoint} and \code{@CoverCross} decorators that
+collect bins as your tests run, and a constraint solver for randomisation.
+It covers the same ground as \SV{}'s \kw{covergroup} and \kw{constraint}
+blocks, in a form that will look familiar after this chapter.
+
+\code{pyuvm} is UVM 1.2 reimplemented in Python: \code{uvm\_component},
+\code{uvm\_sequence}, \code{uvm\_config\_db}, the factory, the phases, TLM
+ports, all of it, running on cocotb. If you have read \refverificationbook, pyuvm
+will be immediately legible, and it is an excellent way to learn UVM without
+also fighting \SV{} class syntax and a licence server. It is not, today, what
+industry signs off with.
+
+\subsection{Honest limits}
+
+\index{cocotb!performance}
+\textbf{Speed.} Every \code{await RisingEdge(...)} is a callback from the
+simulator into Python, and a testbench with a driver and a monitor both
+waiting on the clock costs two Python round-trips per cycle. On this machine
+the cocotb run above sustained about \SI{97000}{ns} of simulated time per
+wall-clock second. The pure C++ \tool{Verilator} testbench of
+\cref{sec:python:vectors}, driving the same design over the same handshake,
+sustained about \SI{42}{\milli\second} of simulated time per second -- some
+two to three orders of magnitude more. That ratio is workload dependent: a
+testbench that awaits a transaction rather than a clock edge, on a design
+with a hundred times more logic, will show a much smaller gap, because the
+Python overhead is per callback and not per gate. Measure before you conclude
+anything.
+
+\textbf{No SVA.} You cannot write a concurrent assertion in Python. Assertions
+that belong to the design should stay in the design, as in
+\file{cordic\_rot.sv}, and they will still fire during a cocotb run under a
+simulator that supports them. \tool{Verilator} supports immediate assertions
+and a useful subset of concurrent ones; \tool{Icarus} does not parse
+\kw{property} at all.
+
+\textbf{Waveform debug is unchanged.} cocotb does not give you a Python
+waveform viewer. You dump a VCD or FST from the simulator
+(\code{EXTRA\_ARGS += --trace} for \tool{Verilator}; a \code{do} file with
+\code{log -r /*} for \tool{QuestaSim}) and open it in the simulator's own wave
+window, or in \tool{GTKWave} or \tool{Surfer} if it is a VCD or an FST ---
+see \cref{sec:verilator:viewers}. The Python side is debugged with
+\code{logging}, \code{pdb} or \code{pytest}.
+
+\textbf{Industry.} Sign-off flows at the companies most of you will join are
+\SV{} and UVM, driven by \tool{Questa}, \tool{VCS} or \tool{Xcelium}. cocotb
+is widely used for block-level work, for IP developed by small teams, and
+throughout the open-source silicon community, and it is growing. It is not a
+reason to skip \refverificationbook.
+
+\section{Out-of-process co-simulation}
+\label{sec:python:socket}
+
+\index{co-simulation!socket}
+The last style is a small C shim inside the simulator that talks to a Python
+process over a UNIX socket or a pipe. Use it when the model cannot be linked
+in: a licensed library that only runs in its own process, a web service, a
+physical model that takes seconds per call and must not block your build, or
+simply a Python environment you cannot reconcile with the simulator's.
+
+The shim is short. \Cref{lst:python:sock} is the whole client side; the
+server is thirty lines of Python around \code{socket.AF\_UNIX}.
+
+\begin{cppcode}[caption={A DPI shim over a UNIX socket
+(\file{sock\_dpi.cpp}).},label={lst:python:sock}]
+static int g_fd = -1;
+
+int sock_open(const char* path) {
+  struct sockaddr_un a;
+  g_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (g_fd < 0) return -1;
+  std::memset(&a, 0, sizeof a);
+  a.sun_family = AF_UNIX;
+  std::snprintf(a.sun_path, sizeof a.sun_path, "%s", path);
+  if (connect(g_fd, (struct sockaddr*)&a, sizeof a) < 0) return g_fd = -1;
+  return 0;
+}
+
+int sock_ref(int x0, int y0, int th, int* xo, int* yo) {
+  char buf[128];
+  int n = std::snprintf(buf, sizeof buf, "%d %d %d\n", x0, y0, th);
+  if (g_fd < 0 || write(g_fd, buf, n) != n) return -1;
+  n = read(g_fd, buf, sizeof buf - 1);        /* blocking: deadlock risk */
+  if (n <= 0) return -1;
+  buf[n] = 0;
+  return (std::sscanf(buf, "%d %d", xo, yo) == 2) ? 0 : -1;
+}
+
+void sock_close(void) { if (g_fd >= 0) close(g_fd); g_fd = -1; }
+\end{cppcode}
+
+\begin{txtcode}
+$ python3 py/ref_server.py /tmp/cordic.sock &
+[srv] listening on /tmp/cordic.sock
+$ ./obj_sock/Vtb_sock
+[SV] k=0 -> server says (16383, 1) rc=0
+[SV] k=1 -> server says (15089, 6381) rc=0
+[SV] k=2 -> server says (11413, 11754) rc=0
+[SV] k=3 -> server says (5936, 15270) rc=0
+[srv] served 4 requests
+\end{txtcode}
+
+The failure modes are the classic ones and they will all happen to you.
+
+\textbf{Deadlock.} The \code{read} above is blocking. If the server crashes,
+the simulation hangs forever, and in CI that means a job that runs until the
+runner's timeout. Always set \code{SO\_RCVTIMEO} or use \code{poll} with a
+deadline, and fail the test on timeout.
+
+\textbf{Ordering.} A stream socket has no message framing. Two requests
+issued before the first reply is read will be concatenated in the buffer and
+your \code{sscanf} will read the wrong pair. Either keep the protocol
+strictly request-response (as above), or put an explicit length prefix on
+every message.
+
+\textbf{Start-up race.} The simulator must not connect before the server has
+bound the socket. In a \file{Makefile} that means a wait loop on the socket
+file, not \code{sleep 1}.
+
+\textbf{Cleanup.} A stale socket file from a crashed run makes the next run
+fail with a confusing error. Unlink it on start-up, and put the socket path
+under a per-run temporary directory.
+
+\begin{ruleofthumb}
+Socket co-simulation is a last resort. If you can write the model in Python
+and use cocotb, do that instead; if you can precompute the answers, use
+offline vectors.
+\end{ruleofthumb}
+
+\section{Choosing}
+\label{sec:python:choosing}
+
+\Cref{tab:python:choose} maps the cases you will actually meet onto a style.
+
+\begin{table}[htbp]
+\centering
+\caption{Which coupling style to use.}
+\label{tab:python:choose}
+\small
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+\textbf{Situation} & \textbf{Use} & \textbf{Why} \\
+\midrule
+Homework testbench, one simulator, a few hundred vectors
+  & (a) offline vectors
+  & Nothing to install, the file is the evidence, works everywhere. \\
+Lab exercise in \VHDL{}
+  & cocotb, with \code{TOPLEVEL\_LANG} set to \code{vhdl}
+  & The HDL testbench disappears; the golden model is imported directly. \\
+Constant table or ROM the tools will not compute
+  & (b) generated source
+  & Integer literals are accepted by every tool. Add a \code{gen-check}
+    job. \\
+Thesis accelerator, \tool{Verilator} in CI, algorithmic block
+  & cocotb, or pybind11 if you need raw speed
+  & Full \code{numpy} in the scoreboard; no licence. \\
+Long random regression, millions of transactions
+  & (a) offline vectors, or a C++ testbench
+  & Python per-cycle callbacks would dominate the run time. \\
+Industrial block, \tool{Questa}, UVM sign-off
+  & (a) for vectors, DPI-C for a C reference model
+  & UVM is the deliverable; Python stays outside the simulation. \\
+Existing Python or licensed model that must be in the loop
+  & (d) sockets
+  & Crash isolation and environment isolation are worth the pain. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{ruleofthumb}
+Start with offline vectors. Move to cocotb when the \DUT{} needs stimulus
+that depends on its own output. Move to DPI-C only when a simulator or a
+methodology forces you to.
+\end{ruleofthumb}
+
+The four styles are not exclusive, and a mature flow usually runs three of
+them at once. The CORDIC project in this book generates its constants at
+build time, drives a fast offline-vector regression of a million transactions
+in a C++ \tool{Verilator} testbench overnight, and runs a small cocotb suite
+on every push for the interactive protocol cases -- backpressure, reset in
+the middle of a rotation, an angle out of range. Each style is doing what it
+is good at, and none of them duplicates the golden model, because all three
+read \file{cordic\_model.py}.
+
+That last point is the one to take away from the whole chapter. The question
+is not "which coupling style is best" but "where does the single source of
+truth live". Put it in one Python file, make everything else import it or be
+generated from it, and the four styles become four ways of shipping the same
+model to the same design.
+
+\section{Putting it in CI}
+\label{sec:python:ci}
+
+\index{continuous integration}
+A verification flow that only runs on your laptop is not a flow. The
+\file{Makefile} below is the real one used for this chapter: it lints,
+regenerates vectors when the model or the generator changes, runs the
+simulation, and post-processes the results in Python. Every target has been
+executed.
+
+\begin{makecode}
+PYTHON ?= python3
+SEED   ?= 20250905
+COUNT  ?= 200
+RTL    := sv/cordic_pkg.sv sv/cordic_rot.sv
+VEC    := vec/cordic_vec.txt vec/cordic_vec.hex vec/cordic_vec.n
+GEN    := gen/cordic_tbl.h gen/cordic_tbl_pkg.sv
+
+.PHONY: all lint gen gen-check sim check cocotb
+
+all: lint sim check
+
+lint:
+	verilator --lint-only -Wall --top-module cordic_rot $(RTL)
+
+$(VEC): py/gen_vectors.py py/cordic_model.py
+	$(PYTHON) py/gen_vectors.py --seed $(SEED) --count $(COUNT) --outdir vec
+
+$(GEN): py/gen_tables.py py/cordic_model.py
+	$(PYTHON) py/gen_tables.py gen
+
+gen-check: gen
+	$(PYTHON) py/gen_tables.py .gencheck
+	diff -r gen .gencheck || \
+	  (echo "generated files are stale: run 'make gen'"; exit 1)
+
+obj_file/Vtb_file: $(RTL) sv/tb_vec_file.sv
+	verilator --binary --timing --top-module tb_vec_file \
+	  $(RTL) sv/tb_vec_file.sv -o Vtb_file --Mdir obj_file
+
+sim: obj_file/Vtb_file $(VEC)
+	./obj_file/Vtb_file +DIR=vec
+
+check: sim
+	$(PYTHON) py/check_results.py vec/cordic_res.txt --tol-lsb 12
+
+cocotb:
+	$(MAKE) -C cocotb_tb SIM=verilator
+	$(MAKE) -C cocotb_tb SIM=questa TOPLEVEL_LANG=vhdl COMPILE_ARGS=-2008
+\end{makecode}
+
+\begin{txtcode}
+$ make gen-check all
+python3 py/gen_tables.py .gencheck
+diff -r gen .gencheck || (echo "generated files are stale..."; exit 1)
+verilator --lint-only -Wall --top-module cordic_rot sv/cordic_pkg.sv \
+    sv/cordic_rot.sv
+python3 py/gen_vectors.py --seed 20250905 --count 200 --outdir vec
+wrote 212 vectors to vec/cordic_vec.{txt,hex}
+./obj_file/Vtb_file +DIR=vec
+[tb] 217 lines, 212 vectors, 0 mismatches
+[tb] PASS
+python3 py/check_results.py vec/cordic_res.txt --tol-lsb 12
+vectors        : 212
+saturated      : 2 (excluded)
+worst |error|  : 2.655 LSB
+rms   error    : 0.791 LSB
+tolerance      : 12.0 LSB
+outside tol    : 0
+\end{txtcode}
+
+The corresponding GitHub Actions job is short because the \file{Makefile}
+does the work. Note the pinned versions: this is the whole point of the
+exercise.
+
+\begin{txtcode}
+name: verify
+on: [push, pull_request]
+
+jobs:
+  cordic:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y verilator
+          python3 -m pip install "cocotb==1.9.2" numpy matplotlib jinja2
+
+      - name: Generated files are up to date
+        run: make gen-check
+
+      - name: Lint, vectors, simulation, numerical check
+        run: make lint all
+
+      - name: cocotb regression
+        run: make cocotb
+
+      - name: Archive vectors and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cordic-vectors
+          path: |
+            vec/
+            cocotb_tb/results.xml
+\end{txtcode}
+
+\begin{tipbox}{Make the build fail, not the log}
+Every step above fails the job on a mismatch, because
+\code{check\_results.py} returns a non-zero exit code when a vector is
+outside tolerance and \code{make} stops on the first failing recipe. A
+testbench that prints \code{FAIL} and exits zero is worse than no testbench:
+it trains everybody to read logs, and nobody reads logs. Finish every
+checking script with an explicit \code{sys.exit(1)}, and every HDL testbench
+with \code{\$fatal} on error.
+\end{tipbox}
+
+\begin{notebox}{Archive the vectors, not just the log}
+The \code{upload-artifact} step matters more than it looks. When a nightly
+regression fails on seed 8842 and nobody can reproduce it, the vector file
+that produced the failure -- header and all -- is the difference between a
+five-minute fix and a week of guessing. Keep it for every failing run.
+\end{notebox}
+
+\section{Checklist}
+\label{sec:python:checklist}
+
+\begin{itemize}
+\item Write the reference model in the \RTL{} language if it fits on one
+      screen and uses only arithmetic. Write it in Python as soon as it needs
+      arrays, a transform, a file or a plot.
+\item Default to \textbf{offline vectors}. They work with every simulator,
+      they leave evidence on disk, and they cost nothing at run time.
+\item A vector file is hex, one transaction per line, with a \code{//} header
+      carrying the seed, every parameter and the model revision. Print that
+      header from the testbench at time zero.
+\item Never call \code{\$readmemh} without an explicit address range. It does
+      not tell you how many entries it filled, and a short file passes
+      silently -- especially under \tool{Verilator}, where the unfilled
+      entries are zero rather than \code{'x}.
+\item Check the return value of \code{\$sscanf}, and remember that
+      \code{\$feof} is not a look-ahead: check \code{\$fgets} as well.
+      \VHDL{}'s \code{endfile} is a look-ahead, which is why you forget.
+\item Hex vector files carry no sign. Every reader must sign-extend
+      explicitly: \code{\$signed} in \SV{}, \code{signed(...)} in \VHDL{},
+      \code{static\_cast<int16\_t>} in C++, an explicit mask in Python.
+\item Compare bit-exact models with \code{==}. Compare a floating point
+      reference with a derived tolerance, exclude the cases the reference
+      cannot model (saturation), and never raise the tolerance to make a test
+      pass.
+\item Every generated artefact needs a Make rule whose prerequisites include
+      the generator and everything it imports, plus a CI job that regenerates
+      and diffs.
+\item Emit a \kw{package}, not an \code{`include}. One elaboration, one copy,
+      one name.
+\item Generate a constant table in Python when any tool in your flow rejects
+      the elaboration-time version. \tool{Verilator} 5.020 accepts
+      \code{\$atan} in a constant function; \tool{Icarus} 12.0 does not.
+\item In DPI-C: \kw{pure} means no side effects and no callback; \kw{context}
+      is required to call an exported function or to use \code{svGetScope}.
+      \kw{logic} maps to \code{svLogicVecVal} (\code{aval}+\code{bval}) and
+      \kw{bit} to \code{svBitVecVal}. Give every DPI symbol C linkage.
+\item Do not embed CPython in a simulator unless you have no alternative. It
+      costs one to two orders of magnitude per call, one GIL, one crash
+      domain and a fragile build.
+\item Use \textbf{cocotb} when the stimulus must react to the \DUT{}, and
+      for \VHDL{} coursework in particular: the HDL testbench disappears and
+      the Python one survives a rewrite of the design into \SV{}.
+\item In cocotb, read signed ports with \code{.signed\_integer}, never
+      \code{.integer} or \code{int()}. Wrap every driver in
+      \code{with\_timeout}.
+\item Pin cocotb and the simulator version together. cocotb 1.9.2 works with
+      \tool{Verilator} 5.020; cocotb 2.1.0 requires 5.036 or later and
+      renamed \code{units=} to \code{unit=}.
+\item Sockets are the last resort. If you use them, frame the messages, set a
+      receive timeout, and unlink the socket file on start-up.
+\end{itemize}

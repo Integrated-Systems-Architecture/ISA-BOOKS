@@ -1,0 +1,2692 @@
+\chapter{UVM Basics}
+\label{ch:uvm}
+
+\chapabstract{The Universal Verification Methodology is a class library
+written in \SV{}. It is not an extension of the language, not a tool, and not
+a new file format. In \cref{ch:tb} you built a transaction, a generator, a
+driver, a monitor, a scoreboard, a coverage collector and an environment by
+hand. This chapter puts a UVM base class in front of each of those six boxes,
+shows what the library adds on top, and then builds a complete, runnable UVM
+testbench for the CORDIC rotator. At the end you will be able to read an
+industrial UVM testbench, write a small one, and judge honestly whether a
+given project needs one at all.}
+
+% A chapter-local convenience for the UVM macro names, which begin with a
+% backtick.  \texttt{} would otherwise typeset the backtick as a left quote.
+
+\section{What UVM is, and where it came from}
+\label{sec:uvm:what}
+
+UVM is a library of about 350 \SV{} classes, plus a few dozen macros, plus a
+handful of package-scope functions. You compile it once, you \kw{import} it
+like any other package, and you extend its classes like any other classes.
+Everything it does could be done by hand, and in \cref{ch:tb} you did do it
+by hand. Nothing in UVM required a change to IEEE 1800: every construct the
+library is built from, classes and virtual methods, parameterised types,
+queues, mailboxes and dynamic threads, is in \cref{ch:toolkit}. That is the
+single most important sentence in this chapter, and if you keep it in mind the
+rest of UVM stops being mysterious.
+
+The point matters because of how UVM is usually taught. It arrives with its
+own vocabulary (agents, sequencers, phases, objections, the factory), its own
+naming convention, its own report format and its own command-line switches,
+and the effect on a newcomer is that of meeting a new language. It is not.
+\chFiveM{uvm\_info} is a macro that expands to an \kw{if} and a method call.
+\code{uvm\_component} is a class with a \code{string} name and a parent
+pointer. \code{run\_phase} is a virtual task that somebody else calls.
+
+\begin{notebox}{Why the UVM listings are a different colour}
+Throughout this chapter, listings that contain UVM identifiers use the
+\code{uvmcode} environment. It typesets UVM class names, macros and phase
+methods in rust, while the \SV{} keywords stay blue. Every rust identifier
+you see is something defined in \file{uvm\_pkg.sv} or
+\file{uvm\_macros.svh}. Nothing rust is part of IEEE 1800. Look at any
+listing in this chapter and mentally delete the rust: what is left is the
+language you already learned in \cref{ch:toolkit}.
+\end{notebox}
+
+\subsection{A short history}
+\label{sec:uvm:history}
+
+\index{UVM!history}%
+Constrained-random, coverage-driven verification became mainstream around
+2002, and each of the three big EDA vendors shipped a methodology library with
+its simulator. Synopsys had VMM (Verification Methodology Manual), written
+for VCS. Cadence had eRM, ported from the \emph{e} language into \SV{} as the
+Universal Reuse Methodology, URM. Mentor had AVM (Advanced Verification
+Methodology), which was the first of the three to be released under an open
+licence and the first to be built around TLM communication rather than around
+signals.
+
+\index{OVM}\index{VMM}\index{AVM}%
+In 2008 Mentor and Cadence merged AVM and URM into the Open Verification
+Methodology, OVM. OVM was genuinely open: Apache-licensed source, downloadable,
+and usable on any simulator. It was widely adopted, which left Synopsys with a
+methodology nobody outside VCS used. In 2009 Accellera took OVM as the
+starting point for a standard methodology, added the register layer from VMM
+and a few ideas from both camps, and in February 2011 released UVM 1.0. The
+version that most production code was written against is UVM~1.1d (2013); UVM
+1.2 (2014) changed a few interfaces and was, for a while, unpopular precisely
+because it broke code.
+
+\index{IEEE 1800.2}%
+In 2017 the IEEE standardised the class reference as IEEE 1800.2-2017,
+revised in 2020. Note what was standardised: the \emph{API}, not the
+implementation. Accellera continues to publish a reference implementation
+(the current one identifies itself as UVM-1.2 / IEEE 1800.2-2020 depending on
+the build), and every commercial simulator ships a copy, usually with vendor
+patches for performance. You almost never download UVM yourself: you point
+the compiler at the copy in the tool installation.
+
+\subsection{What it costs}
+\label{sec:uvm:cost}
+
+Be honest with yourself about the price, because most of the UVM literature
+is not.
+
+\begin{itemize}
+  \item \textbf{The learning curve is long.} A competent \SV{} programmer
+        needs a week to write a first working UVM testbench and a month
+        before the factory and the configuration database stop producing
+        surprises. Compare that with \cref{ch:tb}, where the entire
+        infrastructure was about 470 readable lines.
+  \item \textbf{The code is verbose.} The minimal CORDIC testbench in
+        \cref{sec:uvm:complete} is about 330 lines of UVM against about 470 lines
+        of hand-written testbench, and the UVM version does less, because
+        the hand-written one included the reference model and the reporting
+        that UVM provides. Real testbenches are verbose in a different way:
+        boiler-plate constructors, boiler-plate registrations,
+        boiler-plate \code{build\_phase} bodies.
+  \item \textbf{It is slow at run time.} The factory, the string-based
+        configuration database, the field-automation macros and the objection
+        mechanism all cost simulator time. On a small block the UVM overhead
+        can dominate the \RTL{} simulation entirely. The field macros in
+        particular are notorious: see \cref{sec:uvm:sequences}.
+  \item \textbf{No open-source simulator runs it.} Be precise about why,
+        because the usual summary is wrong. \tool{Verilator} compiles classes
+        but not with the completeness UVM needs; it accepts a
+        \kw{constraint} block and then ignores it, warning
+        \code{CONSTRAINTIGN} and randomising as if the block were not there;
+        and it rejects \kw{covergroup} outright as unsupported.
+        \refsimulationbook explains what it does instead.
+        \tool{Icarus Verilog} is often said not to support classes at all, and
+        that is simply untrue: version 12 with \code{-g2012} compiles and runs
+        a class with a constructor, member functions, inheritance and
+        \code{super.new()}. What it lacks is everything built on top.
+        \code{randomize()} does not exist (\code{randomize is not a method of
+        class}) and \kw{constraint} blocks are rejected outright;
+        \kw{covergroup} is a syntax error; concurrent
+        assertions are rejected; and a queue of class handles is refused with
+        \code{Sorry: Queue of type ... is not yet supported}, which alone rules
+        out most of \file{uvm\_pkg.sv}. Even the class support that exists is
+        fragile: two properties declared on one line, \code{int a, b;}, compile
+        and then crash the runtime. Icarus is a useful Verilog-2005 simulator
+        and a poor \SV{} one, and it will not run UVM.
+\end{itemize}
+
+In practice, then, UVM means a commercial licence: \tool{QuestaSim},
+\tool{Xcelium} or \tool{VCS}, each of which ships a pre-compiled copy of the
+library. For a student that means the university lab.
+
+\begin{ruleofthumb}
+UVM is a reuse technology. If nothing will be reused, not across blocks, not
+across projects and not across people, you are paying the cost and collecting
+none of the benefit.
+\end{ruleofthumb}
+
+\section{The same six boxes}
+\label{sec:uvm:map}
+
+Open \file{tb\_cordic\_pkg.sv} from \cref{ch:tb} next to this page. It
+contains six classes: \code{cordic\_txn}, \code{cordic\_drv},
+\code{cordic\_mon}, \code{cordic\_sb}, \code{cordic\_cov} and
+\code{cordic\_env}. UVM has a base class for every one of them.
+\cref{tab:uvm:map} is the whole translation.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Every class you wrote by hand in \cref{ch:tb}, its UVM base class,
+           and what the base class actually adds.}
+  \label{tab:uvm:map}
+  \small
+  \begin{tabularx}{\linewidth}{@{}l l X@{}}
+    \toprule
+    \textbf{\cref{ch:tb}} & \textbf{UVM base class} & \textbf{What UVM adds} \\
+    \midrule
+    \code{cordic\_txn} (\cref{ch:toolkit})
+      & \code{uvm\_sequence\_item}
+      & A name, a factory registration, automatic
+        copy/compare/pack/print, and a handle back to the sequence that
+        created it. \\
+    \addlinespace
+    \code{env.send\_random()}
+      & \code{uvm\_sequence}
+      & Stimulus becomes an object with its own class hierarchy: it can be
+        randomised, parameterised, extended, nested inside another sequence,
+        and selected at run time. \\
+    \addlinespace
+    \code{cordic\_drv}
+      & \code{uvm\_driver \#(T)}
+      & A standard blocking port to the sequencer
+        (\code{seq\_item\_port}) instead of a bare mailbox, plus phasing. \\
+    \addlinespace
+    \code{cordic\_mon}
+      & \code{uvm\_monitor}
+      & Nothing, structurally. What you actually gain is the analysis port:
+        one \code{write()} call feeds any number of subscribers, added
+        without touching the monitor. \\
+    \addlinespace
+    \code{cordic\_sb}
+      & \code{uvm\_scoreboard}
+      & Again almost nothing by itself. The gain is
+        \code{uvm\_tlm\_analysis\_fifo}, which decouples the monitor from the
+        checking thread, and the report server, which counts your errors and
+        decides the verdict. \\
+    \addlinespace
+    \code{cordic\_cov}
+      & \code{uvm\_subscriber \#(T)}
+      & A \code{write()} callback instead of a \code{forever} loop on a
+        mailbox. One fewer process to start and stop. \\
+    \addlinespace
+    \code{cordic\_env}
+      & \code{uvm\_env}
+      & A named component tree, automatic phase execution, the configuration
+        database and the factory. \\
+    \addlinespace
+    (the top-level module)
+      & \code{uvm\_test}
+      & The test becomes a class, chosen on the command line with
+        \code{+UVM\_TESTNAME}. One compiled image, many tests. \\
+    \addlinespace
+    (none)
+      & \code{uvm\_agent}
+      & A packaging unit: sequencer + driver + monitor for one protocol, with
+        an active/passive switch. This is the unit that gets reused. \\
+    \addlinespace
+    \code{mailbox \#(T)}
+      & \code{uvm\_analysis\_port}, \code{uvm\_tlm\_analysis\_fifo}
+      & One-to-many broadcast, a non-blocking producer, and connection made
+        in \code{connect\_phase} rather than by passing handles into
+        constructors. \\
+    \addlinespace
+    \code{wait\_drain()} + timeout
+      & objections + drain time
+      & End-of-test is negotiated by every component that has work
+        outstanding, not decided by one counter in the test. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Read the right-hand column again. Half the rows say ``almost nothing''. That is
+not a criticism of UVM; it is the point. UVM's value is not in any single
+base class. It is in the fact that ten thousand engineers agree on the same
+six boxes, the same names for them, the same connection mechanism and the
+same start-up sequence, so that a verification component written by one team
+drops into another team's testbench.
+
+\subsection{The standard hierarchy}
+\label{sec:uvm:hierarchy}
+
+\cref{fig:uvm:hierarchy} is the picture every UVM testbench draws. Learn it
+once and you will recognise the structure of any testbench you are handed.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\sffamily\scriptsize,
+      comp/.style={draw=codeframe,fill=svbg,line width=0.8pt,
+                   rounded corners=2pt,minimum height=7mm,minimum width=20mm,
+                   align=center},
+      dutbox/.style={draw=codeframe,fill=vhdlbg,line width=0.8pt,
+                     rounded corners=2pt,minimum height=8mm,minimum width=34mm,
+                     align=center},
+      frame/.style={draw=noteframe,dashed,line width=0.7pt,rounded corners=3pt},
+      ana/.style={-{Stealth[length=2mm]},accentalt,line width=0.8pt},
+      seqp/.style={{Stealth[length=2mm]}-{Stealth[length=2mm]},codekey,
+                   line width=0.8pt},
+      pin/.style={-{Stealth[length=2mm]},black!60,line width=0.7pt}
+    ]
+
+    % ---- agent internals -------------------------------------------------
+    \node[comp] (sqr) at (0,0)      {sequencer};
+    \node[comp] (drv) at (0,-1.5)   {driver};
+    \node[comp] (mon) at (3.2,-1.5) {monitor};
+
+    \node[frame,fit=(sqr)(drv)(mon),inner sep=4.5mm] (agent) {};
+    \node[anchor=north west,font=\sffamily\scriptsize\bfseries,
+          text=noteframe]
+         at ([xshift=2pt,yshift=-1pt]agent.north west) {agent};
+
+    % ---- analysis consumers ---------------------------------------------
+    \node[comp,minimum width=24mm] (sb)  at (8.4,-0.6) {scoreboard};
+    \node[comp,minimum width=24mm] (cov) at (8.4,-2.2) {coverage};
+
+    \node[frame,fit=(agent)(sb)(cov),inner sep=4.5mm] (env) {};
+    \node[anchor=north west,font=\sffamily\scriptsize\bfseries,
+          text=noteframe]
+         at ([xshift=2pt,yshift=-1pt]env.north west) {env};
+
+    \node[comp,minimum width=26mm] (test) at (3.6,2.6) {test};
+
+    % ---- DUT -------------------------------------------------------------
+    \node[dutbox] (dut) at (1.6,-5.6) {DUT\\\texttt{cordic\_rot}};
+    \node[draw=accent,fill=tipbg,line width=0.8pt,rounded corners=2pt,
+          minimum width=52mm,minimum height=5mm,align=center]
+         (ifc) at (1.6,-4.4) {\texttt{cordic\_if} (virtual interface)};
+
+    % ---- edges -----------------------------------------------------------
+    \draw[seqp] (sqr) -- node[right,font=\sffamily\tiny,align=left,xshift=1pt]
+                          {seq\_item\_port} (drv);
+    \draw[ana]  (mon.east) -- ++(1.7,0) |- (sb.west);
+    \draw[ana]  (mon.east) -- ++(1.7,0) |- (cov.west);
+    \node[font=\sffamily\tiny,text=accentalt,anchor=south west]
+         at (4.35,-1.42) {analysis port};
+
+    \draw[-{Stealth[length=2mm]},black!55,line width=0.7pt]
+         (test.south) -- (env.north);
+
+    \draw[pin] (drv.south) -- ++(0,-1.2) -| (-1.0,-4.15);
+    \draw[{Stealth[length=2mm]}-] (mon.south) -- ++(0,-1.2) -| (3.2,-4.15);
+    \draw[pin] (ifc.south) -- (dut.north);
+
+  \end{tikzpicture}
+  \caption{The standard UVM component hierarchy. Blue double arrows carry
+    sequence items; rust arrows are analysis ports and are one-to-many.
+    The driver and the monitor reach the pins through the same virtual
+    interface, but only the driver ever writes to it.}
+  \label{fig:uvm:hierarchy}
+\end{figure}
+
+Four things about that picture are worth stating explicitly, because they are
+the ones students get wrong.
+
+\begin{enumerate}
+  \item \textbf{The test is at the top, and there is exactly one.} It is
+        created by \code{run\_test()} from the class name given on the
+        command line. Everything else is created, directly or indirectly, by
+        the test's \code{build\_phase}.
+  \item \textbf{The agent owns one protocol.} If the CORDIC had a
+        configuration register bus as well as the data channel, it would get
+        a second agent, with its own sequencer, driver and monitor.
+  \item \textbf{The scoreboard and the coverage collector are outside the
+        agent.} They are specific to the \DUT{}, not to the protocol. The
+        agent is the reusable part; the scoreboard is not.
+  \item \textbf{The arrows from the monitor are broadcast.} Adding a third
+        subscriber, say a protocol checker, requires no change at all to the
+        monitor. This is the concrete benefit over the two mailboxes you
+        wired by hand in \cref{ch:tb}, where the monitor had to know that
+        there were exactly two consumers.
+\end{enumerate}
+
+\section{\code{uvm\_object} versus \code{uvm\_component}}
+\label{sec:uvm:obj-comp}
+
+\index{UVM!uvm\_object}\index{UVM!uvm\_component}%
+Before any of the mechanisms make sense, internalise this distinction. Every
+class in UVM derives from \code{uvm\_void}, and immediately below it the tree
+splits in two.
+
+\begin{description}
+  \item[\code{uvm\_object}] is \emph{data}. It has a name but no place. It is
+        created, passed around, copied, compared and thrown away, thousands
+        of times per simulation. Sequence items and sequences are objects.
+        So are configuration objects and register-model fields.
+  \item[\code{uvm\_component}] is \emph{structure}. It has a name
+        \emph{and a parent}, so components form a tree. Components are
+        created during \code{build\_phase}, they exist for the whole
+        simulation, and they are never destroyed. Drivers, monitors,
+        sequencers, agents, environments, scoreboards and tests are
+        components.
+\end{description}
+
+The mental model that works is the \VHDL{} one. A \code{uvm\_component} is an
+\emph{instance in an elaborated design hierarchy}: it corresponds to a
+component instantiation inside an architecture, it has a path, and once
+elaboration is over it is fixed. A \code{uvm\_object} is a
+\emph{value of some type}: it corresponds to a variable of a record type
+inside a process. \VHDL{} keeps those two worlds strictly apart, and so does
+UVM.
+
+\index{UVM!get\_full\_name}%
+The consequence you will use every day is the hierarchical name. Because a
+component knows its parent, \code{get\_full\_name()} returns a dotted path:
+
+\begin{txtcode}
+uvm_test_top.env.agt.drv
+uvm_test_top.env.agt.mon
+uvm_test_top.env.sb
+\end{txtcode}
+
+\code{uvm\_test\_top} is the name \code{run\_test()} gives to the test it
+creates; everything below is what you named the handles in
+\code{build\_phase}. Those strings are not cosmetic. They are the keys used
+by the configuration database (\cref{sec:uvm:configdb}), by instance-specific
+factory overrides (\cref{sec:uvm:factory}), and by verbosity control
+(\cref{sec:uvm:reporting}). Every message printed by UVM carries the full
+name of the component that produced it, which is how you find out which of
+your four identical agents is the one misbehaving.
+
+\begin{tipbox}{Name your handles after the instance, not the type}
+Write \code{drv = cordic\_driver::type\_id::create("drv", this);}, not
+\code{create("cordic\_driver", this)}. The string becomes the path element.
+Short, consistent instance names such as \code{drv}, \code{mon}, \code{sqr},
+\code{agt}, \code{env}, \code{sb} and \code{cov} make configuration paths
+like \code{"env.agt.*"} readable. A common convention is to use the same
+string as the handle name, so that the source and the printed topology look
+the same.
+\end{tipbox}
+
+A \code{uvm\_object} has no parent and therefore no path. Its
+\code{get\_full\_name()} returns just its own name, unless it is a sequence
+running on a sequencer, in which case UVM splices in the sequencer's path.
+This is why you cannot look up configuration ``for a transaction'': there is
+nothing to look it up against.
+
+\section{Phases}
+\label{sec:uvm:phases}
+
+\index{UVM!phases}%
+In \cref{ch:tb} the environment's constructor built the sub-objects, then you
+called \code{env.run()}, then you called \code{env.report()}. Construction,
+connection, execution, reporting, in that order, by hand. UVM does the same
+four things, calls them phases, and calls them for you.
+
+A phase is a virtual method with a fixed name that UVM invokes on every
+component in the tree. You override the ones you need and ignore the rest.
+
+\begin{table}[htbp]
+  \centering
+  \caption{The common UVM phases, in execution order.}
+  \label{tab:uvm:phases}
+  \small
+  \begin{tabularx}{\linewidth}{@{}l l l X@{}}
+    \toprule
+    \textbf{Phase} & \textbf{Kind} & \textbf{Order} & \textbf{What goes in it} \\
+    \midrule
+    \code{build\_phase}          & function & top-down
+      & Create sub-components with the factory; fetch configuration. \\
+    \code{connect\_phase}        & function & bottom-up
+      & Connect TLM ports, exports and analysis ports. \\
+    \code{end\_of\_elaboration\_phase} & function & bottom-up
+      & Last chance to inspect the assembled tree; print the topology. \\
+    \code{start\_of\_simulation\_phase} & function & bottom-up
+      & Print a banner, display the resolved configuration. \\
+    \code{run\_phase}            & \emph{task} & all in parallel
+      & The only phase that consumes simulation time. \\
+    \code{extract\_phase}        & function & bottom-up
+      & Pull results out of components into a common place. \\
+    \code{check\_phase}          & function & bottom-up
+      & Check for leftovers: unmatched transactions, empty FIFOs. \\
+    \code{report\_phase}         & function & bottom-up
+      & Print your own summary. \\
+    \code{final\_phase}          & function & top-down
+      & Close files, flush databases. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\sffamily\scriptsize,
+      ph/.style={draw=codeframe,fill=svbg,line width=0.8pt,rounded corners=2pt,
+                 minimum width=46mm,minimum height=6.5mm,align=center},
+      run/.style={draw=accentalt,fill=warnbg,line width=1pt,rounded corners=2pt,
+                  minimum width=46mm,minimum height=6.5mm,align=center},
+      fl/.style={-{Stealth[length=2mm]},black!60,line width=0.8pt},
+      dir/.style={-{Stealth[length=1.6mm]},codekey,line width=0.7pt}
+    ]
+    \node[ph] (b)  at (0, 0.0)  {\texttt{build\_phase}};
+    \node[ph] (c)  at (0,-1.0)  {\texttt{connect\_phase}};
+    \node[ph] (e)  at (0,-2.0)  {\texttt{end\_of\_elaboration\_phase}};
+    \node[ph] (s)  at (0,-3.0)  {\texttt{start\_of\_simulation\_phase}};
+    \node[run](r)  at (0,-4.3)  {\texttt{run\_phase}\ \ (task, time passes)};
+    \node[ph] (x)  at (0,-5.6)  {\texttt{extract\_phase}};
+    \node[ph] (k)  at (0,-6.6)  {\texttt{check\_phase}};
+    \node[ph] (rp) at (0,-7.6)  {\texttt{report\_phase}};
+    \node[ph] (f)  at (0,-8.6)  {\texttt{final\_phase}};
+
+    \foreach \a/\b in {b/c,c/e,e/s,s/r,r/x,x/k,k/rp,rp/f}
+      \draw[fl] (\a) -- (\b);
+
+    % direction annotations
+    \draw[dir] (3.0,0.45) -- (3.0,-0.45);
+    \node[anchor=west,font=\sffamily\tiny,text=codekey] at (3.15,0.0)
+         {top-down: parent creates children};
+    \draw[dir] (3.0,-1.45) -- (3.0,-0.55);
+    \node[anchor=west,font=\sffamily\tiny,text=codekey] at (3.15,-1.0)
+         {bottom-up: children exist first};
+    \draw[dir] (3.0,-2.45) -- (3.0,-1.55);
+    \draw[dir] (3.0,-3.45) -- (3.0,-2.55);
+    \node[anchor=west,font=\sffamily\tiny,text=codekey] at (3.15,-3.0)
+         {bottom-up};
+    \node[anchor=west,font=\sffamily\tiny,text=accentalt] at (3.15,-4.3)
+         {every component's \texttt{run\_phase} forked in parallel;};
+    \node[anchor=west,font=\sffamily\tiny,text=accentalt] at (3.15,-4.75)
+         {ends when the last objection is dropped};
+    \draw[dir] (3.0,-6.05) -- (3.0,-5.15);
+    \node[anchor=west,font=\sffamily\tiny,text=codekey] at (3.15,-6.6)
+         {bottom-up};
+    \draw[dir] (3.0,-7.05) -- (3.0,-6.15);
+    \draw[dir] (3.0,-8.05) -- (3.0,-7.15);
+    \draw[dir] (3.0,-8.25) -- (3.0,-9.05);
+    \node[anchor=west,font=\sffamily\tiny,text=codekey] at (3.15,-8.6)
+         {top-down};
+
+    % run-time sub-phases
+    \node[draw=codeframe,fill=codebg,line width=0.6pt,rounded corners=2pt,
+          minimum width=46mm,minimum height=5mm,font=\sffamily\tiny,align=center]
+         (sub) at (0,-10.2)
+         {optional run-time sub-phases, in parallel with \texttt{run\_phase}:\\
+          \texttt{reset} $\rightarrow$ \texttt{configure} $\rightarrow$
+          \texttt{main} $\rightarrow$ \texttt{shutdown}};
+    \draw[fl,dashed] (r.west) -- ++(-1.1,0) |- (sub.west);
+  \end{tikzpicture}
+  \caption{UVM phase order. Only \code{run\_phase} consumes simulation time;
+    everything above and below it happens at a single time step.}
+  \label{fig:uvm:phases}
+\end{figure}
+
+\subsection{Why build is top-down and connect is bottom-up}
+\label{sec:uvm:phase-order}
+
+This is not an arbitrary choice, and understanding it removes most
+build-order confusion.
+
+\code{build\_phase} must be top-down because a parent \emph{creates} its
+children. The test's \code{build\_phase} creates the environment; only then
+does the environment exist, so only then can UVM call the environment's
+\code{build\_phase}, which creates the agent, and so on. The tree grows
+downwards as the phase executes. A useful side effect: because the parent
+runs first, the parent can write configuration into the database that the
+child will read a moment later in its own \code{build\_phase}. That is
+exactly how the active/passive setting and the virtual interface reach the
+driver.
+
+\code{connect\_phase} must be bottom-up because a connection needs both ends
+to exist. When the agent connects \code{drv.seq\_item\_port} to
+\code{sqr.seq\_item\_export}, both the driver and the sequencer must already
+have been constructed \emph{and} must already have constructed their own
+ports. Running the deepest components first guarantees it.
+
+The remaining function phases are bottom-up for the same reason in reverse:
+by the time the environment reports, its children have already reported, so
+the environment can summarise them. \code{final\_phase} is top-down only for
+symmetry with \code{build\_phase}.
+
+\subsection{\code{super.build\_phase(phase)}}
+\label{sec:uvm:super-build}
+
+Every phase method you override should begin by calling the base-class
+version:
+
+\begin{uvmcode}[caption={The shape of every component},label={lst:uvm:shape}]
+class cordic_agent extends uvm_agent;
+  `uvm_component_utils(cordic_agent)
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    super.build_phase(phase);     // never omit this line
+    // ... create children here ...
+  endfunction
+endclass
+\end{uvmcode}
+
+\begin{gotcha}{Omitting \code{super.build\_phase(phase)}}
+\index{UVM!build\_phase}%
+This is the single most common UVM bug, and its symptom is baffling: things
+silently do not get configured.
+
+\code{uvm\_component::build\_phase} is not empty. It calls
+\code{apply\_config\_settings()}, which walks the configuration database and
+automatically assigns any registered field of this component whose name
+matches a setting. \code{uvm\_agent::build\_phase} additionally reads the
+\code{is\_active} setting. If you skip \code{super.build\_phase(phase)},
+none of that happens: your agent stays \code{UVM\_ACTIVE} regardless of what
+the test asked for, and any field you expected the automation to fill stays
+at its default.
+
+The failure produces no error and no warning. It produces an agent that
+drives pins when it was supposed to be passive.
+
+In \VHDL{} terms: you overrode a procedure in a derived type and forgot that
+the parent's version was doing real work. \VHDL{} has no inheritance, so
+nothing in your previous experience warns you about this.
+\end{gotcha}
+
+\subsection{The run-time sub-phases}
+\label{sec:uvm:subphases}
+
+\index{UVM!run-time sub-phases}%
+UVM also defines a second schedule of run-time sub-phases that executes in
+parallel with \code{run\_phase}. There are four of them, namely
+\code{reset}, \code{configure}, \code{main} and \code{shutdown}, and
+each has a \code{pre\_} and a \code{post\_} variant, twelve in all. Each is
+a task, each is objected to independently, and the intent is that a testbench can, for example, apply
+reset in \code{reset\_phase} and stimulus in \code{main\_phase} without the
+two getting tangled.
+
+\begin{notebox}{Nobody uses the sub-phases}
+That is an exaggeration, but only a small one. Many teams -- probably most --
+put everything in \code{run\_phase} and manage ordering with ordinary
+\kw{fork}/\kw{join} and events. The sub-phases add a second synchronisation
+mechanism on top of objections, they interact badly with sequences that span
+phases, and \emph{jumping} between them (\code{phase.jump()}) is a source of
+hard-to-debug behaviour. If you are learning UVM, use \code{run\_phase} only.
+If you join a team that uses the sub-phases, follow the local convention.
+\end{notebox}
+
+\section{Objections: how a test knows it is finished}
+\label{sec:uvm:objections}
+
+\index{UVM!objection}%
+In \cref{ch:tb} the test finished because you wrote \code{wait\_drain()}: a
+loop that polled the scoreboard's transaction count against an expected
+number, with a cycle-count timeout that called \code{\$fatal} if the count
+never arrived. That works, but it puts the knowledge of ``am I done'' in one
+place, the test, and that place has to know how many transactions everyone
+else is still holding.
+
+UVM inverts it. Any component that has outstanding work \emph{objects} to the
+phase ending. The phase ends when the objection count reaches zero and stays
+zero for the drain time. Nobody needs to know the global count.
+
+\begin{uvmcode}[caption={An objection around the stimulus},label={lst:uvm:objection}]
+task run_phase(uvm_phase phase);
+  cordic_random_seq seq;
+
+  phase.raise_objection(this, "stimulus running");
+  phase.phase_done.set_drain_time(this, 500ns);
+
+  seq = cordic_random_seq::type_id::create("seq");
+  seq.start(env.agt.sqr);
+
+  phase.drop_objection(this, "stimulus done");
+endtask
+\end{uvmcode}
+
+\index{UVM!drain time}%
+The drain time is the direct equivalent of the margin you built into
+\code{wait\_drain}'s timeout, but it means the opposite thing. It is not a
+limit: it is a grace period. When the last objection drops, UVM waits 500\,ns
+of simulation time before killing the run phase, which gives the pipeline in
+the \DUT{} time to push out the last results, the monitor time to see them,
+and the scoreboard time to check them. Without it, the test would end at the
+instant the last request was accepted and the last few responses would never
+be checked. Five hundred nanoseconds at a 10\,ns clock is 50 cycles, which
+comfortably covers the CORDIC's $N+2$ cycle latency.
+
+The second argument to \code{raise\_objection} and \code{drop\_objection} is
+a description string. It costs nothing and it is invaluable:
+\code{+UVM\_OBJECTION\_TRACE} on the command line prints every raise and drop
+with its description, which is how you find out who is refusing to let your
+test finish.
+
+\subsection{Where to put them}
+
+\begin{ruleofthumb}
+Raise and drop objections in the test, around the sequence start. Everywhere
+else, prefer not to.
+\end{ruleofthumb}
+
+You \emph{can} raise an objection in a driver, a monitor or a sequence, and
+sometimes you must, since a monitor still holding a half-observed transaction
+has a legitimate claim that the test is not over. But every
+raise/drop pair is a place where the test can hang, and objections raised
+deep in the tree are hard to trace. Start with one pair, in the test.
+
+\begin{gotcha}{A test that ends at time zero}
+\index{UVM!objection}%
+You run your brand-new testbench and the transcript says:
+
+\begin{txtcode}
+UVM_INFO ... [UVM/REPORT/SERVER]
+--- UVM Report Summary ---
+** Report counts by severity
+UVM_INFO :    9
+UVM_WARNING : 0
+UVM_ERROR :   0
+UVM_FATAL :   0
+$finish called from file "uvm_root.svh"
+\end{txtcode}
+
+at simulation time 0, with no transactions and no waveform. Nobody raised an
+objection, so the run phase had nothing to wait for and ended immediately.
+
+The \emph{opposite} bug -- a test that never ends -- has the same cause
+inverted: an objection raised and never dropped, usually because the
+\code{drop\_objection} sits after a line that blocks forever. Run with
+\code{+UVM\_OBJECTION\_TRACE} and read the last raise.
+
+Note that a component whose \code{run\_phase} is a plain \kw{forever} loop
+(the driver, the monitor) does \emph{not} keep the phase alive. UVM kills
+those threads when the phase ends. Only objections keep a phase alive.
+\end{gotcha}
+
+\begin{tipbox}{Always set a global timeout}
+An objection that is never dropped hangs the simulation. Bound it:
+
+\begin{uvmcode}
+function void build_phase(uvm_phase phase);
+  super.build_phase(phase);
+  uvm_top.set_timeout(1ms, 1);   // hard stop, overridable
+  env = cordic_env::type_id::create("env", this);
+endfunction
+\end{uvmcode}
+
+or pass \code{+UVM\_TIMEOUT=1ms,YES} on the command line. A regression that
+hangs costs a licence for hours; a regression that fails takes a minute.
+\end{tipbox}
+
+\section{The factory}
+\label{sec:uvm:factory}
+
+\index{UVM!factory}%
+The factory is the mechanism that most repays understanding, because it is
+the reason UVM testbenches are reusable at all.
+
+\subsection{The problem it solves}
+
+Suppose you have a working environment, and you now want a test in which the
+driver occasionally corrupts a transaction, so that you can check that the
+scoreboard notices. In \cref{ch:tb} you would have to edit
+\code{cordic\_env::new()}, because that is where \code{drv = new(...)} is
+written. Editing a working, shared environment in order to add one test is
+exactly what you must not do.
+
+The factory removes the type name from the point of instantiation. Instead of
+naming the class you want, you ask a registry for ``whatever class is
+currently registered under this type'', and a test can change the answer
+without touching the environment.
+
+\begin{uvmcode}[caption={Registration and creation},label={lst:uvm:factory-basics}]
+class cordic_driver extends uvm_driver #(cordic_item);
+  `uvm_component_utils(cordic_driver)      // registers the type
+  // ...
+endclass
+
+class cordic_item extends uvm_sequence_item;
+  `uvm_object_utils(cordic_item)           // registers the type
+  // ...
+endclass
+
+// inside cordic_agent::build_phase
+drv = cordic_driver::type_id::create("drv", this);   // ask the factory
+// NOT:  drv = new("drv", this);
+\end{uvmcode}
+
+\chFiveM{uvm\_component\_utils} and \chFiveM{uvm\_object\_utils} expand to a
+typedef of a parameterised registry class (\code{type\_id}), a static
+\code{get\_type()} function, a \code{create()} function and a
+\code{get\_type\_name()} override, and they run a static registration that
+inserts the type into the global factory. \code{type\_id::create()} then asks
+the factory for an instance.
+
+\subsection{Overriding a type}
+
+\index{UVM!factory override}%
+With registration in place, a new test can substitute a derived class for the
+original everywhere it is created:
+
+\begin{uvmcode}[caption={An error-injecting driver, substituted by a test},label={lst:uvm:override}]
+// -------- the new driver: it exists only in the test's own file --------
+class cordic_bad_driver extends cordic_driver;
+  `uvm_component_utils(cordic_bad_driver)
+
+  int unsigned corrupt_one_in = 20;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  // Same signature as the parent's.  The parent declares drive() as
+  // `virtual', so the parent's run_phase dispatches to this one.
+  protected virtual task drive(cordic_item it);
+    if ($urandom_range(corrupt_one_in - 1) == 0) begin
+      `uvm_info(get_type_name(),
+                $sformatf("injecting error into %s", it.convert2string()),
+                UVM_LOW)
+      it.theta = it.theta ^ 16'h0040;      // flip one bit
+    end
+    super.drive(it);
+  endtask
+endclass
+
+// -------- the test: no change at all to the env or the agent -----------
+class cordic_inject_test extends cordic_base_test;
+  `uvm_component_utils(cordic_inject_test)
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+  endfunction
+
+  function void build_phase(uvm_phase phase);
+    // The override MUST be set before the component is created, so it goes
+    // before super.build_phase(), which is what creates the env.
+    set_type_override_by_type(cordic_driver::get_type(),
+                              cordic_bad_driver::get_type());
+    super.build_phase(phase);
+  endfunction
+
+  task run_phase(uvm_phase phase);
+    cordic_random_seq seq;
+    phase.raise_objection(this);
+    seq = cordic_random_seq::type_id::create("seq");
+    void'(seq.randomize() with { n_items == 200; });
+    seq.start(env.agt.sqr);
+    phase.drop_objection(this);
+  endtask
+endclass
+\end{uvmcode}
+
+Run this test and every \code{cordic\_driver} in the tree becomes a
+\code{cordic\_bad\_driver}. The environment source file is untouched. The
+agent source file is untouched. Nothing was recompiled that did not have to
+be.
+
+If there are several agents and you want only one of them corrupted, use an
+instance override, which takes a path string:
+
+\begin{uvmcode}
+set_inst_override_by_type("env.agt_a.drv",
+                          cordic_driver::get_type(),
+                          cordic_bad_driver::get_type());
+\end{uvmcode}
+
+Instance overrides take priority over type overrides, and the path is matched
+against \code{get\_full\_name()} relative to the component that sets it. There
+are also \code{\_by\_name} variants of both calls, which take a type name as
+a string instead of a type handle; prefer the \code{\_by\_type} forms, because a typo in a type
+name is a silent no-op while a typo in a type handle is a compile error.
+
+\subsection{This is \VHDL{}'s \kw{configuration}, done with classes}
+
+\index{configuration (VHDL)}%
+If you have used \VHDL{}'s configuration declarations, the factory will feel
+familiar, because they solve the same problem: choose which implementation
+fills a hole in the hierarchy, without editing the hierarchy.
+
+\begin{rosetta}
+\begin{rleft}
+-- one architecture is written
+-- against a component declaration
+architecture struct of top is
+  component drv_c is
+    port (...);
+  end component;
+begin
+  u_drv : drv_c port map (...);
+end architecture;
+
+-- a separate configuration unit
+-- decides what fills the hole
+configuration cfg_bad of top is
+  for struct
+    for u_drv : drv_c
+      use entity work.drv_bad(rtl);
+    end for;
+  end for;
+end configuration;
+\end{rleft}
+\begin{rright}
+// the agent is written against
+// the base type
+drv = cordic_driver::type_id
+        ::create("drv", this);
+
+// a separate test decides what
+// fills the hole
+class cordic_inject_test
+  extends cordic_base_test;
+  function void build_phase(
+      uvm_phase phase);
+    set_type_override_by_type(
+      cordic_driver::get_type(),
+      cordic_bad_driver::get_type());
+    super.build_phase(phase);
+  endfunction
+endclass
+\end{rright}
+\end{rosetta}
+
+The differences are instructive. The \VHDL{} configuration is elaborated
+once, statically, and selects an entity/architecture pair. The UVM override
+is executed at run time by ordinary code, so it can be conditional, can be
+driven by a plusarg, and can be undone. On the other hand the \VHDL{}
+configuration is checked by the analyser, while a UVM override of an
+unrelated type fails only when the factory tries the \code{\$cast} and
+reports an error at run time.
+
+\begin{gotcha}{\kw{new} instead of \code{create}}
+\index{UVM!type\_id::create}%
+\begin{uvmcode}
+drv = new("drv", this);                            // legal, and wrong
+drv = cordic_driver::type_id::create("drv", this); // right
+\end{uvmcode}
+
+The first line compiles, runs, and produces a perfectly functional driver.
+It simply bypasses the factory, so every override of that type silently does
+nothing. There is no warning. Your error-injection test will run happily and
+inject nothing.
+
+The rule has no exceptions worth learning as a beginner: inside a testbench,
+components and sequence items are always built with
+\code{type\_id::create()}. The only \kw{new} calls in a UVM testbench are in
+constructors (\code{super.new(name, parent)}) and for objects that are
+genuinely not factory-registered, such as TLM ports and analysis ports.
+\end{gotcha}
+
+\begin{tipbox}{Check what the factory actually did}
+Call \code{uvm\_factory::get().print()} in
+\code{end\_of\_elaboration\_phase}, or pass \code{+UVM\_CONFIG\_DB\_TRACE}
+and \code{-uvmtrace} depending on your simulator. The factory print lists
+every registered type and every override in force. If your override is not in
+that list, it was never applied.
+\end{tipbox}
+
+\section{The configuration database}
+\label{sec:uvm:configdb}
+
+\index{UVM!uvm\_config\_db}%
+The factory decides \emph{what type} is built. The configuration database
+decides \emph{what values} it is built with. It is a global, string-keyed,
+type-parameterised store:
+
+\begin{uvmcode}
+uvm_config_db #(T)::set(uvm_component cntxt, string inst_name,
+                        string field_name, T value);
+
+bit ok = uvm_config_db #(T)::get(uvm_component cntxt, string inst_name,
+                                 string field_name, ref T value);
+\end{uvmcode}
+
+The lookup key is the concatenation of \code{cntxt.get\_full\_name()} and
+\code{inst\_name}, so the two arguments together name a scope. Passing
+\kw{null} as the context means ``the root'', and then \code{inst\_name} is an
+absolute path from the top. The path may contain \code{*} and \code{?}
+wildcards, and when several settings match, the one whose scope is
+\emph{higher} in the tree wins, with later settings beating earlier ones at
+the same level. That precedence rule is what lets a test override what an
+environment set.
+
+\subsection{Getting the virtual interface into the driver}
+\label{sec:uvm:vif}
+
+\index{virtual interface}%
+This is the one use of the configuration database that every testbench needs,
+and it is worth writing out in full because the two halves live in different
+files.
+
+The \DUT{} and the physical interface are in a module. Classes cannot be
+instantiated inside a module hierarchy, and a class cannot reach into a
+module by name in any portable way, so the handle has to be passed. The
+top-level module puts it into the database before \code{run\_test()} returns
+control to the phasing:
+
+\begin{uvmcode}[caption={Top-level module: publish the interface handle},label={lst:uvm:vif-set}]
+module tb_cordic_uvm;
+  import uvm_pkg::*;
+  `include "uvm_macros.svh"
+  import cordic_pkg::*;
+  import cordic_uvm_pkg::*;
+
+  logic clk = 1'b0;
+  always #5ns clk = ~clk;
+
+  cordic_if vif (.clk(clk));
+
+  cordic_rot #(.ITER(N)) dut ( /* ports: see the full listing below */ );
+
+  initial begin
+    uvm_config_db #(virtual cordic_if)::set(null, "*", "vif", vif);
+    run_test();
+  end
+endmodule
+\end{uvmcode}
+
+and every component that needs pins fetches it in its \code{build\_phase}:
+
+\begin{uvmcode}[caption={Driver and monitor: fetch the interface handle},label={lst:uvm:vif-get}]
+function void build_phase(uvm_phase phase);
+  super.build_phase(phase);
+  if (!uvm_config_db #(virtual cordic_if)::get(this, "", "vif", vif))
+    `uvm_fatal("NOVIF",
+               {"no virtual interface set for ", get_full_name(), ".vif"})
+endfunction
+\end{uvmcode}
+
+Read the arguments carefully.
+
+\begin{itemize}
+  \item In the \code{set}, the context is \kw{null} and the instance name is
+        \code{"*"}: available to every component in the tree. In a testbench
+        with two interfaces you would write \code{"*.agt\_a.*"} and
+        \code{"*.agt\_b.*"} instead of \code{"*"}.
+  \item In the \code{get}, the context is \kw{this} and the instance name is
+        the empty string: look up the key exactly for this component. Almost
+        every \code{get} you will ever write has this form.
+  \item The field name \code{"vif"} is a string and must match on both sides.
+        It is conventional, not required, that it equals the name of the
+        class member it is assigned to.
+  \item The type parameter must match exactly. \code{virtual cordic\_if} and
+        \code{virtual cordic\_if.drv} (a modport-qualified virtual interface)
+        are \emph{different} types and will not find each other.
+\end{itemize}
+
+\begin{gotcha}{The null virtual interface}
+Forget the \code{set}, misspell the field name, or use a wildcard that does
+not match, and the \code{get} returns 0. If you did not test the return
+value, \code{vif} stays \kw{null}, and the first clocking-block access in
+\code{run\_phase} produces something like
+
+\begin{txtcode}
+** Fatal: (vsim-3363) Null virtual interface reference.
+   Time: 0 ns  Iteration: 0  Process:
+   /tb_cordic_uvm/#INITIAL#33/uvm_pkg::run_test
+\end{txtcode}
+
+or, on other simulators,
+
+\begin{txtcode}
+Error-[NOA] Null object access
+  The object is being used before it was constructed/allocated.
+\end{txtcode}
+
+Neither message mentions the configuration database, the field name, or the
+component. This is why the \chFiveM{uvm\_fatal} guard in
+\cref{lst:uvm:vif-get} is not optional style: it converts an unreadable
+simulator error at an arbitrary time into a message at time zero that names
+the component and the missing key.
+
+The most common cause among students: the \code{set} was written
+\emph{after} \code{run\_test()} in the same \kw{initial} block.
+\code{run\_test()} does not return until the simulation is over.
+\end{gotcha}
+
+\begin{notebox}{\code{uvm\_config\_db} versus \code{uvm\_resource\_db}}
+\code{uvm\_config\_db} is a thin, hierarchy-aware layer over
+\code{uvm\_resource\_db}. The resource database has no notion of scope
+precedence; the configuration database adds the ``higher in the tree wins''
+rule. Use \code{uvm\_config\_db} unless you have a specific reason not to.
+Both are string-keyed and both fail silently on a typo, so use
+\code{+UVM\_CONFIG\_DB\_TRACE} when a value does not arrive.
+\end{notebox}
+
+\begin{tipbox}{Pass a configuration object, not fifteen fields}
+Once a component needs more than two or three settings, stop putting
+individual fields in the database. Define a class:
+
+\begin{uvmcode}
+class cordic_cfg extends uvm_object;
+  `uvm_object_utils(cordic_cfg)
+  int unsigned          stall_pct  = 25;
+  int unsigned          tol_lsb    = 12;
+  uvm_active_passive_enum is_active = UVM_ACTIVE;
+  function new(string name = "cordic_cfg"); super.new(name); endfunction
+endclass
+\end{uvmcode}
+
+and put one handle in the database:
+\code{uvm\_config\_db \#(cordic\_cfg)::set(this, "env.agt*", "cfg", cfg);}.
+One key, one lookup, and the settings are type-checked by the compiler
+instead of by a string comparison.
+\end{tipbox}
+
+\section{Sequences and sequencers}
+\label{sec:uvm:sequences}
+
+\index{UVM!sequence}\index{UVM!sequencer}%
+In \cref{ch:tb} the stimulus was a task on the environment:
+\code{send\_random(n)} looped $n$ times, created a transaction, randomised it
+and pushed it into a mailbox. That is adequate and it is easy to read, but it
+has a structural weakness: the stimulus is a \emph{task}, and a task cannot
+be extended, cannot be randomised as a whole, and cannot be selected by name
+at run time. UVM makes stimulus an \emph{object} instead, and that single
+change is what makes test-writing scale.
+
+\subsection{The sequence item}
+
+A sequence item is a \code{uvm\_object} that carries one transaction. It is
+the UVM version of \code{cordic\_txn}.
+
+\begin{uvmcode}[caption={A sequence item with field automation},label={lst:uvm:item-macros}]
+class cordic_item extends uvm_sequence_item;
+
+  rand data_t  x0;
+  rand data_t  y0;
+  rand angle_t theta;
+  data_t       x, y;        // filled in by the monitor
+
+  `uvm_object_utils_begin(cordic_item)
+    `uvm_field_int(x0,    UVM_DEFAULT | UVM_DEC)
+    `uvm_field_int(y0,    UVM_DEFAULT | UVM_DEC)
+    `uvm_field_int(theta, UVM_DEFAULT | UVM_DEC)
+    `uvm_field_int(x,     UVM_DEFAULT | UVM_DEC)
+    `uvm_field_int(y,     UVM_DEFAULT | UVM_DEC)
+  `uvm_object_utils_end
+
+  function new(string name = "cordic_item");
+    super.new(name);
+  endfunction
+
+endclass
+\end{uvmcode}
+
+\index{UVM!field automation macros}%
+The block between \chFiveM{uvm\_object\_utils\_begin} and
+\chFiveM{uvm\_object\_utils\_end} is the \emph{field automation}. Each
+\chFiveM{uvm\_field\_int} adds the named field to a table that the base class
+walks whenever somebody calls \code{copy()}, \code{compare()}, \code{print()},
+\code{pack()}, \code{unpack()}, \code{record()} or \code{sprint()}. You get
+seven methods for five lines. The flags select which of them the field takes
+part in: \code{UVM\_DEFAULT} means all of them, \code{UVM\_DEC} is a
+formatting hint, and you can subtract behaviours with, for example,
+\code{UVM\_DEFAULT | UVM\_NOCOMPARE} for a field the scoreboard should
+ignore.
+
+\begin{notebox}{Field macros are convenient and slow}
+\index{UVM!field automation macros}%
+The automation is implemented by a generic recursive walk over a table of
+field descriptors, driven by string comparisons and \code{\$cast}. It is one
+to two orders of magnitude slower than the hand-written equivalent, and it is
+executed on every single transaction. On a testbench that moves millions of
+items, the field macros can become a visible fraction of total run time.
+
+Many experienced teams therefore do not use them at all. They register the
+type with the plain \chFiveM{uvm\_object\_utils} and write the three methods
+they actually need:
+
+\begin{uvmcode}
+`uvm_object_utils(cordic_item)
+
+function void do_copy(uvm_object rhs);
+  cordic_item that;
+  super.do_copy(rhs);
+  if (!$cast(that, rhs))
+    `uvm_fatal("CAST", "do_copy: type mismatch")
+  x0 = that.x0;  y0 = that.y0;  theta = that.theta;
+  x  = that.x;   y  = that.y;
+endfunction
+
+function bit do_compare(uvm_object rhs, uvm_comparer comparer);
+  cordic_item that;
+  if (!$cast(that, rhs)) return 0;
+  return super.do_compare(rhs, comparer)
+         && (x == that.x) && (y == that.y);
+endfunction
+
+function string convert2string();
+  return $sformatf("x0=%0d y0=%0d theta=%0d -> x=%0d y=%0d",
+                   x0, y0, theta, x, y);
+endfunction
+\end{uvmcode}
+
+That is more lines, but it is explicit, fast, and it is what you will see in
+most industrial code. Use the macros while you are learning; be ready to
+delete them when a profiler tells you to.
+\end{notebox}
+
+\begin{gotcha}{\chFiveM{uvm\_field\_int} on a \kw{real}}
+\index{UVM!field automation macros}%
+The field macros come in typed flavours and you must pick the right one:
+\chFiveM{uvm\_field\_int} for integral types, \chFiveM{uvm\_field\_real} for
+\kw{real} and \kw{shortreal}, \chFiveM{uvm\_field\_enum},
+\chFiveM{uvm\_field\_string}, \chFiveM{uvm\_field\_object},
+\chFiveM{uvm\_field\_array\_int}, \chFiveM{uvm\_field\_queue\_object}, and so
+on, roughly thirty of them.
+
+Writing \chFiveM{uvm\_field\_int(gain, UVM\_DEFAULT)} where \code{gain} is a
+\kw{real} does not always fail to compile. The macro body assigns through a
+\code{uvm\_bitstream\_t} (a 4096-bit vector), so a \kw{real} may be implicitly
+converted to an integer, and the fractional part is silently lost. Your
+comparison then passes on values that differ, or your print shows
+\code{1} where the value is 1.6468.
+
+There is a deeper reason not to put a \kw{real} in a transaction at all: a
+transaction should hold what crossed the pins, and pins carry bits. Keep the
+fixed-point value; convert to \kw{real} inside the scoreboard, where the
+reference model lives.
+\end{gotcha}
+
+\subsection{The sequence}
+
+A sequence is a \code{uvm\_object} whose \code{body()} task generates items.
+It is the direct replacement for \code{send\_random()}.
+
+\begin{uvmcode}[caption={A random sequence},label={lst:uvm:seq-basic}]
+class cordic_random_seq extends uvm_sequence #(cordic_item);
+  `uvm_object_utils(cordic_random_seq)
+
+  rand int unsigned n_items = 200;
+  constraint c_n { n_items inside {[1:5000]}; }
+
+  function new(string name = "cordic_random_seq");
+    super.new(name);
+  endfunction
+
+  task body();
+    cordic_item it;
+    repeat (n_items) begin
+      it = cordic_item::type_id::create("it");
+      start_item(it);
+      if (!it.randomize())
+        `uvm_fatal(get_type_name(), "item randomization failed")
+      finish_item(it);
+    end
+  endtask
+
+endclass
+\end{uvmcode}
+
+Three details deserve attention.
+
+\textbf{The parameter.} \code{uvm\_sequence \#(cordic\_item)} is really
+\code{uvm\_sequence \#(REQ, RSP)} with \code{RSP} defaulting to \code{REQ}.
+Unless you use the response path (\cref{sec:uvm:pipelined}), one parameter is
+enough.
+
+\textbf{The randomisation is late.} The item is randomised \emph{between}
+\code{start\_item} and \code{finish\_item}, not before \code{start\_item}.
+That is deliberate. \code{start\_item} blocks until the sequencer grants this
+sequence the right to send, and only then does the item become the ``current
+item''; randomising after the grant means the constraints see the state of the
+world at the moment the item will actually be driven, and it allows a
+sequencer-level constraint layer to influence the result. Randomising before
+\code{start\_item} works too, and is common, but it is the less general
+pattern.
+
+\textbf{The sequence itself is randomisable.} \code{n\_items} is \kw{rand},
+so the test can write
+\code{seq.randomize() with \{ n\_items inside \{[100:200]\}; \}}. This is the
+capability a task simply does not have.
+
+The \chFiveM{uvm\_do} family compresses the create/start/randomise/finish
+sequence into one line:
+
+\begin{uvmcode}
+task body();
+  cordic_item it;
+  repeat (n_items)
+    `uvm_do_with(it, { theta inside {[-PI_EXT : PI_EXT]}; })
+endtask
+\end{uvmcode}
+
+\chFiveM{uvm\_do}, \chFiveM{uvm\_do\_with}, \chFiveM{uvm\_create},
+\chFiveM{uvm\_send} and their \code{\_on} variants (which take an explicit
+sequencer) are still widely used. They are also widely disliked: they hide
+the handshake you are trying to learn, they make the constraint block hard to
+read, and their error messages point inside the macro. Write the long form
+until the handshake is second nature.
+
+\subsection{Starting a sequence}
+
+A sequence does not run by itself. Somebody calls \code{start()} on it and
+tells it which sequencer to run on:
+
+\begin{uvmcode}
+cordic_random_seq seq;
+seq = cordic_random_seq::type_id::create("seq");
+void'(seq.randomize() with { n_items == 500; });
+seq.start(env.agt.sqr);      // blocks until body() returns
+\end{uvmcode}
+
+\code{start()} is a task and it blocks, which is exactly what you want inside
+an objection. The full signature is
+\code{start(sequencer, parent\_seq, priority, call\_pre\_post)}; the extra
+arguments matter only for nested sequences.
+
+Inside \code{body()}, the handle \code{m\_sequencer} refers to the sequencer
+the sequence is running on, typed as \code{uvm\_sequencer\_base}. If your
+sequencer is a derived class with extra members, say a pointer to a
+configuration object or a handle to another agent's sequencer, you need a
+typed handle. The macro \chFiveM{uvm\_declare\_p\_sequencer(type)} declares
+\code{p\_sequencer} and casts \code{m\_sequencer} into it in \code{pre\_body}:
+
+\begin{uvmcode}
+class cordic_cfg_seq extends uvm_sequence #(cordic_item);
+  `uvm_object_utils(cordic_cfg_seq)
+  `uvm_declare_p_sequencer(cordic_sequencer)
+  // ...
+  task body();
+    // p_sequencer is a cordic_sequencer, not a uvm_sequencer_base
+    if (p_sequencer.cfg.stall_pct > 50) ...
+  endtask
+endclass
+\end{uvmcode}
+
+\subsection{Sequence libraries and virtual sequences}
+
+\index{UVM!virtual sequence}%
+Two constructions appear in every large testbench and are worth recognising
+even though you will not write one this week.
+
+A \emph{sequence library} (\code{uvm\_sequence\_library \#(REQ)}) is a
+sequence that picks other sequences and runs them, in random order, in a
+random selection, or round-robin. It is how a long soak test is built out of
+a dozen small directed sequences.
+
+A \emph{virtual sequence} is a sequence that runs on no protocol at all. It
+coordinates several real sequences on several sequencers, which is how you
+say ``start the register configuration on the APB agent, wait for it to
+finish, then start data traffic on both the input and the output agents at
+once''. Its sequencer, a \emph{virtual sequencer}, holds handles to the real
+sequencers and drives nothing itself. Virtual sequences are where
+system-level tests actually live.
+
+\subsection{The sequencer--driver handshake}
+\label{sec:uvm:handshake}
+
+\index{UVM!seq\_item\_port}%
+This is the part students get wrong most often, so read
+\cref{fig:uvm:handshake} slowly.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      font=\sffamily\scriptsize,
+      hd/.style={draw=codeframe,fill=svbg,line width=0.8pt,rounded corners=2pt,
+                 minimum width=24mm,minimum height=6mm,align=center},
+      ll/.style={codeframe,line width=0.8pt,dashed},
+      msg/.style={-{Stealth[length=2mm]},codekey,line width=0.8pt},
+      ret/.style={-{Stealth[length=2mm]},accentalt,line width=0.8pt,dashed},
+      note/.style={font=\sffamily\tiny,text=black!65,align=center}
+    ]
+    \node[hd] (s) at (0,0)   {sequence\\\texttt{body()}};
+    \node[hd] (q) at (4.6,0) {sequencer};
+    \node[hd] (d) at (9.2,0) {driver\\\texttt{run\_phase}};
+
+    \draw[ll] (s.south) -- (0,-7.4);
+    \draw[ll] (q.south) -- (4.6,-7.4);
+    \draw[ll] (d.south) -- (9.2,-7.4);
+
+    \draw[msg] (0,-0.9)  -- node[above,note]{\texttt{start\_item(req)}} (4.6,-0.9);
+    \draw[ret] (4.6,-1.6) -- node[above,note]{grant: req is now the active item} (0,-1.6);
+    \node[note,anchor=west] at (0.15,-2.25) {\texttt{req.randomize()}};
+    \draw[msg] (0,-2.9)  -- node[above,note]{\texttt{finish\_item(req)}} (4.6,-2.9);
+
+    \draw[msg] (9.2,-3.6) -- node[above,note]{\texttt{seq\_item\_port.get\_next\_item(req)}} (4.6,-3.6);
+    \draw[ret] (4.6,-4.3) -- node[above,note]{returns the item} (9.2,-4.3);
+    \node[note,anchor=east] at (9.05,-4.95) {drive the pins};
+    \draw[msg] (9.2,-5.6) -- node[above,note]{\texttt{seq\_item\_port.item\_done()}} (4.6,-5.6);
+    \draw[ret] (4.6,-6.3) -- node[above,note]{\texttt{finish\_item} returns; \texttt{body()} continues} (0,-6.3);
+
+    \node[note,anchor=west,text=accentalt] at (-2.6,-7.0)
+         {every arrow is a blocking call: nothing here is a signal};
+  \end{tikzpicture}
+  \caption{One round of the sequencer--driver handshake. The sequence blocks
+    in \texttt{finish\_item} from the moment it hands the item over until the
+    driver calls \texttt{item\_done}, which is what makes the driver's
+    back-pressure propagate all the way back to the stimulus.}
+  \label{fig:uvm:handshake}
+\end{figure}
+
+On the driver side the loop is always the same three lines:
+
+\begin{uvmcode}[caption={The driver's side of the handshake},label={lst:uvm:drv-loop}]
+task run_phase(uvm_phase phase);
+  forever begin
+    seq_item_port.get_next_item(req);   // blocks until an item arrives
+    drive(req);                         // your pin wiggling, takes time
+    seq_item_port.item_done();          // releases the sequence
+  end
+endtask
+\end{uvmcode}
+
+\code{req} is not a variable you declare: it is inherited from
+\code{uvm\_driver \#(REQ, RSP)}, together with \code{rsp}. The port
+\code{seq\_item\_port} is inherited too. All you provide is \code{drive()}.
+
+Notice what this buys you compared with the mailbox in \cref{ch:tb}. There,
+\code{req\_mbx.get(t)} removed the transaction from the mailbox and the
+generator carried on immediately: the generator ran ahead of the driver,
+bounded only by the mailbox depth. Here, the sequence is blocked inside
+\code{finish\_item} until \code{item\_done()}, so the stimulus generation
+rate is exactly the rate at which the \DUT{} accepts requests. Back-pressure
+propagates from the pins to the sequence for free.
+
+\begin{gotcha}{Forgetting \code{item\_done()}}
+\begin{uvmcode}
+forever begin
+  seq_item_port.get_next_item(req);
+  drive(req);
+  // item_done() missing
+end
+\end{uvmcode}
+
+The first item is driven correctly. The second \code{get\_next\_item} then
+blocks forever, because the sequencer still considers the first item
+outstanding. Your simulation drives exactly one transaction and then hangs
+until the global timeout, with no error message and a waveform that shows one
+perfect handshake followed by silence.
+
+The mirror-image bug is calling \code{item\_done()} twice, or calling it
+without a matching \code{get\_next\_item}, which produces a
+\code{SEQREQZMB} error from the sequencer (``Item done() called with no
+outstanding requests'').
+
+If your driver uses \code{try\_next\_item} instead, remember that
+\code{item\_done()} must be called only when \code{try\_next\_item} actually
+returned a non-null handle.
+\end{gotcha}
+
+\subsection{The pipelined alternative}
+\label{sec:uvm:pipelined}
+
+\code{get\_next\_item} is blocking, which is wrong for a driver that must
+keep the bus busy every cycle whether or not stimulus is available. The
+non-blocking form returns \kw{null} instead of waiting:
+
+\begin{uvmcode}[caption={A driver that never stalls the bus},label={lst:uvm:try-next}]
+task run_phase(uvm_phase phase);
+  forever begin
+    seq_item_port.try_next_item(req);
+    if (req == null) begin
+      drive_idle();          // hold valid low for one cycle
+      @(vif.drv_cb);
+    end else begin
+      drive(req);
+      seq_item_port.item_done();
+    end
+  end
+endtask
+\end{uvmcode}
+
+For a genuinely pipelined protocol, where the response to a request arrives
+many cycles later and the driver must not block in the meantime, the pattern
+is two threads: one calls \code{get\_next\_item}/\code{item\_done()} as fast
+as the request channel allows, the other collects responses and returns them
+with \code{seq\_item\_port.put\_response(rsp)} or the combined
+\code{item\_done(rsp)}. The sequence then reads them with
+\code{get\_response(rsp)}. The CORDIC does not need this, because its monitor
+observes the responses independently, but you will meet it on any bus
+agent.
+
+\begin{ruleofthumb}
+If the sequence never needs to see the result, do not use the response path.
+Let the monitor observe the result and send it to the scoreboard. Responses
+are for sequences that must make a decision based on what came back.
+\end{ruleofthumb}
+
+\section{The agent}
+\label{sec:uvm:agent}
+
+\index{UVM!agent}%
+An agent packages everything that knows about one protocol: a sequencer, a
+driver and a monitor, plus whatever configuration they share. It is the unit
+of reuse, and it is the one box in \cref{fig:uvm:hierarchy} that has no
+counterpart in \cref{ch:tb}.
+
+\code{uvm\_agent} adds exactly one thing to \code{uvm\_component}: a field
+called \code{is\_active}, of an enumerated type whose two values are
+\code{UVM\_ACTIVE} and \code{UVM\_PASSIVE}. The base class reads it from
+the configuration database in its own \code{build\_phase}, and
+\code{get\_is\_active()} returns it. An active agent builds all three sub-components and
+drives the pins. A passive agent builds only the monitor.
+
+\begin{uvmcode}[caption={The active/passive switch},label={lst:uvm:agent-active}]
+function void build_phase(uvm_phase phase);
+  super.build_phase(phase);          // reads is_active from the config db
+  ap  = new("ap", this);
+  mon = cordic_monitor::type_id::create("mon", this);
+  if (get_is_active() == UVM_ACTIVE) begin
+    sqr = uvm_sequencer #(cordic_item)::type_id::create("sqr", this);
+    drv = cordic_driver::type_id::create("drv", this);
+  end
+endfunction
+
+function void connect_phase(uvm_phase phase);
+  mon.ap.connect(ap);
+  if (get_is_active() == UVM_ACTIVE)
+    drv.seq_item_port.connect(sqr.seq_item_export);
+endfunction
+\end{uvmcode}
+
+Why does this matter enough to be built into the standard? Because of what
+happens when the block is integrated. At block level, your CORDIC agent is
+active: it generates the requests. At subsystem level, the CORDIC is fed by
+another block, and stimulus now arrives from the design, not from you. You
+still want the monitor: you still want the scoreboard to check every
+rotation, and you still want the coverage to be collected. So you instantiate
+\emph{the same agent}, set it passive, and everything downstream of the
+monitor works unchanged.
+
+\begin{uvmcode}
+// in the subsystem test's build_phase, before super.build_phase()
+uvm_config_db #(uvm_active_passive_enum)::set(
+    this, "env.agt", "is_active", UVM_PASSIVE);
+\end{uvmcode}
+
+\index{VIP}%
+An agent written so that it can be dropped into somebody else's testbench,
+self-contained, configured only through the database, with no reference to a
+particular \DUT{}, is what the industry calls a \emph{VIP}, a verification
+IP. Commercial VIP for AXI, PCIe, USB or DDR is exactly this: a package of
+UVM classes with a documented configuration object, a documented sequence
+API, and a monitor whose analysis port you connect to your own scoreboard.
+Buying VIP instead of writing it is the main commercial reason UVM exists.
+
+\begin{tipbox}{Put the analysis port on the agent, not on the monitor}
+In \cref{lst:uvm:agent-active} the agent has its own \code{ap}, and the
+monitor's port is connected to it. The environment then connects
+\code{agt.ap}, never \code{agt.mon.ap}. This costs one line and it means the
+agent's internal structure is private: you can later split the monitor in
+two, or add a filter between the monitor and the port, without changing any
+environment that uses the agent.
+\end{tipbox}
+
+\section{TLM and the analysis path}
+\label{sec:uvm:tlm}
+
+\index{UVM!TLM}\index{UVM!analysis port}%
+TLM, transaction-level modelling, is the mechanism by which UVM components
+exchange objects. You have already met the two forms it takes: the blocking
+\code{seq\_item\_port} between sequencer and driver, and the broadcast
+analysis port out of the monitor. It is the analysis path that replaces the
+mailboxes of \cref{ch:tb}, and it is worth being precise about the
+difference.
+
+A \code{mailbox \#(T)} is a point-to-point queue. It has one producer and one
+consumer, the producer may block if it is bounded, and the consumer blocks
+until something arrives. In \cref{ch:tb} the monitor had to hold two
+mailboxes, \code{obs\_mbx} and \code{cov\_mbx}, and put each transaction into
+both. To add a third consumer you had to edit the monitor.
+
+A \code{uvm\_analysis\_port \#(T)} is a broadcast. The producer calls
+\code{write(t)}, which is a \emph{function}: it never blocks, never consumes
+time, and returns immediately. The port forwards the call to every subscriber
+connected to it, in an unspecified order. Zero subscribers is legal and does
+nothing.
+
+\begin{uvmcode}[caption={Producing on an analysis port},label={lst:uvm:ap}]
+class cordic_monitor extends uvm_monitor;
+  uvm_analysis_port #(cordic_item) ap;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    ap = new("ap", this);    // ports are NOT factory-created
+  endfunction
+  // ... in run_phase, when a transaction is complete:
+  //     ap.write(it);
+endclass
+\end{uvmcode}
+
+\subsection{Three ways to consume}
+
+\index{UVM!uvm\_subscriber}%
+\textbf{\code{uvm\_subscriber \#(T)}} is the simplest. It is a component with
+a built-in \code{analysis\_export} and one pure virtual method,
+\code{write(T t)}, which you implement. There is no thread and no queue: your
+\code{write} runs inside the monitor's call stack. That makes it ideal for
+coverage sampling, which is a function anyway, and unsuitable for anything
+that needs to consume time.
+
+\index{UVM!uvm\_analysis\_imp}%
+\textbf{\code{uvm\_analysis\_imp \#(T, PARENT)}} is the general form: it
+forwards \code{write()} to a method named \code{write} in the parent
+component. A component can have only one such method, so a scoreboard that
+must listen to two monitors, one on the input and one on the output, cannot
+use two plain imps. The macro
+\chFiveM{uvm\_analysis\_imp\_decl} solves it by generating a suffixed variant:
+
+\begin{uvmcode}[caption={Two analysis inputs on one scoreboard},label={lst:uvm:imp-decl}]
+// At package scope, outside any class:
+`uvm_analysis_imp_decl(_req)
+`uvm_analysis_imp_decl(_rsp)
+
+class two_port_sb extends uvm_scoreboard;
+  `uvm_component_utils(two_port_sb)
+
+  uvm_analysis_imp_req #(cordic_item, two_port_sb) req_imp;
+  uvm_analysis_imp_rsp #(cordic_item, two_port_sb) rsp_imp;
+
+  function new(string name, uvm_component parent);
+    super.new(name, parent);
+    req_imp = new("req_imp", this);
+    rsp_imp = new("rsp_imp", this);
+  endfunction
+
+  function void write_req(cordic_item t);  /* ... */ endfunction
+  function void write_rsp(cordic_item t);  /* ... */ endfunction
+endclass
+\end{uvmcode}
+
+The macro invents the class \code{uvm\_analysis\_imp\_req} and makes it call
+\code{write\_req} instead of \code{write}. It must appear at package or
+compilation-unit scope, exactly once per suffix, or you get a duplicate
+definition error when two files declare the same suffix.
+
+\index{UVM!uvm\_tlm\_analysis\_fifo}%
+\textbf{\code{uvm\_tlm\_analysis\_fifo \#(T)}} is what a scoreboard usually
+wants. It is an unbounded FIFO with an \code{analysis\_export} on the input
+side and a blocking \code{get()} on the output side. The monitor's
+\code{write()} still returns immediately, because the FIFO's \code{write}
+only pushes, but the checking code becomes an ordinary \code{run\_phase}
+loop:
+
+\begin{uvmcode}
+uvm_tlm_analysis_fifo #(cordic_item) fifo;
+// ...
+task run_phase(uvm_phase phase);
+  cordic_item it;
+  forever begin
+    fifo.get(it);        // blocks until the monitor writes
+    check(it);           // may take time, may call other tasks
+  end
+endtask
+\end{uvmcode}
+
+\begin{ruleofthumb}
+Coverage collectors get a \code{uvm\_subscriber}. Scoreboards get a
+\code{uvm\_tlm\_analysis\_fifo}. Use a bare \code{uvm\_analysis\_imp} only
+when you need several differently-named inputs and none of them blocks.
+\end{ruleofthumb}
+
+Why does the FIFO matter? Because \code{write()} is a function and cannot
+consume time. Any checking that needs to wait, for a matching transaction
+from another interface, for a register read, or for a model that itself takes
+time, cannot be written inside \code{write()}. Put the item in a FIFO and
+do the work in a task. It also decouples the two: if the checker is slow, the
+monitor is not held up, because the FIFO is unbounded.
+
+\begin{notebox}{The rest of TLM}
+UVM also provides the full TLM-1 port set (\code{uvm\_blocking\_put\_port},
+\code{uvm\_nonblocking\_get\_port}, \code{uvm\_transport\_port} and their
+exports and imps) and a TLM-2.0 subset with generic payloads and sockets, for
+connecting to SystemC models. You will not need them for a block-level
+testbench. The three constructions above cover nearly every real use.
+\end{notebox}
+
+\section{Reporting}
+\label{sec:uvm:reporting}
+
+Stop using \code{\$display}. UVM has four message macros, and using them is
+not a style preference: the simulation's pass/fail verdict is computed from
+them.
+
+\begin{uvmcode}
+`uvm_info(ID, MESSAGE, VERBOSITY)   // informational; filtered by verbosity
+`uvm_warning(ID, MESSAGE)           // counted, does not fail the test
+`uvm_error(ID, MESSAGE)             // counted, FAILS the test, run continues
+`uvm_fatal(ID, MESSAGE)             // prints and terminates immediately
+\end{uvmcode}
+
+\code{ID} is a short string used for filtering; \code{get\_type\_name()} is a
+sensible default. \code{MESSAGE} is a string, so build it with
+\code{\$sformatf}. Note that \chFiveM{uvm\_error} takes no verbosity: errors
+are never filtered.
+
+\begin{gotcha}{The macros take no semicolon and no trailing comma}
+\begin{uvmcode}
+`uvm_info("DRV", $sformatf("n=%0d", n), UVM_LOW)     // correct
+`uvm_info("DRV", $sformatf("n=%0d", n), UVM_LOW);    // stray empty statement
+`uvm_error("SB", "mismatch", UVM_LOW)                // wrong arity: compile error
+\end{uvmcode}
+The stray semicolon is harmless after a statement but becomes a syntax error
+if the macro is the only thing inside an \kw{if} without \kw{begin}/\kw{end},
+which is precisely where you will hit it. Get into the habit of writing the
+macros without a semicolon, and of putting \kw{begin}/\kw{end} around any
+\kw{if} body that contains one.
+\end{gotcha}
+
+\subsection{Verbosity}
+
+\index{UVM!verbosity}%
+Each \chFiveM{uvm\_info} carries a verbosity level:
+\code{UVM\_NONE} (0), \code{UVM\_LOW} (100), \code{UVM\_MEDIUM} (200),
+\code{UVM\_HIGH} (300), \code{UVM\_FULL} (400), \code{UVM\_DEBUG} (500). A
+message is printed if its level is \emph{less than or equal to} the current
+threshold, which defaults to \code{UVM\_MEDIUM}. So \code{UVM\_NONE} always
+prints and \code{UVM\_DEBUG} almost never does.
+
+The threshold is set on the command line,
+
+\begin{shcode}
+vsim -c +UVM_VERBOSITY=UVM_HIGH ...
+\end{shcode}
+
+or, more usefully, per subtree at run time:
+
+\begin{uvmcode}
+// only the driver becomes chatty; everything else stays at MEDIUM
+env.agt.drv.set_report_verbosity_level_hier(UVM_HIGH);
+
+// or by message ID, anywhere in the tree
+uvm_top.set_report_id_verbosity_hier("HANDSHAKE", UVM_FULL);
+\end{uvmcode}
+
+\begin{tipbox}{Choose verbosity levels with a policy}
+A convention that works: \code{UVM\_NONE} for the end-of-test summary that
+must always appear; \code{UVM\_LOW} for once-per-test events (test started,
+configuration chosen, sequence finished); \code{UVM\_MEDIUM} for
+once-per-transaction; \code{UVM\_HIGH} for once-per-clock-cycle detail. A
+regression then runs at the default and produces a readable log, and a
+failing test can be re-run at \code{UVM\_HIGH} for the same seed without
+recompiling.
+\end{tipbox}
+
+\subsection{The verdict}
+
+\index{UVM!pass/fail verdict}%
+At the end of the run, \code{uvm\_report\_server} prints a summary:
+
+\begin{txtcode}
+--- UVM Report Summary ---
+
+** Report counts by severity
+UVM_INFO :  427
+UVM_WARNING :  0
+UVM_ERROR :    0
+UVM_FATAL :    0
+** Report counts by id
+[RNTST]            1
+[cordic_driver]  500
+[cordic_scoreboard] 2
+[TEST_DONE]        1
+\end{txtcode}
+
+Read the \code{UVM\_ERROR} and \code{UVM\_FATAL} lines: those two numbers are
+the verdict. A regression script greps for exactly this block. Note what this
+implies:
+
+\begin{itemize}
+  \item A test that calls \code{\$finish} directly bypasses the summary and
+        produces no verdict. Never call \code{\$finish} in a UVM testbench.
+  \item A check written with \code{\$error} instead of \chFiveM{uvm\_error}
+        is not counted, so a failing test reports zero errors and the
+        regression records a pass.
+  \item A test in which nothing happened also reports zero errors. This is
+        why the scoreboard in \cref{sec:uvm:complete} raises an error when
+        it has checked nothing: ``no failures'' and ``no checks'' must not look
+        the same.
+\end{itemize}
+
+\index{UVM!UVM\_TESTNAME}%
+Two command-line switches complete the picture. The switch
+\code{+UVM\_TESTNAME} names the \code{uvm\_test} subclass that
+\code{run\_test()} builds, so one compiled image runs every test in the
+suite. And
+\code{+UVM\_MAX\_QUIT\_COUNT} stops the run after a given number of errors,
+which keeps a broken test from producing a gigabyte of log.
+
+\section{A complete UVM testbench for the CORDIC}
+\label{sec:uvm:complete}
+
+Everything so far, assembled. This is a genuinely runnable testbench: type it
+in, compile it against \file{cordic\_pkg.sv}, \file{cordic\_if.sv} and
+\file{cordic\_rot.sv} from \cref{ch:tb}, and it will find bugs in the CORDIC.
+Each listing names the class from \file{tb\_cordic\_pkg.sv} that it replaces.
+
+Everything except the top-level module lives in one package:
+
+\begin{uvmcode}[caption={Package header},label={lst:uvm:pkg}]
+`timescale 1ns/1ps
+
+package cordic_uvm_pkg;
+
+  import uvm_pkg::*;
+  `include "uvm_macros.svh"
+  import cordic_pkg::*;
+
+  // The CORDIC processing gain and the comparison tolerance, exactly as in
+  // the hand-written testbench of the previous chapter.
+  localparam real K_GAIN  = 1.6467602581210656;
+  localparam int  TOL_LSB = 12;
+\end{uvmcode}
+
+\subsection{The sequence item}
+
+Replaces \code{cordic\_txn}. Compare it with the hand-written class of
+\cref{lst:tb:txn}: the constraints are identical, in the ordinary \SV{} form
+of \cref{ch:toolkit}, the \code{convert2string} is identical, and everything
+else is base-class machinery.
+
+\begin{uvmcode}[caption={\code{cordic\_item}: replaces \code{cordic\_txn}},label={lst:uvm:item}]
+  class cordic_item extends uvm_sequence_item;
+
+    rand data_t  x0;
+    rand data_t  y0;
+    rand angle_t theta;
+
+    data_t x;              // observed, filled in by the monitor
+    data_t y;
+
+    `uvm_object_utils_begin(cordic_item)
+      `uvm_field_int(x0,    UVM_DEFAULT | UVM_DEC)
+      `uvm_field_int(y0,    UVM_DEFAULT | UVM_DEC)
+      `uvm_field_int(theta, UVM_DEFAULT | UVM_DEC)
+      `uvm_field_int(x,     UVM_DEFAULT | UVM_DEC)
+      `uvm_field_int(y,     UVM_DEFAULT | UVM_DEC)
+    `uvm_object_utils_end
+
+    constraint c_theta {
+      theta inside {[-PI_EXT : PI_EXT]};
+    }
+    constraint c_magnitude {
+      x0 inside {[-6000 : 6000]};
+      y0 inside {[-6000 : 6000]};
+    }
+    constraint c_corners {
+      theta dist {
+        0                :/ 1,
+        PI_EXT           :/ 1,
+        -PI_EXT          :/ 1,
+        PI_EXT / 2       :/ 1,
+        -PI_EXT / 2      :/ 1,
+        [-PI_EXT:PI_EXT] :/ 20
+      };
+    }
+
+    function new(string name = "cordic_item");
+      super.new(name);
+    endfunction
+
+    function string convert2string();
+      return $sformatf(
+        "x0=%0d (%.4f) y0=%0d (%.4f) theta=%0d (%.4f rad) -> x=%0d y=%0d",
+        x0, q_to_real(x0, QF), y0, q_to_real(y0, QF),
+        theta, q_to_real(theta, QA), x, y);
+    endfunction
+
+  endclass : cordic_item
+\end{uvmcode}
+
+\subsection{The sequence}
+
+Replaces \code{cordic\_env::send\_random()}. Note that it is now a class, so
+a directed test can extend it, and a regression can select it by name.
+
+\begin{uvmcode}[caption={\code{cordic\_random\_seq} and a directed sequence},label={lst:uvm:seq}]
+  class cordic_random_seq extends uvm_sequence #(cordic_item);
+    `uvm_object_utils(cordic_random_seq)
+
+    rand int unsigned n_items = 200;
+    constraint c_n { n_items inside {[1 : 5000]}; }
+
+    function new(string name = "cordic_random_seq");
+      super.new(name);
+    endfunction
+
+    task body();
+      cordic_item it;
+      `uvm_info(get_type_name(),
+                $sformatf("sending %0d random items", n_items), UVM_LOW)
+      repeat (n_items) begin
+        it = cordic_item::type_id::create("it");
+        start_item(it);
+        if (!it.randomize())
+          `uvm_fatal(get_type_name(), "item randomization failed")
+        finish_item(it);
+      end
+    endtask
+
+  endclass : cordic_random_seq
+
+  // The directed counterpart: the corner angles, with a unit-length seed so
+  // that the output is (cos theta, sin theta) directly.
+  class cordic_corner_seq extends uvm_sequence #(cordic_item);
+    `uvm_object_utils(cordic_corner_seq)
+
+    function new(string name = "cordic_corner_seq");
+      super.new(name);
+    endfunction
+
+    task body();
+      cordic_item it;
+      angle_t angles[$] = '{0, PI_EXT, -PI_EXT, PI_EXT/2, -PI_EXT/2,
+                            PI_EXT/4, -PI_EXT/4};
+      foreach (angles[i]) begin
+        it = cordic_item::type_id::create("it");
+        start_item(it);
+        it.x0    = data_t'(X0_UNIT);
+        it.y0    = '0;
+        it.theta = angles[i];
+        finish_item(it);
+      end
+    endtask
+
+  endclass : cordic_corner_seq
+\end{uvmcode}
+
+\subsection{The driver}
+
+Replaces \code{cordic\_drv}. The \code{send()} and \code{reset()} bodies are
+line-for-line the ones from \cref{ch:tb}; what changed is where the
+transactions come from and who starts the thread.
+
+\begin{uvmcode}[caption={\code{cordic\_driver}: replaces \code{cordic\_drv}},label={lst:uvm:drv}]
+  class cordic_driver extends uvm_driver #(cordic_item);
+    `uvm_component_utils(cordic_driver)
+
+    virtual cordic_if vif;
+    int unsigned      stall_pct = 25;   // random back-pressure on rsp_ready
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      if (!uvm_config_db #(virtual cordic_if)::get(this, "", "vif", vif))
+        `uvm_fatal("NOVIF",
+                   {"no virtual interface for ", get_full_name(), ".vif"})
+      void'(uvm_config_db #(int unsigned)::get(this, "", "stall_pct",
+                                               stall_pct));
+    endfunction
+
+    task run_phase(uvm_phase phase);
+      do_reset();
+      fork
+        response_backpressure();
+      join_none
+      forever begin
+        seq_item_port.get_next_item(req);
+        drive(req);
+        seq_item_port.item_done();
+      end
+    endtask
+
+    protected task do_reset();
+      vif.rst_n            <= 1'b0;
+      vif.drv_cb.req_valid <= 1'b0;
+      vif.drv_cb.req_x     <= '0;
+      vif.drv_cb.req_y     <= '0;
+      vif.drv_cb.req_theta <= '0;
+      vif.drv_cb.rsp_ready <= 1'b0;
+      repeat (5) @(vif.drv_cb);
+      vif.rst_n <= 1'b1;
+      @(vif.drv_cb);
+    endtask
+
+    // Drive one request and hold it until the DUT accepts it.  Marked
+    // `virtual' so that a factory override can replace it -- this is what
+    // the error-injecting driver shown earlier extends.
+    protected virtual task drive(cordic_item it);
+      vif.drv_cb.req_valid <= 1'b1;
+      vif.drv_cb.req_x     <= it.x0;
+      vif.drv_cb.req_y     <= it.y0;
+      vif.drv_cb.req_theta <= it.theta;
+      do @(vif.drv_cb); while (vif.drv_cb.req_ready !== 1'b1);
+      vif.drv_cb.req_valid <= 1'b0;
+      `uvm_info(get_type_name(),
+                {"drove ", it.convert2string()}, UVM_HIGH)
+    endtask
+
+    protected task response_backpressure();
+      forever begin
+        if ($urandom_range(99) < stall_pct) begin
+          vif.drv_cb.rsp_ready <= 1'b0;
+          repeat ($urandom_range(3) + 1) @(vif.drv_cb);
+        end
+        vif.drv_cb.rsp_ready <= 1'b1;
+        @(vif.drv_cb);
+      end
+    endtask
+
+  endclass : cordic_driver
+\end{uvmcode}
+
+\subsection{The monitor}
+
+Replaces \code{cordic\_mon}. The two mailboxes have become one analysis port.
+
+\begin{uvmcode}[caption={\code{cordic\_monitor}: replaces \code{cordic\_mon}},label={lst:uvm:mon}]
+  class cordic_monitor extends uvm_monitor;
+    `uvm_component_utils(cordic_monitor)
+
+    virtual cordic_if                vif;
+    uvm_analysis_port #(cordic_item) ap;
+
+    protected cordic_item pending[$];   // a queue: accepted, not answered
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      ap = new("ap", this);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      if (!uvm_config_db #(virtual cordic_if)::get(this, "", "vif", vif))
+        `uvm_fatal("NOVIF",
+                   {"no virtual interface for ", get_full_name(), ".vif"})
+    endfunction
+
+    task run_phase(uvm_phase phase);
+      cordic_item it;
+      forever begin
+        @(vif.mon_cb);
+        if (vif.rst_n !== 1'b1) begin
+          pending.delete();
+          continue;
+        end
+
+        // Request accepted: remember what went in.
+        if (vif.mon_cb.req_valid === 1'b1 &&
+            vif.mon_cb.req_ready === 1'b1) begin
+          it = cordic_item::type_id::create("it");
+          it.x0    = vif.mon_cb.req_x;
+          it.y0    = vif.mon_cb.req_y;
+          it.theta = vif.mon_cb.req_theta;
+          pending.push_back(it);
+        end
+
+        // Response accepted: complete the oldest outstanding request and
+        // broadcast it.  Every subscriber sees the same handle, so nobody
+        // downstream may modify it.
+        if (vif.mon_cb.rsp_valid === 1'b1 &&
+            vif.mon_cb.rsp_ready === 1'b1) begin
+          if (pending.size() == 0) begin
+            `uvm_error(get_type_name(),
+                       "response with no outstanding request")
+          end else begin
+            it   = pending.pop_front();
+            it.x = vif.mon_cb.rsp_x;
+            it.y = vif.mon_cb.rsp_y;
+            ap.write(it);
+          end
+        end
+      end
+    endtask
+
+    // Runs after the run phase: anything still pending is a lost response.
+    function void check_phase(uvm_phase phase);
+      super.check_phase(phase);
+      if (pending.size() != 0)
+        `uvm_error(get_type_name(),
+                   $sformatf("%0d requests never produced a response",
+                             pending.size()))
+    endfunction
+
+  endclass : cordic_monitor
+\end{uvmcode}
+
+The \code{check\_phase} is new. In \cref{ch:tb} a lost response simply meant
+the drain loop timed out and \code{\$fatal} fired with an unhelpful message.
+Here the check is explicit and it names the number of lost transactions.
+
+\subsection{The scoreboard}
+
+Replaces \code{cordic\_sb}. The reference model is unchanged: it is written
+against the specification, in real arithmetic, and knows nothing about
+micro-rotations.
+
+\begin{uvmcode}[caption={\code{cordic\_scoreboard}: replaces \code{cordic\_sb}},label={lst:uvm:sb}]
+  class cordic_scoreboard extends uvm_scoreboard;
+    `uvm_component_utils(cordic_scoreboard)
+
+    uvm_tlm_analysis_fifo #(cordic_item) fifo;
+
+    int unsigned n_checked = 0;
+    int unsigned n_failed  = 0;
+    real         worst_err = 0.0;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      fifo = new("fifo", this);
+    endfunction
+
+    // The golden model: the specification, not the implementation.
+    function void predict(input cordic_item it,
+                          output real x_ref, output real y_ref);
+      real th = q_to_real(it.theta, QA);
+      real xr = q_to_real(it.x0,    QF);
+      real yr = q_to_real(it.y0,    QF);
+      x_ref = K_GAIN * (xr * $cos(th) - yr * $sin(th));
+      y_ref = K_GAIN * (xr * $sin(th) + yr * $cos(th));
+    endfunction
+
+    task run_phase(uvm_phase phase);
+      cordic_item it;
+      real x_ref, y_ref, ex, ey;
+      forever begin
+        fifo.get(it);
+        predict(it, x_ref, y_ref);
+
+        ex = (q_to_real(it.x, QF) - x_ref) * (2.0 ** QF);   // error in LSB
+        ey = (q_to_real(it.y, QF) - y_ref) * (2.0 ** QF);
+        if (ex < 0.0) ex = -ex;
+        if (ey < 0.0) ey = -ey;
+        if (ex > worst_err) worst_err = ex;
+        if (ey > worst_err) worst_err = ey;
+
+        n_checked++;
+        if (ex > real'(TOL_LSB) || ey > real'(TOL_LSB)) begin
+          n_failed++;
+          `uvm_error(get_type_name(),
+            $sformatf("MISMATCH %s want x=%.1f y=%.1f err %.2f / %.2f LSB",
+                      it.convert2string(),
+                      x_ref * (2.0 ** QF), y_ref * (2.0 ** QF), ex, ey))
+        end
+      end
+    endtask
+
+    function void check_phase(uvm_phase phase);
+      super.check_phase(phase);
+      // "no failures" and "no checks" must not look the same.
+      if (n_checked == 0)
+        `uvm_error(get_type_name(), "no transactions were checked")
+      if (!fifo.is_empty())
+        `uvm_error(get_type_name(), "transactions left unchecked in the fifo")
+    endfunction
+
+    function void report_phase(uvm_phase phase);
+      `uvm_info(get_type_name(),
+        $sformatf("%0d checked, %0d failed, worst error %.2f LSB (tol %0d)",
+                  n_checked, n_failed, worst_err, TOL_LSB), UVM_NONE)
+    endfunction
+
+  endclass : cordic_scoreboard
+\end{uvmcode}
+
+\subsection{The coverage collector}
+
+Replaces \code{cordic\_cov}. The covergroup is character-for-character the
+one from \cref{ch:tb}; what disappeared is the mailbox and the
+\code{forever} loop, because \code{write()} is called for us.
+
+\begin{uvmcode}[caption={\code{cordic\_coverage}: replaces \code{cordic\_cov}},label={lst:uvm:cov}]
+  class cordic_coverage extends uvm_subscriber #(cordic_item);
+    `uvm_component_utils(cordic_coverage)
+
+    angle_t sampled_theta;
+    data_t  sampled_x0;
+
+    covergroup cg_stimulus;
+      option.per_instance = 1;
+
+      cp_quadrant : coverpoint sampled_theta {
+        bins q3_neg = {[-PI_EXT   : -PI_EXT/2 - 1]};
+        bins q4_neg = {[-PI_EXT/2 : -1]};
+        bins zero   = {0};
+        bins q1_pos = {[1         :  PI_EXT/2 - 1]};
+        bins q2_pos = {[PI_EXT/2  :  PI_EXT]};
+      }
+      cp_sign_x : coverpoint sampled_x0 {
+        bins neg  = {[-32768 : -1]};
+        bins zero = {0};
+        bins pos  = {[1 : 32767]};
+      }
+      x_quadrant_sign : cross cp_quadrant, cp_sign_x;
+    endgroup
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+      cg_stimulus = new();     // covergroups are not factory objects
+    endfunction
+
+    // uvm_subscriber declares this pure virtual; the argument must be
+    // named `t'.  It is a function: it cannot consume time.
+    function void write(cordic_item t);
+      sampled_theta = t.theta;
+      sampled_x0    = t.x0;
+      cg_stimulus.sample();
+    endfunction
+
+    function void report_phase(uvm_phase phase);
+      `uvm_info(get_type_name(),
+                $sformatf("functional coverage %.1f %%",
+                          cg_stimulus.get_coverage()), UVM_NONE)
+    endfunction
+
+  endclass : cordic_coverage
+\end{uvmcode}
+
+\subsection{The agent and the environment}
+
+Replaces \code{cordic\_env}, split into the reusable half (the agent) and the
+\DUT{}-specific half (the environment).
+
+\begin{uvmcode}[caption={\code{cordic\_agent} and \code{cordic\_env}},label={lst:uvm:env}]
+  class cordic_agent extends uvm_agent;
+    `uvm_component_utils(cordic_agent)
+
+    cordic_driver                    drv;
+    uvm_sequencer #(cordic_item)     sqr;
+    cordic_monitor                   mon;
+    uvm_analysis_port #(cordic_item) ap;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);      // reads is_active from the config db
+      ap  = new("ap", this);
+      mon = cordic_monitor::type_id::create("mon", this);
+      if (get_is_active() == UVM_ACTIVE) begin
+        sqr = uvm_sequencer #(cordic_item)::type_id::create("sqr", this);
+        drv = cordic_driver::type_id::create("drv", this);
+      end
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+      mon.ap.connect(ap);            // republish through the agent's port
+      if (get_is_active() == UVM_ACTIVE)
+        drv.seq_item_port.connect(sqr.seq_item_export);
+    endfunction
+
+  endclass : cordic_agent
+
+
+  class cordic_env extends uvm_env;
+    `uvm_component_utils(cordic_env)
+
+    cordic_agent      agt;
+    cordic_scoreboard sb;
+    cordic_coverage   cov;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      agt = cordic_agent::type_id::create("agt", this);
+      sb  = cordic_scoreboard::type_id::create("sb",  this);
+      cov = cordic_coverage::type_id::create("cov", this);
+    endfunction
+
+    // One producer, two consumers.  Adding a third costs one line here and
+    // nothing at all in the monitor.
+    function void connect_phase(uvm_phase phase);
+      agt.ap.connect(sb.fifo.analysis_export);
+      agt.ap.connect(cov.analysis_export);
+    endfunction
+
+  endclass : cordic_env
+\end{uvmcode}
+
+\subsection{The tests}
+
+New: in \cref{ch:tb} the test was the top-level module. Here it is a class,
+so the same compiled image runs all of them.
+
+\begin{uvmcode}[caption={A base test and two derived tests},label={lst:uvm:test}]
+  class cordic_base_test extends uvm_test;
+    `uvm_component_utils(cordic_base_test)
+
+    cordic_env env;
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      env = cordic_env::type_id::create("env", this);
+    endfunction
+
+    function void end_of_elaboration_phase(uvm_phase phase);
+      super.end_of_elaboration_phase(phase);
+      uvm_top.print_topology();      // the tree, once, at time zero
+    endfunction
+
+    // Common to every derived test: give the DUT pipeline time to empty
+    // after the last request, before the run phase is killed.
+    protected virtual function void set_drain(uvm_phase phase);
+      phase.phase_done.set_drain_time(this, 500ns);
+    endfunction
+
+  endclass : cordic_base_test
+
+
+  class cordic_random_test extends cordic_base_test;
+    `uvm_component_utils(cordic_random_test)
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+      cordic_random_seq seq;
+      phase.raise_objection(this, "random stimulus");
+      set_drain(phase);
+      seq = cordic_random_seq::type_id::create("seq");
+      if (!seq.randomize() with { n_items == 500; })
+        `uvm_fatal(get_type_name(), "sequence randomization failed")
+      seq.start(env.agt.sqr);
+      phase.drop_objection(this, "random stimulus");
+    endtask
+
+  endclass : cordic_random_test
+
+
+  class cordic_corner_test extends cordic_base_test;
+    `uvm_component_utils(cordic_corner_test)
+
+    function new(string name, uvm_component parent);
+      super.new(name, parent);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+      cordic_corner_seq dseq;
+      cordic_random_seq rseq;
+      phase.raise_objection(this, "corners then random");
+      set_drain(phase);
+      dseq = cordic_corner_seq::type_id::create("dseq");
+      dseq.start(env.agt.sqr);
+      rseq = cordic_random_seq::type_id::create("rseq");
+      void'(rseq.randomize() with { n_items == 100; });
+      rseq.start(env.agt.sqr);
+      phase.drop_objection(this, "corners then random");
+    endtask
+
+  endclass : cordic_corner_test
+
+endpackage : cordic_uvm_pkg
+\end{uvmcode}
+
+\subsection{The top-level module}
+
+The only non-class file. It holds the clock, the interface, the \DUT{}, the
+one configuration-database write and the call to \code{run\_test()}.
+
+\begin{uvmcode}[caption={\code{tb\_cordic\_uvm}: the top-level module},label={lst:uvm:top}]
+`timescale 1ns/1ps
+
+module tb_cordic_uvm;
+
+  import uvm_pkg::*;
+  `include "uvm_macros.svh"
+  import cordic_pkg::*;
+  import cordic_uvm_pkg::*;
+
+  // ---- clock ------------------------------------------------------------
+  logic clk = 1'b0;
+  always #5ns clk = ~clk;          // 100 MHz
+
+  // ---- the pins ---------------------------------------------------------
+  cordic_if vif (.clk(clk));
+
+  // ---- the DUT ----------------------------------------------------------
+  cordic_rot #(.ITER(N)) dut (
+    .clk_i       (clk),
+    .rst_ni      (vif.rst_n),
+    .req_valid_i (vif.req_valid),
+    .req_ready_o (vif.req_ready),
+    .req_x_i     (vif.req_x),
+    .req_y_i     (vif.req_y),
+    .req_theta_i (vif.req_theta),
+    .rsp_valid_o (vif.rsp_valid),
+    .rsp_ready_i (vif.rsp_ready),
+    .rsp_x_o     (vif.rsp_x),
+    .rsp_y_o     (vif.rsp_y)
+  );
+
+  // ---- hand the interface to the class world, then start UVM ------------
+  initial begin
+    uvm_config_db #(virtual cordic_if)::set(null, "*", "vif", vif);
+    uvm_top.set_timeout(1ms, 1);
+    run_test();                     // never returns
+  end
+
+  // Portable waveform dump, off by default: pass +DUMP to enable it.  Name
+  // the scope; $dumpvars(0, tb_cordic_uvm) would dump the whole hierarchy.
+  initial if ($test$plusargs("DUMP")) begin
+    $dumpfile("tb_cordic_uvm.vcd");
+    $dumpvars(1, dut);
+  end
+
+endmodule : tb_cordic_uvm
+\end{uvmcode}
+
+\begin{notebox}{What \code{run\_test()} actually does}
+\code{run\_test()} is a task in \code{uvm\_pkg}. It reads
+\code{+UVM\_TESTNAME}, asks the factory for an object of that type, gives it
+the name \code{uvm\_test\_top} and no parent, and then runs the phase
+schedule over the tree that the test's \code{build\_phase} creates. When the
+last phase finishes it prints the report summary and calls \code{\$finish}
+itself. It does not return, which is why nothing may follow it in the
+\kw{initial} block.
+
+If \code{+UVM\_TESTNAME} names a class that is not registered with the
+factory, you get \code{UVM\_FATAL ... [INVTST] Requested test from
+command line +UVM\_TESTNAME=... not found}. The usual cause is a missing
+\chFiveM{uvm\_component\_utils}, or a package that was compiled but never
+imported by the top-level module, so its static registrations never ran.
+\end{notebox}
+
+\section{The register layer}
+\label{sec:uvm:reg}
+
+\index{UVM!register layer}%
+The CORDIC has no registers, so this section is a map rather than a
+tutorial. Any block with a control interface has a register map, and UVM
+provides a modelling layer for it.
+
+\begin{description}
+  \item[\code{uvm\_reg\_field}] one field: width, offset, access policy
+        (\code{RW}, \code{RO}, \code{W1C}, \code{RC}, and about twenty
+        others), reset value.
+  \item[\code{uvm\_reg}] one register: a name, an offset, and its fields.
+        Each register carries a \emph{mirror}, the model's belief about the
+        hardware's current value, and a \emph{desired} value.
+  \item[\code{uvm\_reg\_block}] a group of registers and other blocks, with
+        one or more address maps. The block is the unit that matches an
+        IP-XACT component.
+  \item[\code{uvm\_reg\_adapter}] the translator. It converts a generic
+        \code{uvm\_reg\_bus\_op} into your bus agent's sequence item and
+        back. You write one adapter per bus protocol, ever.
+  \item[\code{uvm\_reg\_predictor}] listens on the bus monitor's analysis
+        port and updates the mirror from observed traffic, so that the model
+        stays correct even when somebody else writes the registers.
+\end{description}
+
+\index{UVM!back-door access}%
+With a model in place, a sequence stops talking about addresses:
+
+\begin{uvmcode}
+uvm_status_e status;
+uvm_reg_data_t value;
+
+// front door: a real bus transaction, through the adapter and the driver
+regmodel.ctrl.write(status, 32'h0000_0003, UVM_FRONTDOOR);
+regmodel.ctrl.read (status, value,         UVM_FRONTDOOR);
+
+// back door: a direct hierarchical poke, zero simulation time
+regmodel.ctrl.write(status, 32'h0000_0003, UVM_BACKDOOR);
+\end{uvmcode}
+
+A \emph{front-door} access produces real cycles on the bus, exercises the bus
+interface, and takes time. A \emph{back-door} access reaches into the design
+hierarchy with a hierarchical reference (the path is supplied by
+\code{add\_hdl\_path}) and changes the register directly, in zero time. Use
+the front door to verify the register interface, and the back door to set up
+a state you do not want to spend a thousand cycles reaching.
+
+What the model buys you: a set of ready-made sequences that check every reset
+value, every writable bit and every access policy without a line of test code
+(\code{uvm\_reg\_hw\_reset\_seq} and its relatives); a mirror that lets a
+scoreboard ask ``what is the current mode?'' without snooping the bus; and
+tests written against register names, which survive an address-map change.
+
+\begin{notebox}{Nobody writes a register model by hand}
+A medium-sized block has a few hundred registers, and the model is roughly
+twenty lines per register. Generating it is standard practice. The input is
+whatever the project treats as the specification: an IP-XACT
+\code{.xml} component description, a SystemRDL file, or, very commonly, a
+spreadsheet exported to CSV. Tools such as \tool{PeakRDL},
+\tool{Semifore CSRCompiler}, \tool{IDesignSpec} or a home-made Python script
+emit the UVM model, the \RTL{}, the C header and the documentation from the
+same source. If you find yourself editing a \code{uvm\_reg\_block} by hand,
+somebody has lost the generator.
+\end{notebox}
+
+\section{Running it}
+\label{sec:uvm:running}
+
+\index{QuestaSim!UVM}%
+UVM is a package. Compiling it is compiling one file with one include
+directory, and every simulator has a shortcut for it.
+
+\subsection{QuestaSim}
+
+The explicit form, which shows what is happening. It is the flow of
+\cref{sec:tb:run} with one extra compile at the front:
+
+\begin{shcode}
+vlib work
+vmap work work
+
+# 1. the UVM library itself (once; $UVM_HOME points into the Questa install)
+vlog -sv +incdir+$UVM_HOME/src $UVM_HOME/src/uvm_pkg.sv
+
+# 2. the design and the testbench
+vlog -sv +incdir+$UVM_HOME/src cordic_pkg.sv cordic_if.sv cordic_rot.sv
+vlog -sv +incdir+$UVM_HOME/src cordic_uvm_pkg.sv tb_cordic_uvm.sv
+
+# 3. optimise, keeping enough visibility for the factory and the waveform
+vopt -o tb_opt +acc=rnb work.tb_cordic_uvm
+
+# 4. run one test
+vsim -c -sv_seed random work.tb_opt \
+     +UVM_TESTNAME=cordic_random_test \
+     +UVM_VERBOSITY=UVM_MEDIUM \
+     -do uvm.do
+\end{shcode}
+
+The short form uses the built-in library, which is pre-compiled and faster,
+and lets \code{vsim} run \code{vopt} for you:
+
+\begin{shcode}
+vlog -sv -uvm cordic_pkg.sv cordic_if.sv cordic_rot.sv \
+              cordic_uvm_pkg.sv tb_cordic_uvm.sv
+vsim -c -uvm -voptargs="+acc=rnb" tb_cordic_uvm \
+     +UVM_TESTNAME=cordic_random_test -sv_seed random -do uvm.do
+\end{shcode}
+
+The \code{do} file is shorter than the one in \cref{sec:tb:run}, because UVM
+computes the verdict itself and \code{run\_test()} calls \code{\$finish} when
+the last phase is over:
+
+\begin{tclcode}
+# uvm.do -- batch execution of a UVM test
+onerror {quit -code 3}
+
+# log the DUT only.  `log -r /*' would also record every UVM class member.
+log -r /tb_cordic_uvm/dut/*
+
+run -all
+quit -code 0
+\end{tclcode}
+
+Note the scope on \code{log -r}. Logging the whole hierarchy in a UVM testbench
+records the class world as well as the pins, and a \file{.wlf} that would have
+been tens of megabytes becomes hundreds. \tool{QuestaSim} shows that
+\file{.wlf} in its own wave window; the \code{\$dumpfile}/\code{\$dumpvars}
+pair in \cref{lst:uvm:top} is the portable alternative, writing a VCD that
+\tool{GTKWave} and \tool{Surfer} can open, and the same warning applies to its
+first argument. \cref{sec:tb:waves} covers the choice.
+
+Use \code{-uvmhome <path>} if you need a specific UVM version rather than the
+one bundled with the tool. Mixing a hand-compiled \file{uvm\_pkg.sv} with the
+tool's built-in one produces duplicate-definition errors that are tedious to
+untangle, so pick one and be consistent across the whole project.
+
+\code{-sv\_seed random} is important. Without it every run uses the same
+seed, and a constrained-random testbench that always generates the same
+stimulus is a directed testbench with extra steps. Print the seed (Questa
+does so in the banner) so that a failing run can be reproduced exactly with
+\code{-sv\_seed <n>}.
+
+\subsection{The other two}
+
+\begin{shcode}
+# Cadence Xcelium
+xrun -uvm -sv cordic_pkg.sv cordic_if.sv cordic_rot.sv \
+     cordic_uvm_pkg.sv tb_cordic_uvm.sv \
+     +UVM_TESTNAME=cordic_random_test -svseed random
+
+# Synopsys VCS
+vcs -sverilog -ntb_opts uvm -full64 cordic_pkg.sv cordic_if.sv \
+    cordic_rot.sv cordic_uvm_pkg.sv tb_cordic_uvm.sv -o simv
+./simv +UVM_TESTNAME=cordic_random_test +ntb_random_seed_automatic
+\end{shcode}
+
+\subsection{Reading the output}
+
+A successful run ends like this:
+
+\begin{txtcode}
+UVM_INFO cordic_scoreboard.sv(78) @ 26505 ns:
+  uvm_test_top.env.sb [cordic_scoreboard]
+  500 checked, 0 failed, worst error 3.41 LSB (tol 12)
+UVM_INFO cordic_coverage.sv(52) @ 26505 ns:
+  uvm_test_top.env.cov [cordic_coverage]
+  functional coverage 93.3 %
+UVM_INFO .../uvm_report_server.svh(847) @ 26505 ns:
+  reporter [UVM/REPORT/SERVER]
+--- UVM Report Summary ---
+
+** Report counts by severity
+UVM_INFO :    4
+UVM_WARNING : 0
+UVM_ERROR :   0
+UVM_FATAL :   0
+\end{txtcode}
+
+Every message carries the file, the line, the simulation time and the full
+hierarchical name of the component that produced it. That last field is the
+one you will use: \code{uvm\_test\_top.env.sb} tells you immediately which
+instance complained, which in a testbench with six agents is not obvious from
+the message text.
+
+\begin{tipbox}{Make the regression script read the right thing}
+Grep for the two lines \code{UVM\_ERROR :} and \code{UVM\_FATAL :} in the
+report summary and require both counts to be zero. Do not grep for the word
+``error'' anywhere in the log: a message containing the word ``error'' in its
+text (\code{worst error 3.41 LSB}, above) will fail a passing test. Do not
+rely on the simulator's exit status either, because a UVM run that ends with
+errors still exits normally.
+\end{tipbox}
+
+\section{When not to use UVM}
+\label{sec:uvm:when-not}
+
+\index{UVM!when not to use}%
+This section exists because everything before it makes UVM look inevitable,
+and it is not.
+
+\textbf{A block with three ports and one protocol does not need it.} If the
+whole verification effort is ``drive a valid/ready channel, check the output
+against a model'', you will spend more lines on UVM infrastructure than on
+verification. The testbench in \cref{ch:tb} does that job in about 470 lines that a
+new team member reads in twenty minutes.
+
+\textbf{A three-week project does not need it.} The break-even point for UVM
+is somewhere around the moment you write your third test that reuses the
+second test's environment. If the project ends before that, the investment
+never pays back.
+
+\textbf{A course exercise does not need it.} A laboratory assignment is
+graded on whether the design works, and a UVM testbench in which the student
+does not understand the phase order teaches nothing about verification. Learn
+UVM \emph{after} you can write \cref{ch:tb}'s testbench from memory, not
+instead.
+
+\textbf{A single-person project rarely needs it.} Much of UVM's value is
+social: a shared vocabulary, a shared structure, an agent one engineer can
+hand to another. With one engineer, the shared vocabulary is your own habits.
+
+Where UVM does pay:
+
+\begin{itemize}
+  \item \textbf{Reuse across blocks.} Five blocks on the same bus share one
+        bus agent, one adapter and one register-model generator.
+  \item \textbf{Reuse across levels.} The block-level agent goes passive and
+        the same monitor, scoreboard and coverage run at subsystem and chip
+        level.
+  \item \textbf{Reuse across projects.} A protocol agent written once is used
+        for a decade.
+  \item \textbf{A team larger than one.} Structure that is enforced by a
+        library is structure that survives people joining and leaving.
+  \item \textbf{Commercial VIP.} If you buy an AXI or PCIe VIP, it is UVM,
+        and your testbench must be too.
+\end{itemize}
+
+\subsection{The alternatives, fairly}
+
+\index{OSVVM}\index{UVVM}\index{cocotb}\index{pyuvm}%
+\begin{description}
+  \item[A hand-written layered testbench.] What you built in \cref{ch:tb}.
+        Full \SV{} power, meaning classes, constrained random, functional
+        coverage and assertions, with none of the library. It scales further than people
+        expect, and the point at which it stops scaling is usually the point
+        at which you need reuse across teams. Many production testbenches for
+        small blocks are exactly this.
+  \item[cocotb, with or without pyuvm.] The testbench is Python; the
+        simulator is driven through VPI/VHPI. Stimulus, checking and the
+        reference model are written in a language with real libraries:
+        \code{numpy} for the CORDIC's golden model, \code{pytest} for the
+        regression. \code{pyuvm} is a faithful port of the UVM class library
+        to Python, so the six boxes and the phases keep their names. It drives
+        \tool{QuestaSim} through the FLI and VPI, and it also drives
+        \tool{Verilator} and \tool{Icarus Verilog}, so a cocotb testbench can
+        run without a licence. \refsimulationbook builds one.
+  \item[OSVVM, for \VHDL{}.] A \VHDL{} library providing randomisation,
+        functional coverage, a scoreboard and a transaction-level interface,
+        with no need to leave \VHDL{} at all. It is mature, well documented,
+        and runs under \tool{QuestaSim} and under \tool{NVC}. If your
+        organisation is \VHDL{} and intends to stay \VHDL{}, OSVVM is the
+        serious answer and deserves a look before a rewrite.
+  \item[UVVM, for \VHDL{}.] Also \VHDL{}, also open source, structured around
+        \emph{VVCs}, VHDL Verification Components, which occupy the same
+        conceptual place as UVM agents, with a central sequencer issuing
+        commands to them. UVVM emphasises a directed, readable command
+        language over constrained-random generation, which suits control-path
+        blocks well.
+\end{description}
+
+\begin{ruleofthumb}
+Choose the methodology that matches the size of the problem and the size of
+the team, not the one on the recruitment advertisement. Then learn UVM
+anyway, because the recruitment advertisement is real.
+\end{ruleofthumb}
+
+\section{Checklist}
+\label{sec:uvm:checklist}
+
+\begin{itemize}
+  \item UVM is a \SV{} class library, not a language extension. Every rust
+        identifier in this chapter's listings is something you could have
+        written yourself, and in \cref{ch:tb} you did.
+  \item The six boxes are the same as in \cref{ch:tb}: transaction, stimulus,
+        driver, monitor, scoreboard, coverage. UVM adds a base class for
+        each, plus the agent, the test class, the factory, the configuration
+        database and phasing.
+  \item \code{uvm\_component} = structure, built once, has a parent and a
+        hierarchical name. \code{uvm\_object} = data, created and destroyed
+        constantly, has a name but no place.
+  \item Always call \code{super.build\_phase(phase)} first. Omitting it
+        breaks configuration and the agent's active/passive switch, silently.
+  \item Build is top-down (the parent creates the children); connect is
+        bottom-up (both ends must exist). \code{run\_phase} is the only phase
+        in which time passes.
+  \item Create components and sequence items with
+        \code{type\_id::create()}, never with \kw{new}. \kw{new} bypasses the
+        factory and every override becomes a no-op with no warning.
+  \item Set factory overrides \emph{before} the component is created, which
+        means before \code{super.build\_phase()} in the test.
+  \item Get the virtual interface from the module into the classes with
+        a \code{uvm\_config\_db \#(virtual cordic\_if)::set} call placed
+        before \code{run\_test()}, and always test the return value of
+        the matching \code{get} with a \chFiveM{uvm\_fatal}.
+  \item Raise an objection in the test before starting the sequence and drop
+        it after. No objection, no test. Set a drain time long enough for the
+        \DUT{} pipeline to empty, and a global timeout so that a stuck
+        objection fails instead of hanging.
+  \item The driver loop is \code{get\_next\_item(req)}, drive,
+        \code{item\_done()}. Missing \code{item\_done()} hangs after exactly
+        one transaction.
+  \item Randomise the item between \code{start\_item} and \code{finish\_item},
+        not before.
+  \item Analysis ports broadcast and never block. Coverage collectors get a
+        \code{uvm\_subscriber}; scoreboards get a
+        \code{uvm\_tlm\_analysis\_fifo}, because checking may take time and
+        \code{write()} may not.
+  \item Report with \chFiveM{uvm\_info}/\chFiveM{uvm\_warning}/%
+        \chFiveM{uvm\_error}/\chFiveM{uvm\_fatal}, never with \code{\$display}
+        or \code{\$error}. The verdict is the error count in the report
+        summary, and \code{\$error} is not counted.
+  \item Make the scoreboard raise an error when it has checked nothing.
+        ``Zero failures'' and ``zero checks'' print the same verdict otherwise.
+  \item Never call \code{\$finish} yourself: it skips the report summary.
+  \item Select the test with \code{+UVM\_TESTNAME}, the log level with
+        \code{+UVM\_VERBOSITY}, and always run with a random seed
+        (\code{-sv\_seed random}); record the seed so a failure can be
+        reproduced.
+  \item Debug switches worth memorising: \code{+UVM\_OBJECTION\_TRACE} for a
+        test that will not end, \code{+UVM\_CONFIG\_DB\_TRACE} for a value
+        that does not arrive, \code{uvm\_top.print\_topology()} for a tree
+        that is not what you think it is.
+  \item Field automation macros are convenient and slow. Learn with them,
+        then write \code{do\_copy}, \code{do\_compare} and
+        \code{convert2string} by hand when it matters. Never put a \kw{real}
+        in a \chFiveM{uvm\_field\_int}.
+  \item Do not reach for UVM on a small block, a short project, or a
+        one-person effort. Reach for it when something will be reused: across
+        blocks, across levels of hierarchy, across projects, or across a
+        team.
+\end{itemize}

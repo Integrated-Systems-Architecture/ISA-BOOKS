@@ -1,0 +1,63 @@
+% ---------------------------------------------------------------------------
+% packages.tex -- everything that is \usepackage'd lives here.
+% Chapter files MUST NOT load packages.
+% ---------------------------------------------------------------------------
+
+% --- encoding, fonts, language ---------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[english]{babel}
+\usepackage{microtype}
+\usepackage{textcomp}
+
+% --- page geometry and headings --------------------------------------------
+\usepackage[a4paper,inner=28mm,outer=24mm,top=25mm,bottom=28mm]{geometry}
+\usepackage{fancyhdr}
+\usepackage{emptypage}
+\usepackage[explicit]{titlesec}
+
+% --- maths ------------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{siunitx}
+\sisetup{detect-all,per-mode=symbol}
+
+% --- tables and figures -----------------------------------------------------
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{rotating}
+
+% --- colour, boxes, code ----------------------------------------------------
+\usepackage[table,dvipsnames]{xcolor}
+\usepackage{listings}
+\usepackage[most,listings]{tcolorbox}
+\tcbuselibrary{skins,breakable,raster}
+
+% --- drawings ---------------------------------------------------------------
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc,shapes.geometric,shapes.misc,
+                backgrounds,decorations.pathreplacing,decorations.pathmorphing,
+                patterns,chains,matrix}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{tikz-timing}
+
+% --- structure, references, misc -------------------------------------------
+\usepackage{import}
+\usepackage{enumitem}
+\setlist{itemsep=2pt,parsep=0pt,topsep=4pt}
+\usepackage{makeidx}
+\usepackage{footmisc}
+\usepackage{afterpage}
+\usepackage{needspace}
+\usepackage[hidelinks,bookmarksnumbered]{hyperref}
+\usepackage{bookmark}
+\usepackage[capitalise,noabbrev]{cleveref}

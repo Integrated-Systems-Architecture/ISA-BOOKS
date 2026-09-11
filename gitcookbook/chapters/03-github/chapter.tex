@@ -1,0 +1,127 @@
+\chapter{Working with GitHub}
+\label{ch:github}
+
+\chapabstract{\GitHub{} hosts \Git{} repositories and adds collaboration
+on top: pull requests, issues, and access control. This chapter covers
+the workflow you need to contribute to a shared repository.}
+
+\section{Remotes}
+
+A remote is a named reference to another copy of the repository. Cloning
+a repository creates one automatically, named \code{origin}.
+
+\begin{shcode}
+git remote -v                                # list remotes and their URLs
+git remote add origin git@github.com:user/repo.git
+git push -u origin main   # push, and remember this as the default upstream
+git push                  # afterwards, this alone is enough
+git fetch origin          # download commits, do not touch the working dir
+git pull                  # fetch, then merge into the current branch
+\end{shcode}
+
+\begin{tipbox}{SSH over HTTPS}
+An HTTPS remote (\code{https://github.com/...}) asks for a username and
+a personal access token on every push. An SSH remote
+(\code{git@github.com:...}) uses a key pair once configured
+(\code{ssh-keygen}, then add the public key under \GitHub{} \(\to\)
+Settings \(\to\) SSH and GPG keys) and never prompts again. Prefer SSH
+for any repository you push to regularly.
+\end{tipbox}
+
+\section{Forking versus branching}
+
+Two different ways to propose a change, depending on your access level.
+
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{You have write access} & \textbf{You do not}\\
+\midrule
+Create a branch directly in the shared repository. &
+  \textbf{Fork} the repository into your own account (a full server-side
+  copy), clone your fork, and work there.\\
+\bottomrule
+\end{tabularx}
+
+\begin{shcode}
+# after forking user/repo into your-name/repo on github.com
+git clone git@github.com:your-name/repo.git
+cd repo
+git remote add upstream git@github.com:user/repo.git   # the original
+git fetch upstream
+git merge upstream/main        # keep your fork up to date
+\end{shcode}
+
+\section{Pull requests}
+
+A \textbf{pull request} (PR) asks the maintainers of a repository to
+merge a branch (yours, or one in your fork) into theirs. It is where
+code review happens: comments, requested changes, and automated checks
+all attach to the PR, not to individual commits.
+
+\begin{enumerate}
+  \item Create a branch with a descriptive name:
+        \code{git switch -c fix/uart-parity}.
+  \item Commit your changes, then \code{git push -u origin
+        fix/uart-parity}.
+  \item On \GitHub{}, open a pull request from that branch into the
+        target branch (usually \code{main}).
+  \item Address review comments by committing more changes to the same
+        branch and pushing again; the PR updates automatically.
+  \item Once approved, merge it (or let a maintainer merge it) and
+        delete the branch.
+\end{enumerate}
+
+\begin{ruleofthumb}
+One pull request, one concern. A PR that fixes a bug, reformats
+unrelated code and adds a new feature is nearly impossible to review
+properly.
+\end{ruleofthumb}
+
+\begin{gotcha}{Diverged history after a rewritten branch}
+If a branch's history was rewritten upstream (a rebase, an
+\code{--amend} that was already pushed), a plain \code{git pull} will
+refuse or create a tangled merge. \code{git pull --rebase} replays your
+local commits on top of the new history instead; ask before force-pushing
+a shared branch, since it can overwrite other people's work.
+\end{gotcha}
+
+\section{Issues and project boards}
+
+\textbf{Issues} track bugs, tasks and questions independently of any
+particular commit. A commit message or PR description containing
+\code{Fixes \#12} automatically closes issue 12 when that commit lands
+on the default branch. Labels, milestones and project boards organise
+issues but are \GitHub{} features layered on top of \Git{} itself, not
+part of the repository history.
+
+\section{A minimal README}
+
+Every repository should have a top-level \file{README.md}, since
+\GitHub{} renders it automatically on the repository's front page.
+
+\begin{txtcode}
+# Project name
+
+One paragraph: what this is and why it exists.
+
+## Build
+    make all
+
+## Layout
+    src/     source files
+    test/    testbenches / unit tests
+\end{txtcode}
+
+\section{Checklist}
+\label{sec:github:checklist}
+
+\begin{itemize}
+  \item \code{origin} is the remote you cloned from; add \code{upstream}
+        when working from a fork.
+  \item Use SSH remotes for repositories you push to often.
+  \item One branch, one pull request, one concern.
+  \item Never force-push a branch other people are also working on
+        without asking first.
+  \item A short \file{README.md} and a \file{.gitignore} are the two
+        files every repository should start with.
+\end{itemize}

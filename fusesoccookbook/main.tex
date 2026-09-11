@@ -1,0 +1,50 @@
+% ===========================================================================
+%  FuseSoC, Vendoring & Makefiles -- A Quick Reference Manual
+%
+%  Build:   latexmk -pdf main.tex          (recommended)
+%  or:      pdflatex main && pdflatex main
+%
+%  Same structure and visual style as the other booklets under books/ (see
+%  gitcookbook/ for the closest sibling): every chapter lives in its own
+%  folder under chapters/, and `import' makes relative paths inside a
+%  chapter resolve against that chapter's folder.
+% ===========================================================================
+\documentclass[11pt,a4paper,twoside,openright]{book}
+
+\input{../_shared/preamble_lite/packages}
+\input{../_shared/preamble_lite/listings}
+\input{../_shared/preamble_lite/macros}
+
+\hypersetup{
+  pdftitle  = {FuseSoC, Vendoring, Makefiles \& Regtool: A Quick Reference Manual},
+  pdfauthor = {Luigi Giuffrida},
+  pdfsubject= {Reading and writing the lab .core files, Makefiles, and register descriptions},
+  pdfkeywords = {FuseSoC, vendoring, Makefile, EDA build systems, register\_interface, regtool},
+  colorlinks = true,
+  linkcolor  = codekey,
+  citecolor  = accent,
+  urlcolor   = accentalt,
+}
+
+\begin{document}
+
+\frontmatter
+\input{frontmatter/titlepage}
+
+\cleardoublepage
+\tableofcontents
+\cleardoublepage
+
+\mainmatter
+
+\subimport{chapters/01-fusesoc/}{chapter.tex}
+\subimport{chapters/02-vendoring/}{chapter.tex}
+\subimport{chapters/03-makefiles/}{chapter.tex}
+\subimport{chapters/04-regtool/}{chapter.tex}
+
+% ---------------------------------------------------------------------------
+\appendix
+% ---------------------------------------------------------------------------
+\subimport{backmatter/}{appendix-quickref.tex}
+
+\end{document}

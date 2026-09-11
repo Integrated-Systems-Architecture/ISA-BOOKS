@@ -1,0 +1,60 @@
+% ===========================================================================
+%  SystemVerilog for VHDL Designers -- The Example Cookbook
+%
+%  Build:   latexmk -pdf main.tex          (recommended)
+%  or:      pdflatex main && makeindex main && pdflatex main && pdflatex main
+%
+%  One of four companion booklets (Design, Verification, Simulation, Example
+%  -- this one) split out of the original SystemVerilog cookbook. A single
+%  CORDIC rotator worked through in VHDL, in SystemVerilog, and with six
+%  testbenches in three languages.
+%  Cross-references to material now living in a sibling booklet are named
+%  rather than numbered (\refdesignbook and friends, in preamble/macros.tex).
+% ===========================================================================
+\documentclass[11pt,a4paper,twoside,openright]{book}
+
+\input{../_shared/preamble/packages}
+\input{../_shared/preamble/listings}
+\input{../_shared/preamble/macros}
+
+\makeindex
+
+\graphicspath{%
+  {figures/}%
+  {chapters/10-case-study/figures/}%
+}
+
+\hypersetup{
+  pdftitle  = {SystemVerilog for VHDL Designers: The Example Cookbook},
+  pdfauthor = {Luigi Giuffrida},
+  pdfsubject= {A complete worked CORDIC rotator example},
+  pdfkeywords = {SystemVerilog, VHDL, CORDIC, worked example},
+  colorlinks = true,
+  linkcolor  = codekey,
+  citecolor  = accent,
+  urlcolor   = accentalt,
+}
+
+\begin{document}
+
+\frontmatter
+\input{frontmatter/titlepage}
+\input{frontmatter/preface}
+\input{frontmatter/howtoread}
+
+\cleardoublepage
+\tableofcontents
+\cleardoublepage
+
+\mainmatter
+
+\subimport{chapters/10-case-study/}{chapter.tex}
+
+\backmatter
+\input{backmatter/bibliography}
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Index}
+\printindex
+
+\end{document}
