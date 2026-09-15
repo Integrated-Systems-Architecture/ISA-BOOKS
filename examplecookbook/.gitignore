@@ -14,7 +14,6 @@
 *.synctex.gz
 *.bbl
 *.blg
-main.pdf
 
 # CORDIC build products
 code/cordic/build/
