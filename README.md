@@ -27,16 +27,37 @@ templates under `_shared/`, the layout inside each booklet, and the rules for
 cross-references between booklets. Authors should also read
 [`_shared/STYLE.md`](_shared/STYLE.md).
 
-## Use as a submodule
+## The CORDIC example
 
-This repository is vendored into the lab repository
-[`ISA-LAB`](https://github.com/Integrated-Systems-Architecture/ISA-LAB) as the
-`books/` submodule:
+`examplecookbook/code/cordic/` holds the worked example's sources (VHDL,
+SystemVerilog, C++, Python) and a `Makefile` that runs every testbench the
+booklet discusses. Run it from that folder:
+
+| Target | What it does |
+| --- | --- |
+| `make lint` | Verilator lint of the synthesisable SystemVerilog. Run it first, every time. |
+| `make sv` | SystemVerilog class testbench under Verilator |
+| `make cpp` | plain C++ testbench under Verilator |
+| `make uvmlike` | UVM-shaped C++ environment under Verilator |
+| `make bitexact` | Verilator run checked against the Python model, on generated vectors |
+| `make vhdl` | VHDL testbench under QuestaSim/ModelSim |
+| `make cocotb` | cocotb testsuite (VHDL); `make cocotb-sv` for the SystemVerilog one |
+| `make vectors` | regenerate the stimulus and expected vectors with Python |
+| `make model` | run the Python reference model on its own |
+| `make waves` | as `make sv`, with a VCD |
+| `make all` | `lint sv cpp uvmlike bitexact` |
+| `make clean` | remove `build/`, cocotb output and VCDs |
+
+`make all` leaves out `vhdl` and `cocotb` on purpose: they need tools that may
+not be installed. Run those explicitly.
+
+Knobs, all overridable on the command line: `N_RANDOM` (random vectors,
+default 300), `SEED` (default 1), and the tool names `VERILATOR`, `VCOM`,
+`VSIM`, `VLIB`, `PYTHON`. For example:
 
 ```sh
-git clone --recurse-submodules https://github.com/Integrated-Systems-Architecture/ISA-LAB.git
-# already cloned:
-git submodule update --init books
+make sv N_RANDOM=5000 SEED=7
 ```
 
-Commit changes here first, push, then update the gitlink in `ISA-LAB`.
+Everything is built under `build/`, which is gitignored. See
+`examplecookbook/code/cordic/README.md` for what each source file is.
