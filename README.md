@@ -12,10 +12,20 @@ Architecture labs. Six self-contained booklets, each built on its own:
 | `gitcookbook/` | Git & GitHub — A Quick Reference Manual |
 | `fusesoccookbook/` | FuseSoC, Vendoring, Makefiles & Regtool — A Quick Reference Manual |
 
-A prebuilt `main.pdf` is committed in each folder, so readers do not need a TeX
-installation.
+The built PDFs are committed in this folder, one per booklet, named after the
+title on its title page, so readers do not need a TeX installation. Each
+booklet's own `main.pdf` is a build product and is gitignored.
 
 ## Building
+
+```sh
+make                 # build all six, copy the PDFs here
+make gitcookbook     # one booklet only
+make clean           # drop the LaTeX aux files, keep the PDFs
+make distclean       # also drop the PDFs
+```
+
+Or by hand, one booklet at a time:
 
 ```sh
 cd <booklet>/

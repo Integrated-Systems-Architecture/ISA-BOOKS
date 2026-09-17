@@ -28,3 +28,6 @@ code/cordic/python/__pycache__/
 
 # archives
 *.tar.gz
+
+# Built PDF; the copy in the repo root is the one that is committed
+main.pdf
