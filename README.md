@@ -16,6 +16,13 @@ The built PDFs are committed in this folder, one per booklet, named after the
 title on its title page, so readers do not need a TeX installation. Each
 booklet's own `main.pdf` is a build product and is gitignored.
 
+## Reading list
+
+[`READING.md`](READING.md) collects papers on reference accelerators — SoC
+integration, architectures for each lab application (rxchain, tinydnn,
+tinyformer, pqcrypto), fixed point, and the optimization techniques of Lab 2 —
+with a note on what to take from each. Links go to IEEE Xplore.
+
 ## Building
 
 ```sh
